@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables (secrets)
+.env
+.env.local
+.env.*.local
+
+# ML training data & model binaries (large files)
+backend/data/
+backend/trained_models/*.joblib
+
+# Logs
+*.log
+/tmp/
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Claude internal
+.claude/
+
+# Docker
+*.tar

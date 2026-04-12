@@ -1,0 +1,38 @@
+{
+  "trained_at": "2026-04-12T10:54:32.198410+00:00",
+  "n_train": 1993,
+  "n_val": 499,
+  "n_locations": 5,
+  "locations": [
+    "San Francisco",
+    "Sydney",
+    "Tel Aviv",
+    "Cape Town",
+    "London"
+  ],
+  "rmse": 33.1933,
+  "mae": 28.5374,
+  "spearman_r": -0.0266,
+  "spearman_p": 0.553575,
+  "feature_names": [
+    "cloud_cover_low",
+    "cloud_cover_mid",
+    "cloud_cover_high",
+    "cloud_cover",
+    "log_visibility_m",
+    "relative_humidity",
+    "dewpoint_c",
+    "log1p_precipitation",
+    "wind_speed_kmh",
+    "pressure_hpa",
+    "aerosol_optical_depth",
+    "sin_month",
+    "cos_month",
+    "sun_elevation_deg",
+    "physics_score",
+    "horizon_obstruction_deg"
+  ],
+  "feature_importances": {},
+  "blend_alpha": 0.4,
+  "algorithm_version": "1.0.0"
+}
