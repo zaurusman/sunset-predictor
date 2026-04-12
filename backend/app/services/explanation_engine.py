@@ -7,8 +7,13 @@ score (most impactful first), capped at 6 items.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Optional
+
 from app.schemas.prediction import PhysicsBreakdown
 from app.schemas.weather import WeatherSnapshot
+
+if TYPE_CHECKING:
+    from app.services.scoring_engine import WindowResult
 
 
 class ExplanationEngine:
@@ -16,6 +21,8 @@ class ExplanationEngine:
     Generates 3–6 natural-language reasons from a scoring breakdown and weather.
 
     Rules are simple threshold-based mappings — easy to audit and extend.
+    Accepts an optional WindowResult so reasons can reference the best
+    viewing moment and post-rain clearing signals.
     """
 
     def generate(
@@ -23,6 +30,7 @@ class ExplanationEngine:
         weather: WeatherSnapshot,
         breakdown: PhysicsBreakdown,
         category: str,
+        window_result: Optional["WindowResult"] = None,
     ) -> list[str]:
         """
         Return a list of 3–6 ordered explanation strings.
@@ -30,6 +38,23 @@ class ExplanationEngine:
         Each string is a complete sentence suitable for display in the UI.
         """
         candidates: list[tuple[float, str]] = []
+
+        # -----------------------------------------------------------------
+        # Window timing hint (when multiple points were scored)
+        # -----------------------------------------------------------------
+        if window_result is not None and len(window_result.window_scores) > 1:
+            best = window_result.best_label
+            if best == "+15m":
+                candidates.append((75.0, "Best viewing is likely about 15 minutes after sunset — stay for the afterglow."))
+            elif best == "+30m":
+                candidates.append((72.0, "Conditions may improve after sunset — the afterglow could be the highlight."))
+            elif best == "-15m":
+                candidates.append((70.0, "The best colour may arrive just before the sun dips below the horizon."))
+            # For "sunset" we skip the timing hint — it's the default expectation
+
+            # Volatile window note
+            if window_result.volatility_penalty > 4.0:
+                candidates.append((30.0, "Conditions look inconsistent across the window — confidence is moderate."))
 
         # -----------------------------------------------------------------
         # Cloud Quality reasons
@@ -115,6 +140,32 @@ class ExplanationEngine:
                 (100 - mst, "Light precipitation near sunset may dampen colour intensity.")
             )
 
+        # Post-rain clearing bonus explanation
+        if (
+            weather.precipitation_mm < 0.1
+            and weather.precipitation_last_3h_mm is not None
+            and weather.precipitation_last_3h_mm > 0.5
+        ):
+            candidates.append(
+                (65.0, "Recent rain followed by clearing can produce especially vivid afterglow colour.")
+            )
+        elif (
+            weather.precipitation_mm < 0.1
+            and weather.pressure_trend_hpa_3h is not None
+            and weather.pressure_trend_hpa_3h > 1.5
+        ):
+            candidates.append(
+                (55.0, "Rising pressure signals improving conditions heading into sunset.")
+            )
+        elif (
+            weather.precipitation_mm < 0.1
+            and weather.cloud_total_trend_3h is not None
+            and weather.cloud_total_trend_3h < -15.0
+        ):
+            candidates.append(
+                (50.0, "Clouds have been clearing over the past few hours — good sign.")
+            )
+
         if weather.relative_humidity >= 85 and weather.precipitation_mm < 0.1:
             candidates.append(
                 (100 - mst, "Very high humidity may create a milky haze around the horizon.")
@@ -145,10 +196,8 @@ class ExplanationEngine:
         # -----------------------------------------------------------------
         # Sort by importance (descending) and deduplicate / cap
         # -----------------------------------------------------------------
-        # Sort by weight descending
         candidates.sort(key=lambda x: x[0], reverse=True)
 
-        # Deduplicate (keep first occurrence per sentence prefix)
         seen_prefixes: set[str] = set()
         reasons: list[str] = []
         for _, sentence in candidates:
@@ -159,7 +208,6 @@ class ExplanationEngine:
             if len(reasons) == 6:
                 break
 
-        # Always return at least 3 reasons
         if len(reasons) < 3:
             reasons += self._fallback_reasons(weather, breakdown, category)[: 3 - len(reasons)]
 

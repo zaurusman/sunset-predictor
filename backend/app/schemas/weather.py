@@ -47,6 +47,34 @@ class WeatherSnapshot(BaseModel):
         description="True when aerosol_optical_depth was estimated from visibility/humidity proxy",
     )
 
+    # ---------------------------------------------------------------------------
+    # Optional trend fields — populated by the weather service when hourly history
+    # is available (forecast and recent-past paths only; None for archive).
+    # Used by the moisture scorer to detect post-rain clearing.
+    # ---------------------------------------------------------------------------
+    precipitation_last_3h_mm: Optional[float] = Field(
+        default=None, ge=0,
+        description="Total precipitation in the 3 hours prior to sunset (mm)",
+    )
+    pressure_trend_hpa_3h: Optional[float] = Field(
+        default=None,
+        description="Surface pressure change over the 3 hours prior to sunset (hPa; positive = rising)",
+    )
+    cloud_total_trend_3h: Optional[float] = Field(
+        default=None,
+        description="Total cloud cover change over the 3 hours prior to sunset (%; negative = clearing)",
+    )
+    visibility_trend_3h_m: Optional[float] = Field(
+        default=None,
+        description="Visibility change over the 3 hours prior to sunset (m; positive = improving)",
+    )
+
+    # Window label: set when this snapshot is one of several window points
+    timestamp_label: Optional[str] = Field(
+        default=None,
+        description="Window position label: '-15m' | 'sunset' | '+15m' | '+30m'",
+    )
+
 
 class WeatherOverride(BaseModel):
     """
