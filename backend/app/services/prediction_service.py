@@ -122,7 +122,7 @@ class PredictionService:
 
         final_score = self._ml.blend(window_result.final_score, ml_score)
         if ml_score is not None:
-            ml_adjustment = round(final_score - window_result.final_score, 2)
+           ml_adjustment = round(final_score - window_result.final_score, 2)
 
         category = self._scoring.score_to_category(final_score)
 
@@ -146,6 +146,13 @@ class PredictionService:
             window_result=window_result,
         )
 
+        # Build a breakdown whose weighted_physics_score matches the displayed
+        # score (final_score) rather than the raw single-snapshot score of the
+        # best window point.  Component sub-scores still come from the best
+        # window point so they correctly explain WHY the sky looks the way it does.
+        breakdown = primary_result.to_physics_breakdown()
+        breakdown.weighted_physics_score = round(final_score, 1)
+
         return PredictResponse(
             beauty_score_0_100=round(final_score, 1),
             category=category,
@@ -160,7 +167,7 @@ class PredictionService:
             algorithm_version=self._settings.ALGORITHM_VERSION,
             ml_model_used=self._ml.is_loaded(),
             ml_adjustment=ml_adjustment,
-            physics_component_breakdown=primary_result.to_physics_breakdown(),
+            physics_component_breakdown=breakdown,
             weather_summary=_build_weather_summary(primary_weather),
             location={"latitude": lat, "longitude": lon},
             requested_at=utcnow(),
