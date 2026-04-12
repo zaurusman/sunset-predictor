@@ -96,6 +96,20 @@ class PredictResponse(BaseModel):
     best_viewing_window_start: datetime
     best_viewing_window_end: datetime
 
+    # Window-based scoring results
+    best_window_point: str = Field(
+        default="sunset",
+        description="The window position that scored highest: '-15m' | 'sunset' | '+15m' | '+30m'",
+    )
+    window_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-window-point physics scores, keyed by label",
+    )
+    go_outside_recommendation: bool = Field(
+        default=False,
+        description="True when conditions are worth going outside for",
+    )
+
     # Metadata
     algorithm_version: str
     ml_model_used: bool

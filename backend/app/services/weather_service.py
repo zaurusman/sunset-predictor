@@ -187,6 +187,69 @@ class WeatherService:
     # Archive (historical)
     # ------------------------------------------------------------------
 
+    async def get_window_snapshots(
+        self,
+        lat: float,
+        lon: float,
+        target_date: date,
+        sunset_time: datetime,
+    ) -> list[WeatherSnapshot]:
+        """
+        Return four WeatherSnapshot objects covering the sunset viewing window:
+          "-15m"  → sunset − 15 min
+          "sunset" → exact sunset time
+          "+15m"  → sunset + 15 min
+          "+30m"  → sunset + 30 min
+
+        All four share a single API fetch.  Because Open-Meteo provides hourly
+        data, adjacent window points may resolve to the same hourly bucket —
+        that is acceptable; the variation across the window still reflects real
+        hourly changes when conditions are evolving.
+
+        Trend fields (precipitation_last_3h_mm, pressure_trend_hpa_3h,
+        cloud_total_trend_3h, visibility_trend_3h_m) are extracted from the
+        3 hours prior to sunset and injected into every snapshot so the moisture
+        scorer can detect post-rain clearing.
+        """
+        from datetime import timedelta
+
+        today = datetime.now(UTC).date()
+        days_ago = (today - target_date).days
+
+        # Single raw fetch for all window points
+        if target_date < today:
+            if days_ago <= 7:
+                weather_data = await self._fetch_forecast_raw(lat, lon, days=1, past_days=days_ago + 1)
+                aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
+            else:
+                weather_data = await self._fetch_archive_raw(lat, lon, target_date)
+                aq_data = None
+        else:
+            days_ahead = (target_date - today).days + 1
+            weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
+            aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
+
+        trends = self._extract_trends(weather_data, sunset_time)
+
+        window_offsets: list[tuple[str, timedelta]] = [
+            ("-15m",   timedelta(minutes=-15)),
+            ("sunset", timedelta(minutes=0)),
+            ("+15m",   timedelta(minutes=15)),
+            ("+30m",   timedelta(minutes=30)),
+        ]
+
+        snapshots: list[WeatherSnapshot] = []
+        for label, offset in window_offsets:
+            target_time = sunset_time + offset
+            snap = self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, target_time)
+            # Inject trend fields and window label (model_dump + reconstruct keeps immutability)
+            snap_data = snap.model_dump()
+            snap_data.update(trends)
+            snap_data["timestamp_label"] = label
+            snapshots.append(WeatherSnapshot(**snap_data))
+
+        return snapshots
+
     async def get_historical_snapshot(
         self, lat: float, lon: float, target_date: date
     ) -> WeatherSnapshot:
@@ -374,6 +437,48 @@ class WeatherService:
             data_source="archive" if "archive" in str(weather_data.get("generationtime_ms", "")) else "forecast",
             aerosol_is_estimated=aerosol_is_estimated,
         )
+
+    def _extract_trends(
+        self, weather_data: dict, sunset_time: datetime
+    ) -> dict:
+        """
+        Compute 3-hour trend fields from hourly data prior to sunset.
+
+        Looks at the 3 hours immediately before the sunset hour and computes:
+        - precipitation_last_3h_mm  : total precip in those 3 hours
+        - pressure_trend_hpa_3h     : pressure[sunset] − pressure[sunset−3h]
+        - cloud_total_trend_3h      : total cloud[sunset] − cloud[sunset−3h]
+        - visibility_trend_3h_m     : visibility[sunset] − visibility[sunset−3h]
+
+        Returns an empty dict when no hourly data is available (archive fallback).
+        All fields are optional in WeatherSnapshot so missing is safe.
+        """
+        hourly = weather_data.get("hourly", {})
+        time_strs: list[str] = hourly.get("time", [])
+        if not time_strs:
+            return {}
+
+        times = [datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs]
+        sunset_idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+        past_idx = max(0, sunset_idx - 3)
+
+        def get(key: str, idx: int, default: float = 0.0) -> float:
+            vals = hourly.get(key, [])
+            if idx < len(vals) and vals[idx] is not None:
+                return float(vals[idx])
+            return default
+
+        precip_sum = sum(get("precipitation", i) for i in range(past_idx, sunset_idx))
+        pressure_trend = get("surface_pressure", sunset_idx) - get("surface_pressure", past_idx)
+        cloud_trend = get("cloud_cover", sunset_idx) - get("cloud_cover", past_idx)
+        vis_trend = get("visibility", sunset_idx) - get("visibility", past_idx)
+
+        return {
+            "precipitation_last_3h_mm": round(precip_sum, 2),
+            "pressure_trend_hpa_3h": round(pressure_trend, 1),
+            "cloud_total_trend_3h": round(cloud_trend, 1),
+            "visibility_trend_3h_m": round(vis_trend, 0),
+        }
 
     # ------------------------------------------------------------------
     # Override application
