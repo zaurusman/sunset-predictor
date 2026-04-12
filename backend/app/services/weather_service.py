@@ -210,8 +210,15 @@ class WeatherService:
         cloud_total_trend_3h, visibility_trend_3h_m) are extracted from the
         3 hours prior to sunset and injected into every snapshot so the moisture
         scorer can detect post-rain clearing.
+
+        Results are cached for the configured TTL to avoid redundant API calls
+        and to keep the score stable within a single server session.
         """
-        from datetime import timedelta
+        cache_key = TTLCache.make_key("window_snaps", lat, lon, str(target_date))
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.debug("Cache hit for window_snaps lat=%.4f lon=%.4f date=%s", lat, lon, target_date)
+            return cached
 
         today = datetime.now(UTC).date()
         days_ago = (today - target_date).days
@@ -229,26 +236,49 @@ class WeatherService:
             weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
             aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
 
-        trends = self._extract_trends(weather_data, sunset_time)
-
-        window_offsets: list[tuple[str, timedelta]] = [
-            ("-15m",   timedelta(minutes=-15)),
-            ("sunset", timedelta(minutes=0)),
-            ("+15m",   timedelta(minutes=15)),
-            ("+30m",   timedelta(minutes=30)),
-        ]
-
-        snapshots: list[WeatherSnapshot] = []
-        for label, offset in window_offsets:
-            target_time = sunset_time + offset
-            snap = self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, target_time)
-            # Inject trend fields and window label (model_dump + reconstruct keeps immutability)
-            snap_data = snap.model_dump()
-            snap_data.update(trends)
-            snap_data["timestamp_label"] = label
-            snapshots.append(WeatherSnapshot(**snap_data))
-
+        snapshots = self._extract_window_snapshots_from_raw(
+            weather_data, aq_data, lat, lon, sunset_time
+        )
+        self._cache.set(cache_key, snapshots)
         return snapshots
+
+    async def get_forecast_range_windows(
+        self,
+        lat: float,
+        lon: float,
+        days: int,
+    ) -> list[tuple[date, list[WeatherSnapshot]]]:
+        """
+        Return (date, window_snapshots) pairs for the next *days* days.
+
+        Uses a single Open-Meteo batch call for all days so the forecast
+        endpoint makes the same number of API requests as before, while each
+        day now gets window-level (4-point) scoring instead of a single snapshot.
+        Results are cached for the configured TTL.
+        """
+        cache_key = TTLCache.make_key("forecast_range_windows", lat, lon, days)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        today = datetime.now(UTC).date()
+        weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+        aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
+
+        results: list[tuple[date, list[WeatherSnapshot]]] = []
+        for offset in range(days):
+            d = today + timedelta(days=offset)
+            try:
+                sunset_time = self._astro.get_sunset_time(lat, lon, d)
+                window_snaps = self._extract_window_snapshots_from_raw(
+                    weather_data, aq_data, lat, lon, sunset_time
+                )
+                results.append((d, window_snaps))
+            except Exception as exc:
+                logger.warning("Failed to build window snapshots for %s: %s", d, exc)
+
+        self._cache.set(cache_key, results)
+        return results
 
     async def get_historical_snapshot(
         self, lat: float, lon: float, target_date: date
@@ -437,6 +467,41 @@ class WeatherService:
             data_source="archive" if "archive" in str(weather_data.get("generationtime_ms", "")) else "forecast",
             aerosol_is_estimated=aerosol_is_estimated,
         )
+
+    def _extract_window_snapshots_from_raw(
+        self,
+        weather_data: dict,
+        aq_data: Optional[dict],
+        lat: float,
+        lon: float,
+        sunset_time: datetime,
+    ) -> list[WeatherSnapshot]:
+        """
+        Build four window snapshots from already-fetched raw API data.
+
+        Shared by get_window_snapshots() (single-day predict) and
+        get_forecast_range_windows() (multi-day forecast) so both paths
+        use identical extraction logic.
+        """
+        trends = self._extract_trends(weather_data, sunset_time)
+
+        window_offsets: list[tuple[str, timedelta]] = [
+            ("-15m",   timedelta(minutes=-15)),
+            ("sunset", timedelta(minutes=0)),
+            ("+15m",   timedelta(minutes=15)),
+            ("+30m",   timedelta(minutes=30)),
+        ]
+
+        snapshots: list[WeatherSnapshot] = []
+        for label, offset in window_offsets:
+            target_time = sunset_time + offset
+            snap = self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, target_time)
+            snap_data = snap.model_dump()
+            snap_data.update(trends)
+            snap_data["timestamp_label"] = label
+            snapshots.append(WeatherSnapshot(**snap_data))
+
+        return snapshots
 
     def _extract_trends(
         self, weather_data: dict, sunset_time: datetime

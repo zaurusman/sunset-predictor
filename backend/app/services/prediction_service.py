@@ -122,7 +122,7 @@ class PredictionService:
 
         final_score = self._ml.blend(window_result.final_score, ml_score)
         if ml_score is not None:
-            ml_adjustment = round(final_score - window_result.final_score, 2)
+           ml_adjustment = round(final_score - window_result.final_score, 2)
 
         category = self._scoring.score_to_category(final_score)
 
@@ -146,6 +146,13 @@ class PredictionService:
             window_result=window_result,
         )
 
+        # Build a breakdown whose weighted_physics_score matches the displayed
+        # score (final_score) rather than the raw single-snapshot score of the
+        # best window point.  Component sub-scores still come from the best
+        # window point so they correctly explain WHY the sky looks the way it does.
+        breakdown = primary_result.to_physics_breakdown()
+        breakdown.weighted_physics_score = round(final_score, 1)
+
         return PredictResponse(
             beauty_score_0_100=round(final_score, 1),
             category=category,
@@ -160,7 +167,7 @@ class PredictionService:
             algorithm_version=self._settings.ALGORITHM_VERSION,
             ml_model_used=self._ml.is_loaded(),
             ml_adjustment=ml_adjustment,
-            physics_component_breakdown=primary_result.to_physics_breakdown(),
+            physics_component_breakdown=breakdown,
             weather_summary=_build_weather_summary(primary_weather),
             location={"latitude": lat, "longitude": lon},
             requested_at=utcnow(),
@@ -175,15 +182,15 @@ class PredictionService:
         lat, lon = request.latitude, request.longitude
         horizon_deg = request.horizon_obstruction_deg
 
-        # Fetch weather snapshots for all days in one batch
-        daily_snapshots = await self._weather.get_forecast_range(
+        # Fetch window snapshots for all days in one batch API call
+        daily_window_snaps = await self._weather.get_forecast_range_windows(
             lat, lon, days=request.days
         )
 
-        # Score each day concurrently
+        # Score each day concurrently using the same window algorithm as predict()
         tasks = [
-            self._score_day(lat, lon, d, snap, horizon_deg)
-            for d, snap in daily_snapshots
+            self._score_day(lat, lon, d, window_snaps, horizon_deg)
+            for d, window_snaps in daily_window_snaps
         ]
         day_forecasts = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -210,41 +217,57 @@ class PredictionService:
         lat: float,
         lon: float,
         target_date: date,
-        weather: WeatherSnapshot,
+        window_snaps: list[WeatherSnapshot],
         horizon_deg: float,
     ) -> DayForecast:
         sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
         window_start, window_end = self._astro.get_best_viewing_window(sunset_time)
 
-        result = self._scoring.score(weather, horizon_deg)
+        # Score all four window snapshots — mirrors predict() window path
+        scored: list[tuple[str, float]] = []
+        snap_results: dict[str, tuple] = {}
+        for snap in window_snaps:
+            r = self._scoring.score(snap, horizon_deg)
+            label = snap.timestamp_label or "sunset"
+            scored.append((label, r.physics_score))
+            snap_results[label] = (r, snap)
+
+        window_result = self._scoring.score_window(scored)
+        best_label = window_result.best_label
+        primary_result, primary_weather = snap_results[best_label]
 
         ml_score: Optional[float] = None
         if self._ml.is_loaded():
             ml_score = self._ml.predict_calibrated_score(
-                weather=weather,
-                physics_score=result.physics_score,
+                weather=primary_weather,
+                physics_score=window_result.final_score,
                 target_date_or_month=target_date.month,
                 horizon_obstruction_deg=horizon_deg,
             )
 
-        final_score = self._ml.blend(result.physics_score, ml_score)
+        final_score = self._ml.blend(window_result.final_score, ml_score)
         category = self._scoring.score_to_category(final_score)
         confidence = self._scoring.compute_confidence(
-            weather=weather,
+            weather=primary_weather,
             component_scores={
-                "cloud_quality": result.cloud_quality,
-                "atmosphere": result.atmosphere,
-                "moisture": result.moisture,
-                "horizon": result.horizon,
+                "cloud_quality": primary_result.cloud_quality,
+                "atmosphere": primary_result.atmosphere,
+                "moisture": primary_result.moisture,
+                "horizon": primary_result.horizon,
             },
             physics_score=final_score,
             has_ml=self._ml.is_loaded(),
+            window_scores=list(window_result.window_scores.values()),
         )
         reasons = self._explanation.generate(
-            weather=weather,
-            breakdown=result.to_physics_breakdown(),
+            weather=primary_weather,
+            breakdown=primary_result.to_physics_breakdown(),
             category=category,
+            window_result=window_result,
         )
+
+        breakdown = primary_result.to_physics_breakdown()
+        breakdown.weighted_physics_score = round(final_score, 1)
 
         return DayForecast(
             date=target_date,
@@ -254,8 +277,11 @@ class PredictionService:
             sunset_time=sunset_time,
             best_viewing_window_start=window_start,
             best_viewing_window_end=window_end,
+            best_window_point=window_result.best_label,
+            window_scores={k: round(v, 1) for k, v in window_result.window_scores.items()},
+            go_outside_recommendation=window_result.go_outside,
             reasons=reasons,
-            physics_component_breakdown=result.to_physics_breakdown(),
+            physics_component_breakdown=breakdown,
             ml_model_used=self._ml.is_loaded(),
         )
 
