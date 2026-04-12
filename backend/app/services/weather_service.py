@@ -447,8 +447,13 @@ class WeatherService:
             aerosol_od = max(0.05, min(0.8, (1.0 - vis_km / 40.0) * 0.4 + humidity / 100.0 * 0.15))
             aerosol_is_estimated = True
 
-        # Solar elevation at the sunset hour (informational)
-        sun_elev = self._astro.get_solar_elevation(lat, lon, times[idx])
+        # Solar elevation at the ACTUAL requested time (sunset_time), not at the
+        # snapped hourly bucket.  This matters for window snapshots: the bucket
+        # for "+15m after sunset" may be the same hour as "sunset", giving
+        # both the same (wrong) sun elevation.  Using the real target time
+        # ensures each window point gets the correct elevation for the
+        # afterglow bell-curve calculation.
+        sun_elev = self._astro.get_solar_elevation(lat, lon, sunset_time)
 
         return WeatherSnapshot(
             cloud_low=cloud_low,

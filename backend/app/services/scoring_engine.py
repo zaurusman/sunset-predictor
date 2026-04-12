@@ -319,11 +319,29 @@ class ScoringEngine:
         upper_strength = clamp((high_pct + mid_pct * 0.5) / 60.0)
         effective_low_penalty = low_penalty * (1.0 - upper_strength * 0.35)
 
-        # --- Overcast penalty: kicks in at 82%, saturates at 100% ---
-        if total_pct <= 82.0:
+        # --- Blocking clouds: the overcast criterion must be TYPE-AWARE ---
+        # Low stratus fully blocks the sun/light path; mid clouds partially block;
+        # high cirrus barely blocks at all — it diffuses rather than occludes.
+        # A 97 % cirrus sky is visually open and is excellent for afterglow;
+        # a 97 % stratus sky is the opposite.  Using total cloud cover to trigger
+        # the overcast penalty treats these identically, which is wrong.
+        blocking_clouds = low_pct + mid_pct * 0.6  # high clouds have weight 0
+
+        # --- Overcast penalty: driven by BLOCKING (low+mid) clouds, not total ---
+        # Kicks in at blocking > 70, saturates at blocking = 100.
+        if blocking_clouds <= 70.0:
             overcast_penalty = 0.0
         else:
-            overcast_penalty = clamp((total_pct - 82.0) / 18.0 * 78.0)
+            overcast_penalty = clamp((blocking_clouds - 70.0) / 30.0 * 78.0)
+
+        # --- Cirrus-sheet floor: when sky is nearly blocking-cloud-free ---
+        # A full cirrus layer (high ≈ 100 %, low ≈ 0 %) still provides a
+        # colour canvas and should not score as poorly as the bell-curve tail
+        # at 97 % suggests (~18 pts).  Set a floor of high_pct / 100 × 45 pts
+        # so that a dense cirrus deck earns at least 45 pts as a base canvas.
+        if blocking_clouds < 30.0:
+            cirrus_floor = clamp(high_pct / 100.0 * 45.0)
+            high_s = max(high_s, cirrus_floor)
 
         # Combine upper-layer colour potential, suppressed by effective low penalty
         base = (high_s * 0.60 + mid_s * 0.40) * (1.0 - effective_low_penalty / 175.0)
@@ -335,13 +353,14 @@ class ScoringEngine:
             base *= 0.62 + 0.38 * (total_pct / 15.0)
 
         # --- Afterglow enhancement (sun below horizon only) ---
-        # Conditions: sun < 0°, meaningful high clouds present, not overcast.
-        # The boost is conditional and physically motivated — it does NOT apply
-        # to clear skies or overcast skies, only to high-cloud canvases.
+        # Conditions: sun < 0°, meaningful high clouds present, sky not
+        # blocked from below (blocking_clouds < 70).  We use blocking_clouds
+        # here (not total_pct) so that a pure cirrus overcast — which is an
+        # ideal afterglow canvas — still receives the boost.
         if (
             sun_elevation_deg < 0.0
             and high_pct >= 15.0
-            and total_pct < 82.0
+            and blocking_clouds < 70.0
         ):
             # Bell curve peaked at −3° (sigma 2°): models limb-illumination intensity
             elev_factor = math.exp(
@@ -390,8 +409,11 @@ class ScoringEngine:
             return 0.0
         if cloud_high < 15.0:
             return 0.0  # No canvas — limb light has nothing to paint on
-        if cloud_total >= 85.0:
-            return 0.0  # Overcast diffuses all structure; no vivid colour
+        # Block by low+mid overcast only — a pure cirrus overcast (high=97, low=0)
+        # is an ideal afterglow canvas, not a blocking layer.
+        blocking = cloud_low + (cloud_total - cloud_high) * 0.6
+        if blocking >= 70.0:
+            return 0.0
 
         # Elevation bell curve: peak at −3°, FWHM ≈ 4.7° (sigma 2°)
         elev_factor = math.exp(

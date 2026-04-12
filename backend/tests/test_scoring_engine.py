@@ -101,12 +101,36 @@ def test_heavy_low_cloud_reduces_score(scoring_engine):
     assert result_high.physics_score < result_low.physics_score
 
 
-def test_overcast_penalty_starts_at_82_pct():
-    """Overcast penalty should not kick in until total cloud > 82%."""
+def test_overcast_penalty_is_type_aware():
+    """
+    The overcast penalty must be driven by LOW and MID cloud coverage, not total.
+
+    Physical reasoning:
+    - Low stratus at 90 % blocks all light near the horizon — very bad.
+    - High cirrus at 90 % (with 0 % low) diffuses light but keeps the sky open
+      for colour.  After sunset it illuminates from below — potentially excellent.
+
+    Scenario A: stratus-dominated overcast (heavy low+mid, little high)
+    Scenario B: cirrus-dominated overcast (heavy high only, no low)
+    Scenario A must score significantly lower than Scenario B.
+    """
     engine = ScoringEngine()
-    score_80 = engine.cloud_quality_score(5.0, 10.0, 60.0, 80.0)
-    score_90 = engine.cloud_quality_score(5.0, 10.0, 60.0, 90.0)
-    assert score_80 > score_90, "90% total should score lower than 80% due to overcast penalty"
+
+    # Scenario A: low-cloud overcast — genuinely bad
+    score_stratus = engine.cloud_quality_score(65.0, 40.0, 10.0, 85.0)
+
+    # Scenario B: pure cirrus overcast — bad for sunset drama but not blocking
+    score_cirrus = engine.cloud_quality_score(0.0, 0.0, 97.0, 97.0)
+
+    assert score_cirrus > score_stratus, (
+        f"Cirrus overcast ({score_cirrus:.1f}) should score above stratus overcast ({score_stratus:.1f})"
+    )
+    assert score_cirrus >= 35.0, (
+        f"Cirrus overcast should not be crushed; got {score_cirrus:.1f}"
+    )
+    assert score_stratus < 30.0, (
+        f"Stratus overcast should score poorly; got {score_stratus:.1f}"
+    )
 
 
 def test_cloud_quality_bell_curve_peak():
