@@ -70,6 +70,10 @@ class ScoringResult:
     physics_score: float  # weighted average
     confidence: float
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
+    # Afterglow potential at this snapshot's sun elevation.
+    # Non-zero only when sun < 0° and high clouds are present.
+    # Stored here for transparency / explanation; already baked into cloud_quality.
+    afterglow: float = 0.0
 
     def to_physics_breakdown(self) -> PhysicsBreakdown:
         return PhysicsBreakdown(
@@ -79,6 +83,7 @@ class ScoringResult:
             horizon_score=round(self.horizon, 1),
             weighted_physics_score=round(self.physics_score, 1),
             component_weights=self.weights,
+            afterglow_score=round(self.afterglow, 1) if self.afterglow > 0 else None,
         )
 
 
@@ -123,11 +128,14 @@ class ScoringEngine:
         Returns a ScoringResult containing per-component scores, the weighted
         physics score, and a confidence estimate.
         """
+        sun_elev = weather.sun_elevation_deg
+
         cq = self.cloud_quality_score(
             weather.cloud_low,
             weather.cloud_mid,
             weather.cloud_high,
             weather.cloud_total,
+            sun_elevation_deg=sun_elev,
         )
         atm = self.atmosphere_score(
             weather.visibility_m,
@@ -152,6 +160,17 @@ class ScoringEngine:
         }
         physics_score = clamp(weighted_average(component_scores, self._weights))
 
+        # Afterglow potential — computed for breakdown / explanation only.
+        # The effect is already embedded in cq (cloud_quality_score with sun_elev);
+        # we do NOT add ag to physics_score again.
+        ag = self.afterglow_score(
+            sun_elevation_deg=sun_elev,
+            cloud_high=weather.cloud_high,
+            cloud_low=weather.cloud_low,
+            cloud_total=weather.cloud_total,
+            atmosphere=atm,
+        )
+
         confidence = self.compute_confidence(
             weather=weather,
             component_scores=component_scores,
@@ -166,6 +185,7 @@ class ScoringEngine:
             physics_score=physics_score,
             confidence=confidence,
             weights=dict(self._weights),
+            afterglow=ag,
         )
 
     # ------------------------------------------------------------------
@@ -242,6 +262,7 @@ class ScoringEngine:
         mid_pct: float,
         high_pct: float,
         total_pct: float,
+        sun_elevation_deg: float = 0.0,
     ) -> float:
         """
         Score the cloud distribution for sunset colour potential.
@@ -254,12 +275,32 @@ class ScoringEngine:
         negative — they block the sun near the horizon — but their penalty is
         softened when strong upper clouds are present.
 
+        Afterglow physics (sun_elevation_deg < 0)
+        -----------------------------------------
+        When the sun drops below the horizon it still illuminates high clouds
+        from below via Rayleigh-scattered light along the limb.  This produces
+        the deepest reds and crimsons, and peaks around −3°.  Three adjustments
+        are made in this regime:
+
+        1. High cloud score gets a conditional boost (up to +28 pts).
+           The boost scales with:
+           - an elevation bell curve peaking at −3° (sigma 2°)
+           - the fraction of high cloud coverage (canvas size)
+           - low-cloud interference (heavy low cloud blocks the illuminated layer)
+           No boost when high_pct < 15 % (nothing to illuminate) or when
+           the sky is overcast (total_pct ≥ 82 %).
+
+        2. The low-cloud penalty is softened by up to 25 % in afterglow phase.
+           When sunlight arrives from below the horizon, a thin low-cloud layer
+           is less effective at blocking the illuminated high-cloud canvas.
+
         Key calibration points
         ----------------------
-        - High 45%, low < 20%  →  peak colour potential (~85–90)
-        - Full overcast (≥90%) →  heavily penalised (<15)
-        - Completely clear sky →  mild penalty (not crushed); ~35–40
-        - High high + heavy low → upper-cloud offset softens low penalty
+        - High 45%, low < 20%                →  peak colour potential (~85–90)
+        - High 45%, low < 20%, sun at −3°    →  afterglow peak (~100)
+        - Full overcast (≥90%)               →  heavily penalised (<15)
+        - Completely clear sky               →  mild penalty (~35–40); no afterglow
+        - High high + heavy low, sun at −3°  →  low interference blocks afterglow
         """
         # --- High clouds: Gaussian peak at 45%, sigma 28 (broad) ---
         high_s = bell_curve(high_pct, peak=45.0, sigma=28.0) * 100.0
@@ -293,7 +334,81 @@ class ScoringEngine:
         if total_pct < 15.0:
             base *= 0.62 + 0.38 * (total_pct / 15.0)
 
+        # --- Afterglow enhancement (sun below horizon only) ---
+        # Conditions: sun < 0°, meaningful high clouds present, not overcast.
+        # The boost is conditional and physically motivated — it does NOT apply
+        # to clear skies or overcast skies, only to high-cloud canvases.
+        if (
+            sun_elevation_deg < 0.0
+            and high_pct >= 15.0
+            and total_pct < 82.0
+        ):
+            # Bell curve peaked at −3° (sigma 2°): models limb-illumination intensity
+            elev_factor = math.exp(
+                -0.5 * ((sun_elevation_deg + 3.0) / 2.0) ** 2
+            )
+            # Canvas factor: more high cloud = more surface area to be lit
+            canvas_factor = clamp(high_pct / 55.0)
+            # Low cloud interference: thick low cloud screens the illuminated layer
+            low_factor = max(0.0, 1.0 - low_pct / 60.0)
+            # Maximum +28 pts — ensures afterglow cannot manufacture an Epic
+            # score from a mediocre base; it can lift a Good to Great/Epic.
+            afterglow_boost = elev_factor * canvas_factor * low_factor * 28.0
+            base = clamp(base + afterglow_boost)
+
         return clamp(base)
+
+    # ------------------------------------------------------------------
+    # Afterglow potential (standalone, for breakdown and explanation)
+    # ------------------------------------------------------------------
+
+    def afterglow_score(
+        self,
+        sun_elevation_deg: float,
+        cloud_high: float,
+        cloud_low: float,
+        cloud_total: float,
+        atmosphere: float = 70.0,
+    ) -> float:
+        """
+        Standalone afterglow potential score (0–100).
+
+        This mirrors the afterglow logic inside cloud_quality_score() but is
+        expressed as an independent 0–100 signal for use by the explanation
+        engine and the API breakdown.  It is NOT added to the physics score
+        separately — that would double-count what is already in cloud_quality.
+
+        Afterglow is driven by limb illumination of high clouds:
+        - Peaks at sun_elevation_deg ≈ −3° (civil twilight, clouds still lit)
+        - Requires high_pct ≥ 15 % (canvas to be illuminated)
+        - Blocked by overcast (total ≥ 85 %) or heavy low cloud (low ≥ 60 %)
+        - Atmosphere quality amplifies colour saturation (clear = more vivid)
+
+        Returns 0 when sun is at or above the horizon.
+        """
+        if sun_elevation_deg >= 0.0:
+            return 0.0
+        if cloud_high < 15.0:
+            return 0.0  # No canvas — limb light has nothing to paint on
+        if cloud_total >= 85.0:
+            return 0.0  # Overcast diffuses all structure; no vivid colour
+
+        # Elevation bell curve: peak at −3°, FWHM ≈ 4.7° (sigma 2°)
+        elev_factor = math.exp(
+            -0.5 * ((sun_elevation_deg + 3.0) / 2.0) ** 2
+        )
+
+        # High cloud canvas: more coverage → more surface for limb illumination
+        canvas = clamp(cloud_high / 55.0)
+
+        # Low cloud interference: > 60 % low cloud screens the canvas entirely
+        low_interference = max(0.0, 1.0 - cloud_low / 60.0)
+
+        # Atmosphere quality multiplier: clean air lets warm tones saturate fully
+        # (0.6 floor so hazy air still gets some score, not zero)
+        atm_factor = 0.6 + 0.4 * (atmosphere / 100.0)
+
+        return clamp(elev_factor * canvas * low_interference * atm_factor * 100.0)
 
     # ------------------------------------------------------------------
     # Component 2: Atmosphere / Clarity (weight 0.28)
