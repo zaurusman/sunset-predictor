@@ -57,6 +57,28 @@ class ExplanationEngine:
                 candidates.append((30.0, "Conditions look inconsistent across the window — confidence is moderate."))
 
         # -----------------------------------------------------------------
+        # Afterglow reasons (sun below horizon with supporting conditions)
+        # -----------------------------------------------------------------
+        ag = breakdown.afterglow_score
+
+        if ag is not None and ag > 0:
+            if ag >= 60:
+                candidates.append((
+                    ag,
+                    "Afterglow conditions look excellent — high clouds should blaze with colour after sunset.",
+                ))
+            elif ag >= 35:
+                candidates.append((
+                    ag,
+                    "The sky may develop vivid afterglow colour as the sun dips further below the horizon.",
+                ))
+            elif ag >= 15:
+                candidates.append((
+                    ag,
+                    "Some afterglow potential — light may warm the high clouds slightly after sunset.",
+                ))
+
+        # -----------------------------------------------------------------
         # Cloud Quality reasons
         # -----------------------------------------------------------------
         cq = breakdown.cloud_quality_score

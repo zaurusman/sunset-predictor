@@ -57,6 +57,20 @@ class PhysicsBreakdown(BaseModel):
     weighted_physics_score: float = Field(ge=0, le=100)
     component_weights: dict[str, float]
 
+    # Afterglow potential (0–100). Non-zero only when sun is below the horizon
+    # and conditions support afterglow (high clouds present, not overcast).
+    # This is an explanatory field — the effect is already baked into
+    # cloud_quality_score; it is NOT added to weighted_physics_score again.
+    afterglow_score: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Afterglow illumination potential when sun is below the horizon. "
+            "Non-zero only at window points after sunset (sun < 0°)."
+        ),
+    )
+
 
 class WeatherSummary(BaseModel):
     """Human-readable weather snapshot for display."""

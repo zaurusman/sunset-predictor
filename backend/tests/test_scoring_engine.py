@@ -101,12 +101,36 @@ def test_heavy_low_cloud_reduces_score(scoring_engine):
     assert result_high.physics_score < result_low.physics_score
 
 
-def test_overcast_penalty_starts_at_82_pct():
-    """Overcast penalty should not kick in until total cloud > 82%."""
+def test_overcast_penalty_is_type_aware():
+    """
+    The overcast penalty must be driven by LOW and MID cloud coverage, not total.
+
+    Physical reasoning:
+    - Low stratus at 90 % blocks all light near the horizon — very bad.
+    - High cirrus at 90 % (with 0 % low) diffuses light but keeps the sky open
+      for colour.  After sunset it illuminates from below — potentially excellent.
+
+    Scenario A: stratus-dominated overcast (heavy low+mid, little high)
+    Scenario B: cirrus-dominated overcast (heavy high only, no low)
+    Scenario A must score significantly lower than Scenario B.
+    """
     engine = ScoringEngine()
-    score_80 = engine.cloud_quality_score(5.0, 10.0, 60.0, 80.0)
-    score_90 = engine.cloud_quality_score(5.0, 10.0, 60.0, 90.0)
-    assert score_80 > score_90, "90% total should score lower than 80% due to overcast penalty"
+
+    # Scenario A: low-cloud overcast — genuinely bad
+    score_stratus = engine.cloud_quality_score(65.0, 40.0, 10.0, 85.0)
+
+    # Scenario B: pure cirrus overcast — bad for sunset drama but not blocking
+    score_cirrus = engine.cloud_quality_score(0.0, 0.0, 97.0, 97.0)
+
+    assert score_cirrus > score_stratus, (
+        f"Cirrus overcast ({score_cirrus:.1f}) should score above stratus overcast ({score_stratus:.1f})"
+    )
+    assert score_cirrus >= 35.0, (
+        f"Cirrus overcast should not be crushed; got {score_cirrus:.1f}"
+    )
+    assert score_stratus < 30.0, (
+        f"Stratus overcast should score poorly; got {score_stratus:.1f}"
+    )
 
 
 def test_cloud_quality_bell_curve_peak():
@@ -335,3 +359,138 @@ def test_go_outside_threshold():
     below = engine.score_window([("sunset", 40.0)])
     assert above.go_outside is True
     assert below.go_outside is False
+
+
+# ---------------------------------------------------------------------------
+# Afterglow tests
+# ---------------------------------------------------------------------------
+# Afterglow physics: when the sun is 0°–6° below the horizon it still
+# illuminates high clouds (cirrus/altocumulus at 8–12 km) from below via
+# limb Rayleigh scattering.  This produces the deepest reds and crimsons and
+# peaks around −3° (roughly 10–15 minutes after sunset).
+#
+# Expected model behaviour
+# ------------------------
+# • cloud_quality for the same cloud conditions should be HIGHER at sun = −3°
+#   than at sun = +2° (pre-sunset), because high clouds are being lit from below.
+# • The boost should be ZERO when high clouds are absent (nothing to illuminate).
+# • The boost should be ZERO or negligible when the sky is overcast (diffuse).
+# • Clear sky should not become "Epic" — no canvas, no colour drama.
+# • Heavy low cloud should block the afterglow view (low_factor kills the boost).
+# ---------------------------------------------------------------------------
+
+def test_afterglow_boosts_cloud_quality_score():
+    """
+    The same high-cloud conditions should score higher at sun −3° than at
+    sun +2° (pre-sunset).  This is the core afterglow requirement.
+    """
+    engine = ScoringEngine()
+    # Good high-cloud setup: 50% high, 10% low, no overcast
+    pre_sunset  = engine.cloud_quality_score(10.0, 15.0, 50.0, 60.0, sun_elevation_deg=+2.0)
+    at_afterglow = engine.cloud_quality_score(10.0, 15.0, 50.0, 60.0, sun_elevation_deg=-3.0)
+    assert at_afterglow > pre_sunset, (
+        f"Afterglow should boost cloud quality: got {at_afterglow:.1f} <= {pre_sunset:.1f}"
+    )
+    assert at_afterglow - pre_sunset >= 10.0, (
+        f"Expected afterglow boost ≥ 10 pts, got {at_afterglow - pre_sunset:.1f}"
+    )
+
+
+def test_afterglow_peaks_near_minus_3_degrees():
+    """
+    Cloud quality for fixed high-cloud conditions should peak near sun = −3°.
+    At −1° (just below horizon) and −7° (deep twilight) the score should be
+    lower than at −3°.
+    """
+    engine = ScoringEngine()
+    args = (10.0, 15.0, 50.0, 60.0)  # low, mid, high, total
+    score_minus1  = engine.cloud_quality_score(*args, sun_elevation_deg=-1.0)
+    score_minus3  = engine.cloud_quality_score(*args, sun_elevation_deg=-3.0)
+    score_minus7  = engine.cloud_quality_score(*args, sun_elevation_deg=-7.0)
+    assert score_minus3 > score_minus1, "Peak should be at −3°, not −1°"
+    assert score_minus3 > score_minus7, "Peak should be at −3°, not −7°"
+
+
+def test_afterglow_requires_high_clouds():
+    """
+    No afterglow boost when high cloud coverage is below the 15 % threshold.
+    A clear sky at sun −3° should score the same as at sun +2°.
+    """
+    engine = ScoringEngine()
+    # Near-clear sky: 5% high, 5% total
+    pre  = engine.cloud_quality_score(2.0, 3.0, 5.0, 8.0, sun_elevation_deg=+2.0)
+    post = engine.cloud_quality_score(2.0, 3.0, 5.0, 8.0, sun_elevation_deg=-3.0)
+    assert post == pre, (
+        f"No high clouds → no afterglow boost, but got {post:.1f} vs {pre:.1f}"
+    )
+
+
+def test_afterglow_blocked_by_overcast():
+    """
+    Overcast conditions (total ≥ 82 %) should receive no afterglow boost.
+    Overcast diffuses all structure — no vivid colour possible.
+    """
+    engine = ScoringEngine()
+    pre  = engine.cloud_quality_score(70.0, 30.0, 60.0, 90.0, sun_elevation_deg=+2.0)
+    post = engine.cloud_quality_score(70.0, 30.0, 60.0, 90.0, sun_elevation_deg=-3.0)
+    assert post == pre, (
+        f"Overcast → no afterglow boost, but got {post:.1f} vs {pre:.1f}"
+    )
+
+
+def test_afterglow_heavy_low_cloud_blocks_view():
+    """
+    Heavy low cloud (≥ 60 %) should kill the afterglow boost entirely,
+    because the thick low-cloud layer screens the illuminated high-cloud canvas.
+    """
+    engine = ScoringEngine()
+    # Identical clouds except sun position; heavy low cloud present
+    pre  = engine.cloud_quality_score(65.0, 15.0, 50.0, 75.0, sun_elevation_deg=+2.0)
+    post = engine.cloud_quality_score(65.0, 15.0, 50.0, 75.0, sun_elevation_deg=-3.0)
+    assert post <= pre + 2.0, (
+        f"Heavy low cloud should block afterglow; got post={post:.1f}, pre={pre:.1f}"
+    )
+
+
+def test_afterglow_score_standalone_zero_above_horizon():
+    """afterglow_score() must return 0 when sun is at or above the horizon."""
+    engine = ScoringEngine()
+    assert engine.afterglow_score(0.0,  50.0, 5.0, 55.0) == 0.0
+    assert engine.afterglow_score(+2.0, 50.0, 5.0, 55.0) == 0.0
+    assert engine.afterglow_score(+10.0, 50.0, 5.0, 55.0) == 0.0
+
+
+def test_afterglow_score_standalone_peak_conditions():
+    """
+    afterglow_score() with ideal conditions (sun −3°, 50% high, clear air)
+    should return a high score (≥ 60).
+    """
+    engine = ScoringEngine()
+    score = engine.afterglow_score(
+        sun_elevation_deg=-3.0,
+        cloud_high=50.0,
+        cloud_low=5.0,
+        cloud_total=55.0,
+        atmosphere=80.0,
+    )
+    assert score >= 60.0, f"Peak afterglow conditions should score ≥ 60, got {score:.1f}"
+
+
+def test_afterglow_stored_in_scoring_result():
+    """
+    score() should store non-zero afterglow in ScoringResult when sun < 0
+    and conditions support afterglow.
+    """
+    engine = ScoringEngine()
+    snap_pre  = _snap(sun_elevation_deg=+2.0, cloud_high=50.0, cloud_low=5.0,
+                      cloud_mid=10.0, cloud_total=55.0)
+    snap_post = _snap(sun_elevation_deg=-3.0, cloud_high=50.0, cloud_low=5.0,
+                      cloud_mid=10.0, cloud_total=55.0)
+    result_pre  = engine.score(snap_pre, 2.0)
+    result_post = engine.score(snap_post, 2.0)
+
+    assert result_pre.afterglow == 0.0, "No afterglow when sun is above horizon"
+    assert result_post.afterglow > 0.0, "Afterglow should be non-zero when sun < 0 with high clouds"
+    assert result_post.physics_score > result_pre.physics_score, (
+        "Post-sunset score should exceed pre-sunset for the same cloud conditions"
+    )
