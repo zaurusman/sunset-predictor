@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { CalendarDays, Info } from "lucide-react";
+import { CalendarDays, Camera, Info } from "lucide-react";
 import { predict } from "@/lib/api";
 import type { LocationState, PredictResponse } from "@/lib/types";
 import { formatTime, scoreToEmoji } from "@/lib/utils";
@@ -16,6 +16,7 @@ import ViewingWindow from "@/components/ViewingWindow";
 import ModelInfoPanel from "@/components/ModelInfoPanel";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
+import SubmitPhotoModal from "@/components/SubmitPhotoModal";
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -28,6 +29,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showDebug, setShowDebug] = useState(false);
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
 
   const fetchPrediction = useCallback(async (loc: LocationState, date: string) => {
     setLoading(true);
@@ -215,15 +217,24 @@ export default function HomePage() {
             </div>
           </section>
 
-          {/* Forecast link */}
+          {/* Forecast link + share button */}
           {location && (
-            <Link
-              href={`/forecast?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
-              className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
-            >
-              <CalendarDays size={16} />
-              View 7-day forecast
-            </Link>
+            <div className="flex flex-col gap-2">
+              <Link
+                href={`/forecast?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+              >
+                <CalendarDays size={16} />
+                View 7-day forecast
+              </Link>
+              <button
+                onClick={() => setShowSubmitModal(true)}
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+              >
+                <Camera size={16} />
+                Share your sunset photo
+              </button>
+            </div>
           )}
 
           {/* Debug / info section */}
@@ -245,6 +256,17 @@ export default function HomePage() {
           <p className="text-lg font-medium text-slate-500">Search for a location to get started</p>
           <p className="text-sm mt-2">or allow location access for your current area</p>
         </div>
+      )}
+
+      {/* Photo submission modal */}
+      {showSubmitModal && location && (
+        <SubmitPhotoModal
+          latitude={location.latitude}
+          longitude={location.longitude}
+          locationName={location.name}
+          defaultDate={selectedDate}
+          onClose={() => setShowSubmitModal(false)}
+        />
       )}
     </main>
   );
