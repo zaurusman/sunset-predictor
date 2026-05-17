@@ -40,10 +40,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialise services on startup; clean up on shutdown."""
     logger.info("Starting Sunset Predictor (env=%s, version=%s)", settings.APP_ENV, settings.ALGORITHM_VERSION)
     logger.info(
-        "Email config — host=%r, user=%r, password_set=%s, dev_email=%r",
-        settings.SMTP_HOST,
-        settings.SMTP_USERNAME,
-        bool(settings.SMTP_PASSWORD),
+        "Email config — resend_key_set=%s, from=%r, dev_email=%r",
+        bool(settings.RESEND_API_KEY),
+        settings.RESEND_FROM_EMAIL,
         settings.DEVELOPER_EMAIL,
     )
 

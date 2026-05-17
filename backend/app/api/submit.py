@@ -80,7 +80,6 @@ async def submit_photo(
         await email_svc.send_submission(
             image_bytes=image_bytes,
             image_filename=photo.filename or "sunset.jpg",
-            content_type=content_type,
             submission_date=photo_date,
             latitude=latitude,
             longitude=longitude,

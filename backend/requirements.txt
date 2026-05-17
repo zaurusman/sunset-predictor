@@ -25,6 +25,7 @@ praw==7.7.1
 # ── Utilities ────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
 python-multipart==0.0.20  # multipart/form-data for file uploads
+resend==2.7.0             # transactional email API
 
 # ── Testing ──────────────────────────────────────────────────────────────────
 pytest==8.3.4

@@ -1,24 +1,20 @@
 """
-Email service — sends sunset photo submissions to the developer.
+Email service — sends sunset photo submissions to the developer via Resend.
 
-Uses stdlib smtplib so there are no extra dependencies beyond
-python-multipart (already added for file upload parsing).
+Uses the Resend Python SDK (HTTPS API call) instead of SMTP, which avoids
+port-blocking issues on cloud hosting platforms.
 
-The service is disabled (raises ServiceUnavailableError) when SMTP_HOST
-is not configured, so the endpoint can return a clear 503 rather than a
-confusing SMTP connection error.
+The service is disabled (raises EmailNotConfiguredError) when RESEND_API_KEY
+is not configured, so the endpoint returns a clear 503 rather than a cryptic error.
 """
 from __future__ import annotations
 
 import asyncio
-import smtplib
-import ssl
+import base64
 from datetime import date
-from email import encoders
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from functools import partial
+
+import resend
 
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -26,12 +22,12 @@ from app.schemas.prediction import PredictResponse
 
 logger = get_logger(__name__)
 
-# Maximum image size accepted (bytes).  Checked before any SMTP work.
+# Maximum image size accepted (bytes). Checked before any API call.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 class EmailNotConfiguredError(RuntimeError):
-    """Raised when SMTP settings are missing."""
+    """Raised when Resend settings are missing."""
 
 
 class EmailService:
@@ -41,13 +37,13 @@ class EmailService:
     @property
     def is_configured(self) -> bool:
         s = self._settings
-        return bool(s.SMTP_HOST and s.SMTP_USERNAME and s.SMTP_PASSWORD and s.DEVELOPER_EMAIL)
+        return bool(s.RESEND_API_KEY and s.DEVELOPER_EMAIL)
 
     def _require_configured(self) -> None:
         if not self.is_configured:
             raise EmailNotConfiguredError(
                 "Email submission is not configured on this server. "
-                "Set SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, and DEVELOPER_EMAIL."
+                "Set RESEND_API_KEY and DEVELOPER_EMAIL."
             )
 
     # ------------------------------------------------------------------
@@ -59,7 +55,6 @@ class EmailService:
         *,
         image_bytes: bytes,
         image_filename: str,
-        content_type: str,
         submission_date: date,
         latitude: float,
         longitude: float,
@@ -68,10 +63,9 @@ class EmailService:
         prediction: PredictResponse,
     ) -> None:
         """
-        Build and send the submission email.
+        Build and send the submission email via Resend.
 
-        Runs the blocking smtplib call in a thread so the event loop is
-        not stalled.
+        Runs the blocking SDK call in a thread so the event loop is not stalled.
         """
         self._require_configured()
 
@@ -81,10 +75,9 @@ class EmailService:
                 f"Maximum allowed size is {MAX_IMAGE_BYTES // 1_048_576} MB."
             )
 
-        msg = self._build_message(
+        params = self._build_params(
             image_bytes=image_bytes,
             image_filename=image_filename,
-            content_type=content_type,
             submission_date=submission_date,
             latitude=latitude,
             longitude=longitude,
@@ -93,9 +86,8 @@ class EmailService:
             prediction=prediction,
         )
 
-        # Run blocking SMTP call in a thread executor
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, partial(self._send_smtp, msg))
+        await loop.run_in_executor(None, partial(self._send, params))
 
         logger.info(
             "Photo submission sent to %s (date=%s, location=%.4f,%.4f, score=%.1f)",
@@ -110,36 +102,27 @@ class EmailService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_message(
+    def _build_params(
         self,
         *,
         image_bytes: bytes,
         image_filename: str,
-        content_type: str,
         submission_date: date,
         latitude: float,
         longitude: float,
         location_name: str,
         user_message: str,
         prediction: PredictResponse,
-    ) -> MIMEMultipart:
+    ) -> resend.Emails.SendParams:
         s = self._settings
-        from_addr = s.SMTP_FROM or s.SMTP_USERNAME
-        to_addr = s.DEVELOPER_EMAIL
+        p = prediction
+        ws = p.weather_summary
 
         subject = (
-            f"[Sunset Predictor] Photo submission — "
+            f"[Afterglow] Photo submission — "
             f"{location_name or f'{latitude:.4f}, {longitude:.4f}'}, {submission_date}"
         )
 
-        msg = MIMEMultipart("mixed")
-        msg["Subject"] = subject
-        msg["From"] = from_addr
-        msg["To"] = to_addr
-
-        # ── Text body ─────────────────────────────────────────────────────────
-        p = prediction
-        ws = p.weather_summary
         reasons_text = "\n".join(f"  • {r}" for r in p.reasons)
         window_scores_text = (
             "\n".join(f"  {label}: {score:.1f}" for label, score in p.window_scores.items())
@@ -148,7 +131,7 @@ class EmailService:
         )
 
         body = f"""\
-Sunset photo submitted via Sunset Predictor
+Sunset photo submitted via Afterglow
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Date:          {submission_date}
@@ -187,39 +170,24 @@ Algorithm:     v{p.algorithm_version}
 ML model used: {p.ml_model_used}
 ML adjustment: {p.ml_adjustment if p.ml_adjustment is not None else 'N/A'}
 """
-        msg.attach(MIMEText(body, "plain", "utf-8"))
 
-        # ── Image attachment ───────────────────────────────────────────────────
-        main_type, sub_type = content_type.split("/", 1) if "/" in content_type else ("image", "jpeg")
-        attachment = MIMEBase(main_type, sub_type)
-        attachment.set_payload(image_bytes)
-        encoders.encode_base64(attachment)
-        attachment.add_header(
-            "Content-Disposition",
-            "attachment",
-            filename=image_filename or "sunset.jpg",
-        )
-        msg.attach(attachment)
+        filename = image_filename or "sunset.jpg"
+        encoded_content = base64.b64encode(image_bytes).decode()
 
-        return msg
+        return {
+            "from": s.RESEND_FROM_EMAIL,
+            "to": [s.DEVELOPER_EMAIL],
+            "subject": subject,
+            "text": body,
+            "attachments": [
+                {
+                    "filename": filename,
+                    "content": encoded_content,
+                }
+            ],
+        }
 
-    def _send_smtp(self, msg: MIMEMultipart) -> None:
-        """Blocking SMTP send — call via run_in_executor."""
-        s = self._settings
-        context = ssl.create_default_context()
-
-        timeout = 20  # seconds — fail fast rather than hanging for minutes
-
-        if s.SMTP_PORT == 465:
-            # SSL from the start
-            with smtplib.SMTP_SSL(s.SMTP_HOST, s.SMTP_PORT, context=context, timeout=timeout) as server:
-                server.login(s.SMTP_USERNAME, s.SMTP_PASSWORD)
-                server.send_message(msg)
-        else:
-            # STARTTLS (port 587 is standard)
-            with smtplib.SMTP(s.SMTP_HOST, s.SMTP_PORT, timeout=timeout) as server:
-                server.ehlo()
-                server.starttls(context=context)
-                server.ehlo()
-                server.login(s.SMTP_USERNAME, s.SMTP_PASSWORD)
-                server.send_message(msg)
+    def _send(self, params: resend.Emails.SendParams) -> None:
+        """Blocking Resend API call — invoke via run_in_executor."""
+        resend.api_key = self._settings.RESEND_API_KEY
+        resend.Emails.send(params)
