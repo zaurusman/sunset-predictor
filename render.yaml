@@ -1,7 +1,7 @@
 services:
   - type: web
     name: afterglow-api
-    runtime: docker
+    env: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     plan: free
@@ -11,19 +11,15 @@ services:
         value: production
       - key: ALGORITHM_VERSION
         value: 1.0.0
-      # SMTP — fill these in the Render dashboard (do not commit secrets)
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT
         value: 587
       - key: SMTP_USERNAME
-        sync: false   # set in dashboard
+        sync: false
       - key: SMTP_PASSWORD
-        sync: false   # set in dashboard
+        sync: false
       - key: SMTP_FROM
-        sync: false   # set in dashboard
+        sync: false
       - key: DEVELOPER_EMAIL
-        sync: false   # set in dashboard
-      # ML model — optional, physics-only mode works without it.
-      # To enable ML scoring: commit backend/trained_models/calibration_model.joblib
-      # and set MODEL_PATH to trained_models/calibration_model.joblib (already the default).
+        sync: false
