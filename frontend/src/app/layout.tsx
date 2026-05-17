@@ -5,10 +5,6 @@ export const metadata: Metadata = {
   title: "Afterglow",
   description: "How beautiful will tonight's sunset be? Get a score, reasons, and the best time to watch.",
   keywords: ["sunset", "weather", "forecast", "beauty score"],
-  icons: {
-    icon: "/favicon.png",
-    apple: "/favicon.png",
-  },
 };
 
 export default function RootLayout({

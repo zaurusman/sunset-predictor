@@ -21,7 +21,10 @@ env/
 
 # ML training data & model binaries (large files)
 backend/data/
-backend/trained_models/*.joblib
+# Uncomment the line below if you want to exclude the model from git.
+# If you want to deploy with the model, keep it commented out and commit the .joblib file.
+# For files >100MB, use git lfs: git lfs track "*.joblib"
+# backend/trained_models/*.joblib
 
 # Logs
 *.log

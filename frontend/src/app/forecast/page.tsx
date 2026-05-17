@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Info } from "lucide-react";
 import { forecast } from "@/lib/api";
 import type { DayForecast, ForecastResponse } from "@/lib/types";
 
@@ -70,6 +70,14 @@ function ForecastContent() {
 
       {!loading && data && (
         <div className="space-y-6 animate-fade-in">
+          {/* Forecast disclaimer */}
+          <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-sm">
+            <Info size={15} className="flex-shrink-0 mt-0.5" />
+            <span>
+              Forecasts are updated daily and cloud cover can change significantly.
+              For the best accuracy, check back on the day of each sunset.
+            </span>
+          </div>
           {/* Chart overview */}
           <section className="bg-slate-900/60 rounded-2xl border border-slate-700/40 p-5">
             <h2 className="text-slate-400 text-xs uppercase tracking-wider mb-4">Score Overview</h2>

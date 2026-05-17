@@ -86,7 +86,7 @@ export default function HomePage() {
     <main className="min-h-screen px-4 py-8 max-w-2xl mx-auto">
       {/* Header */}
       <header className="mb-8 text-center">
-        <Image src="/logo.png" alt="Afterglow" width={180} height={30} className="mx-auto mb-1" priority />
+        <Image src="/logo.jpeg" alt="Afterglow" width={360} height={60} className="mx-auto mb-1" priority />
         <p className="text-slate-500 text-sm">
           {selectedDate === todayIso()
             ? "How beautiful will today\u2019s sunset be?"
@@ -107,6 +107,17 @@ export default function HomePage() {
           disabled={loading}
         />
       </div>
+
+      {/* Future date disclaimer */}
+      {selectedDate > todayIso() && (
+        <div className="mb-6 flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-sm">
+          <Info size={15} className="flex-shrink-0 mt-0.5" />
+          <span>
+            Weather forecasts are updated daily and cloud cover can shift significantly.
+            For the most accurate prediction, check again on the day itself.
+          </span>
+        </div>
+      )}
 
       {/* Error */}
       {error && (

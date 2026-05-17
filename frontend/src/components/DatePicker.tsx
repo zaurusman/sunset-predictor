@@ -53,6 +53,10 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
   const minDate = new Date(todayDate);
   minDate.setFullYear(todayDate.getFullYear() - 1);
 
+  // Maximum selectable date: 7 days ahead
+  const maxDate = new Date(todayDate);
+  maxDate.setDate(todayDate.getDate() + 7);
+
   const [open, setOpen] = useState(false);
   const [viewYear, setViewYear] = useState(() => parseIso(value).getFullYear());
   const [viewMonth, setViewMonth] = useState(() => parseIso(value).getMonth());
@@ -87,7 +91,7 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
 
   const viewFirst = new Date(viewYear, viewMonth, 1);
   const canPrev = viewFirst > new Date(minDate.getFullYear(), minDate.getMonth(), 1);
-  const canNext = viewFirst < new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
+  const canNext = viewFirst < new Date(maxDate.getFullYear(), maxDate.getMonth(), 1);
 
   // Build the day grid: leading nulls + day numbers + trailing nulls
   const firstWeekday = viewFirst.getDay();
@@ -164,7 +168,8 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
               const cellIso = toIso(cellDate);
               const isSelected = cellIso === value;
               const isToday = cellDate.getTime() === todayDate.getTime();
-              const isDisabled = cellDate > todayDate || cellDate < minDate;
+              const isFuture = cellDate > todayDate;
+              const isDisabled = cellDate > maxDate || cellDate < minDate;
 
               let cls =
                 "text-xs h-8 w-full rounded-lg font-medium transition-colors ";
@@ -173,8 +178,9 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
               } else if (isSelected) {
                 cls += "bg-orange-500 text-white";
               } else if (isToday) {
-                cls +=
-                  "border border-orange-500/50 text-orange-400 hover:bg-orange-500/10";
+                cls += "border border-orange-500/50 text-orange-400 hover:bg-orange-500/10";
+              } else if (isFuture) {
+                cls += "text-indigo-300 hover:bg-indigo-500/10";
               } else {
                 cls += "text-slate-300 hover:bg-slate-700";
               }
@@ -192,17 +198,21 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
             })}
           </div>
 
-          {/* Footer — jump to today */}
-          {value !== todayIso() && (
-            <div className="mt-3 pt-3 border-t border-slate-700/60">
+          {/* Footer */}
+          <div className="mt-3 pt-3 border-t border-slate-700/60 flex items-center justify-between gap-2">
+            <span className="text-xs text-indigo-300/70 flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-sm bg-indigo-400/40" />
+              Forecast dates
+            </span>
+            {value !== todayIso() && (
               <button
                 onClick={goToday}
-                className="w-full text-xs text-orange-400 hover:text-orange-300 transition-colors py-0.5"
+                className="text-xs text-orange-400 hover:text-orange-300 transition-colors"
               >
                 Back to today
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
     </div>
