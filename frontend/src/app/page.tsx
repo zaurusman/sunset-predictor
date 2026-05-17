@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
-import { CalendarDays, Info } from "lucide-react";
+import { CalendarDays, Camera, Info, Sunset } from "lucide-react";
 import { predict } from "@/lib/api";
 import type { LocationState, PredictResponse } from "@/lib/types";
-import { formatTime, scoreToEmoji } from "@/lib/utils";
+
 
 import ScoreDial from "@/components/ScoreDial";
 import LocationSearch from "@/components/LocationSearch";
@@ -16,6 +17,7 @@ import ViewingWindow from "@/components/ViewingWindow";
 import ModelInfoPanel from "@/components/ModelInfoPanel";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
+import SubmitPhotoModal from "@/components/SubmitPhotoModal";
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -28,6 +30,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showDebug, setShowDebug] = useState(false);
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
 
   const fetchPrediction = useCallback(async (loc: LocationState, date: string) => {
     setLoading(true);
@@ -83,7 +86,7 @@ export default function HomePage() {
     <main className="min-h-screen px-4 py-8 max-w-2xl mx-auto">
       {/* Header */}
       <header className="mb-8 text-center">
-        <h1 className="text-3xl font-bold gradient-text mb-1">Sunset Predictor</h1>
+        <Image src="/logo.png" alt="Afterglow" width={180} height={30} className="mx-auto mb-1" priority />
         <p className="text-slate-500 text-sm">
           {selectedDate === todayIso()
             ? "How beautiful will today\u2019s sunset be?"
@@ -146,30 +149,7 @@ export default function HomePage() {
             />
           </div>
 
-          {/* Sunset time */}
-          <div className="flex justify-center gap-6 text-sm">
-            <div className="text-center">
-              <div className="text-slate-500 text-xs mb-0.5">Sunset</div>
-              <div className="text-white font-semibold tabular-nums">
-                {formatTime(prediction.sunset_time)}
-              </div>
-            </div>
-            <div className="w-px bg-slate-700/50" />
-            <div className="text-center">
-              <div className="text-slate-500 text-xs mb-0.5">Best window</div>
-              <div className="text-white font-semibold tabular-nums">
-                {formatTime(prediction.best_viewing_window_start)}–{formatTime(prediction.best_viewing_window_end)}
-              </div>
-            </div>
-            <div className="w-px bg-slate-700/50" />
-            <div className="text-center">
-              <div className="text-slate-500 text-xs mb-0.5">Score</div>
-              <div className="text-white font-semibold">
-                {scoreToEmoji(prediction.beauty_score_0_100)} {Math.round(prediction.beauty_score_0_100)}
-              </div>
-            </div>
-          </div>
-
+          
           {/* Viewing window */}
           <ViewingWindow
             sunsetTime={prediction.sunset_time}
@@ -215,15 +195,24 @@ export default function HomePage() {
             </div>
           </section>
 
-          {/* Forecast link */}
+          {/* Forecast link + share button */}
           {location && (
-            <Link
-              href={`/forecast?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
-              className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
-            >
-              <CalendarDays size={16} />
-              View 7-day forecast
-            </Link>
+            <div className="flex flex-col gap-2">
+              <Link
+                href={`/forecast?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+              >
+                <CalendarDays size={16} />
+                View 7-day forecast
+              </Link>
+              <button
+                onClick={() => setShowSubmitModal(true)}
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+              >
+                <Camera size={16} />
+                Share your sunset photo
+              </button>
+            </div>
           )}
 
           {/* Debug / info section */}
@@ -241,10 +230,21 @@ export default function HomePage() {
       {/* Empty state — no location yet */}
       {!loading && !prediction && !error && (
         <div className="text-center py-20 text-slate-600">
-          <div className="text-5xl mb-4">🌅</div>
+          <Sunset size={52} className="mx-auto mb-4 text-slate-700" />
           <p className="text-lg font-medium text-slate-500">Search for a location to get started</p>
           <p className="text-sm mt-2">or allow location access for your current area</p>
         </div>
+      )}
+
+      {/* Photo submission modal */}
+      {showSubmitModal && location && (
+        <SubmitPhotoModal
+          latitude={location.latitude}
+          longitude={location.longitude}
+          locationName={location.name}
+          defaultDate={selectedDate}
+          onClose={() => setShowSubmitModal(false)}
+        />
       )}
     </main>
   );

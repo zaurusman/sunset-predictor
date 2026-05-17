@@ -112,15 +112,6 @@ export function isToday(isoDateString: string): boolean {
 // Score helpers
 // ---------------------------------------------------------------------------
 
-/** Unicode emoji representing the score. */
-export function scoreToEmoji(score: number): string {
-  if (score >= 80) return "🌅";
-  if (score >= 65) return "🧡";
-  if (score >= 50) return "☁️";
-  if (score >= 30) return "🌥️";
-  return "🌧️";
-}
-
 /** Round to one decimal place. */
 export function round1(n: number): number {
   return Math.round(n * 10) / 10;
