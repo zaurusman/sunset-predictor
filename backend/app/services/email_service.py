@@ -208,14 +208,16 @@ ML adjustment: {p.ml_adjustment if p.ml_adjustment is not None else 'N/A'}
         s = self._settings
         context = ssl.create_default_context()
 
+        timeout = 20  # seconds — fail fast rather than hanging for minutes
+
         if s.SMTP_PORT == 465:
             # SSL from the start
-            with smtplib.SMTP_SSL(s.SMTP_HOST, s.SMTP_PORT, context=context) as server:
+            with smtplib.SMTP_SSL(s.SMTP_HOST, s.SMTP_PORT, context=context, timeout=timeout) as server:
                 server.login(s.SMTP_USERNAME, s.SMTP_PASSWORD)
                 server.send_message(msg)
         else:
             # STARTTLS (port 587 is standard)
-            with smtplib.SMTP(s.SMTP_HOST, s.SMTP_PORT) as server:
+            with smtplib.SMTP(s.SMTP_HOST, s.SMTP_PORT, timeout=timeout) as server:
                 server.ehlo()
                 server.starttls(context=context)
                 server.ehlo()
