@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # HTTP client timeout (seconds)
     HTTP_TIMEOUT: float = 15.0
 
+    # ── Email / photo submission ──────────────────────────────────────────────
+    # SMTP credentials for sending photo submissions to the developer.
+    # Leave SMTP_HOST empty to disable the /submit-photo endpoint entirely.
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587           # 587 = STARTTLS (Gmail/most providers)
+    SMTP_USERNAME: str = ""        # e.g. yourapp@gmail.com
+    SMTP_PASSWORD: str = ""        # app-specific password
+    SMTP_FROM: str = ""            # display "From" address (defaults to SMTP_USERNAME)
+    DEVELOPER_EMAIL: str = ""      # where submissions are sent
+
 
 # Module-level singleton — import this everywhere
 settings = Settings()

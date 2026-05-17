@@ -12,6 +12,7 @@ import type {
   HealthResponse,
   PredictRequest,
   PredictResponse,
+  SubmitPhotoResponse,
 } from "./types";
 
 const API_BASE =
@@ -74,6 +75,43 @@ export async function getHealth(): Promise<HealthResponse> {
 /** ML model metadata. */
 export async function getModelInfo(): Promise<Record<string, unknown>> {
   return request<Record<string, unknown>>(`${API_BASE}/model/info`);
+}
+
+/** Submit a sunset photo with date and location — emails it to the developer. */
+export async function submitPhoto(params: {
+  photo: File;
+  latitude: number;
+  longitude: number;
+  photoDate: string;       // "YYYY-MM-DD"
+  locationName: string;
+  userMessage: string;
+}): Promise<SubmitPhotoResponse> {
+  const form = new FormData();
+  form.append("photo", params.photo);
+  form.append("latitude", String(params.latitude));
+  form.append("longitude", String(params.longitude));
+  form.append("photo_date", params.photoDate);
+  form.append("location_name", params.locationName);
+  form.append("user_message", params.userMessage);
+
+  const res = await fetch(`${API_BASE}/submit-photo`, {
+    method: "POST",
+    body: form,
+    // No Content-Type header — browser sets it with the correct boundary for multipart
+  });
+
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body?.detail ?? detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+
+  return res.json() as Promise<SubmitPhotoResponse>;
 }
 
 // ---------------------------------------------------------------------------

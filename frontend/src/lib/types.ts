@@ -125,6 +125,13 @@ export interface GeocodingResult {
   timezone: string;
 }
 
+// ── Photo submission ─────────────────────────────────────────────────────────
+
+export interface SubmitPhotoResponse {
+  success: boolean;
+  message: string;
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 export interface LocationState {
