@@ -39,6 +39,13 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialise services on startup; clean up on shutdown."""
     logger.info("Starting Sunset Predictor (env=%s, version=%s)", settings.APP_ENV, settings.ALGORITHM_VERSION)
+    logger.info(
+        "Email config — host=%r, user=%r, password_set=%s, dev_email=%r",
+        settings.SMTP_HOST,
+        settings.SMTP_USERNAME,
+        bool(settings.SMTP_PASSWORD),
+        settings.DEVELOPER_EMAIL,
+    )
 
     # Shared HTTP client (connection-pooled, async)
     http_client = httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT)
