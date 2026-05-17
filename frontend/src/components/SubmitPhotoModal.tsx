@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { Camera, Upload, X } from "lucide-react";
+import { Camera, CheckCircle, Upload, X } from "lucide-react";
 import { submitPhoto } from "@/lib/api";
 
 interface Props {
@@ -112,7 +112,7 @@ export default function SubmitPhotoModal({
         {status === "success" ? (
           /* ── Success state ─────────────────────────────────────────────── */
           <div className="flex flex-col items-center gap-4 py-6 text-center">
-            <div className="text-5xl">🌅</div>
+            <CheckCircle size={48} className="text-orange-400" />
             <p className="text-white font-medium">Photo submitted!</p>
             <p className="text-slate-400 text-sm">
               Thanks for sharing. Your photo and the stats from that day have been sent.

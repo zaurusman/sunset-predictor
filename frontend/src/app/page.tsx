@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
-import { CalendarDays, Camera, Info } from "lucide-react";
+import { CalendarDays, Camera, Info, Sunset } from "lucide-react";
 import { predict } from "@/lib/api";
 import type { LocationState, PredictResponse } from "@/lib/types";
-import { formatTime, scoreToEmoji } from "@/lib/utils";
+
 
 import ScoreDial from "@/components/ScoreDial";
 import LocationSearch from "@/components/LocationSearch";
@@ -85,7 +86,7 @@ export default function HomePage() {
     <main className="min-h-screen px-4 py-8 max-w-2xl mx-auto">
       {/* Header */}
       <header className="mb-8 text-center">
-        <h1 className="text-3xl font-bold gradient-text mb-1">Sunset Predictor</h1>
+        <Image src="/logo.png" alt="Afterglow" width={180} height={30} className="mx-auto mb-1" priority />
         <p className="text-slate-500 text-sm">
           {selectedDate === todayIso()
             ? "How beautiful will today\u2019s sunset be?"
@@ -148,30 +149,7 @@ export default function HomePage() {
             />
           </div>
 
-          {/* Sunset time */}
-          <div className="flex justify-center gap-6 text-sm">
-            <div className="text-center">
-              <div className="text-slate-500 text-xs mb-0.5">Sunset</div>
-              <div className="text-white font-semibold tabular-nums">
-                {formatTime(prediction.sunset_time)}
-              </div>
-            </div>
-            <div className="w-px bg-slate-700/50" />
-            <div className="text-center">
-              <div className="text-slate-500 text-xs mb-0.5">Best window</div>
-              <div className="text-white font-semibold tabular-nums">
-                {formatTime(prediction.best_viewing_window_start)}–{formatTime(prediction.best_viewing_window_end)}
-              </div>
-            </div>
-            <div className="w-px bg-slate-700/50" />
-            <div className="text-center">
-              <div className="text-slate-500 text-xs mb-0.5">Score</div>
-              <div className="text-white font-semibold">
-                {scoreToEmoji(prediction.beauty_score_0_100)} {Math.round(prediction.beauty_score_0_100)}
-              </div>
-            </div>
-          </div>
-
+          
           {/* Viewing window */}
           <ViewingWindow
             sunsetTime={prediction.sunset_time}
@@ -252,7 +230,7 @@ export default function HomePage() {
       {/* Empty state — no location yet */}
       {!loading && !prediction && !error && (
         <div className="text-center py-20 text-slate-600">
-          <div className="text-5xl mb-4">🌅</div>
+          <Sunset size={52} className="mx-auto mb-4 text-slate-700" />
           <p className="text-lg font-medium text-slate-500">Search for a location to get started</p>
           <p className="text-sm mt-2">or allow location access for your current area</p>
         </div>
