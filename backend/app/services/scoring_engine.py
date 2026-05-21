@@ -294,12 +294,21 @@ class ScoringEngine:
            When sunlight arrives from below the horizon, a thin low-cloud layer
            is less effective at blocking the illuminated high-cloud canvas.
 
+        Horizon glow (near-clear sky, sun near horizon)
+        ------------------------------------------------
+        When the sky is mostly clear (< 20 % total cloud) and the sun is within
+        a few degrees of the horizon, the atmospheric path length is long enough
+        to scatter away most blue light, producing vivid orange/red tones without
+        any clouds.  This is additive with cloud-based colour: a single cloud
+        catching the light in an otherwise clear sky gets both contributions.
+        Peaks at sun ≈ 0°, fades above +6° and below −4°, max +15 pts.
+
         Key calibration points
         ----------------------
         - High 45%, low < 20%                →  peak colour potential (~85–90)
         - High 45%, low < 20%, sun at −3°    →  afterglow peak (~100)
         - Full overcast (≥90%)               →  heavily penalised (<15)
-        - Completely clear sky               →  mild penalty (~35–40); no afterglow
+        - Completely clear sky, sun at 0°    →  horizon glow lifts to ~35–40
         - High high + heavy low, sun at −3°  →  low interference blocks afterglow
         """
         # --- High clouds: Gaussian peak at 45%, sigma 28 (broad) ---
@@ -374,6 +383,16 @@ class ScoringEngine:
             # score from a mediocre base; it can lift a Good to Great/Epic.
             afterglow_boost = elev_factor * canvas_factor * low_factor * 28.0
             base = clamp(base + afterglow_boost)
+
+        # --- Horizon glow: Rayleigh orange for near-clear skies at low sun angles ---
+        # Only fires when total cloud < 20 % — if clouds are present they already
+        # score their own colour; this covers the clear-sky pathway.
+        # Bell curve peaks at ~0.5° (sun just kissing the horizon), sigma 2.5°.
+        if total_pct < 20.0 and -4.0 <= sun_elevation_deg <= 6.0:
+            elev_factor = math.exp(-0.5 * ((sun_elevation_deg - 0.5) / 2.5) ** 2)
+            clearness = clamp(1.0 - total_pct / 20.0)
+            horizon_glow = elev_factor * clearness * 15.0
+            base = clamp(base + horizon_glow)
 
         return clamp(base)
 

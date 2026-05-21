@@ -499,7 +499,9 @@ class WeatherService:
         cloud_mid = get("cloud_cover_mid", 0.0)
         cloud_high = get("cloud_cover_high", 0.0)
         cloud_total = get("cloud_cover", max(cloud_low, cloud_mid, cloud_high))
-        visibility_m = get("visibility", 10000.0)
+        # Archive API often omits visibility; 24 km is a fair clear-day baseline.
+        # (10 km, the old default, implies visible haze and inflates the AOD proxy.)
+        visibility_m = get("visibility", 24000.0)
         humidity = get("relative_humidity_2m", 50.0)
         dewpoint = get("dew_point_2m", 10.0)
         temperature = get("temperature_2m", 15.0)
