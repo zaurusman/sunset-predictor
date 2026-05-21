@@ -15,8 +15,8 @@ export default function ViewingWindow({
   windowEnd,
 }: ViewingWindowProps) {
   return (
-    <div className="bg-slate-800/50 border border-slate-700/40 rounded-xl p-4">
-      <div className="flex items-center gap-2 mb-3 text-slate-400 text-xs uppercase tracking-wider">
+    <div className="bg-gray-100/50 dark:bg-slate-800/50 border border-gray-200/40 dark:border-slate-700/40 rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-3 text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider">
         <Clock size={12} />
         <span>General Best Viewing Window</span>
       </div>
@@ -24,17 +24,16 @@ export default function ViewingWindow({
       <div className="flex items-center justify-between gap-2">
         {/* Start */}
         <div className="text-center">
-          <div className="text-slate-500 text-xs mb-1">From</div>
-          <div className="text-white font-semibold tabular-nums text-lg">
+          <div className="text-gray-400 dark:text-slate-500 text-xs mb-1">From</div>
+          <div className="text-gray-900 dark:text-white font-semibold tabular-nums text-lg">
             {formatTime(windowStart)}
           </div>
         </div>
 
         {/* Timeline bar */}
         <div className="flex-1 flex flex-col items-center gap-1">
-          {/* Bar row - height matches the dot so the absolute dot sits flush on the line */}
           <div className="relative w-full h-3 flex items-center">
-            <div className="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
+            <div className="w-full h-1.5 bg-gray-300 dark:bg-slate-700 rounded-full overflow-hidden">
               <div
                 className="h-full rounded-full"
                 style={{
@@ -43,25 +42,23 @@ export default function ViewingWindow({
                 }}
               />
             </div>
-            {/* Dot - absolute inside h-3, so its center is exactly on the bar */}
-            <div className="absolute left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-orange-400 border-2 border-slate-900 shadow-lg shadow-orange-500/40" />
+            <div className="absolute left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-orange-400 border-2 border-white dark:border-slate-900 shadow-lg shadow-orange-500/40" />
           </div>
-          {/* Label below the bar */}
-          <div className="text-orange-400 text-xs whitespace-nowrap font-medium">
+          <div className="text-orange-500 dark:text-orange-400 text-xs whitespace-nowrap font-medium">
             {formatTime(sunsetTime)}
           </div>
         </div>
 
         {/* End */}
         <div className="text-center">
-          <div className="text-slate-500 text-xs mb-1">To</div>
-          <div className="text-white font-semibold tabular-nums text-lg">
+          <div className="text-gray-400 dark:text-slate-500 text-xs mb-1">To</div>
+          <div className="text-gray-900 dark:text-white font-semibold tabular-nums text-lg">
             {formatTime(windowEnd)}
           </div>
         </div>
       </div>
 
-      <p className="text-slate-500 text-xs mt-3 text-center">
+      <p className="text-gray-400 dark:text-slate-500 text-xs mt-3 text-center">
         Best 10 min before sunset through 25 min after - this is informational and does not affect the score.
       </p>
     </div>

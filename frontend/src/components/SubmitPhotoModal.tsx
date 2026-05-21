@@ -74,7 +74,6 @@ export default function SubmitPhotoModal({
     }
   };
 
-  // Trap focus inside modal on Escape
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -93,11 +92,11 @@ export default function SubmitPhotoModal({
       aria-label="Submit sunset photo"
       tabIndex={-1}
     >
-      <div className="relative w-full max-w-md bg-slate-900 border border-slate-700/60 rounded-2xl shadow-2xl p-6 flex flex-col gap-5">
+      <div className="relative w-full max-w-md bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700/60 rounded-2xl shadow-2xl p-6 flex flex-col gap-5">
         {/* Close button */}
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 transition-colors"
+          className="absolute top-4 right-4 text-gray-400 dark:text-slate-500 hover:text-gray-600 dark:hover:text-slate-300 transition-colors"
           aria-label="Close"
         >
           <X size={18} />
@@ -106,15 +105,14 @@ export default function SubmitPhotoModal({
         {/* Header */}
         <div className="flex items-center gap-2.5">
           <Camera size={20} className="text-orange-400" />
-          <h2 className="text-white font-semibold text-lg">Share your sunset</h2>
+          <h2 className="text-gray-900 dark:text-white font-semibold text-lg">Share your sunset</h2>
         </div>
 
         {status === "success" ? (
-          /* ── Success state ─────────────────────────────────────────────── */
           <div className="flex flex-col items-center gap-4 py-6 text-center">
             <CheckCircle size={48} className="text-orange-400" />
-            <p className="text-white font-medium">Photo submitted!</p>
-            <p className="text-slate-400 text-sm">
+            <p className="text-gray-900 dark:text-white font-medium">Photo submitted!</p>
+            <p className="text-gray-500 dark:text-slate-400 text-sm">
               Thanks for sharing. Your photo and the stats from that day have been sent.
             </p>
             <button
@@ -126,7 +124,7 @@ export default function SubmitPhotoModal({
           </div>
         ) : (
           <>
-            {/* ── Drop zone ──────────────────────────────────────────────── */}
+            {/* Drop zone */}
             <div
               onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
               onDragLeave={() => setDragging(false)}
@@ -135,7 +133,7 @@ export default function SubmitPhotoModal({
               className={`relative cursor-pointer rounded-xl border-2 border-dashed transition-colors flex flex-col items-center justify-center overflow-hidden
                 ${dragging
                   ? "border-orange-400 bg-orange-500/10"
-                  : "border-slate-600 hover:border-slate-500 bg-slate-800/40"
+                  : "border-gray-300 dark:border-slate-600 hover:border-gray-400 dark:hover:border-slate-500 bg-gray-100/40 dark:bg-slate-800/40"
                 }
                 ${preview ? "h-48" : "h-36"}
               `}
@@ -148,10 +146,10 @@ export default function SubmitPhotoModal({
                   className="h-full w-full object-cover"
                 />
               ) : (
-                <div className="flex flex-col items-center gap-2 text-slate-500 pointer-events-none select-none">
+                <div className="flex flex-col items-center gap-2 text-gray-400 dark:text-slate-500 pointer-events-none select-none">
                   <Upload size={24} />
                   <span className="text-sm">Click or drag a photo here</span>
-                  <span className="text-xs text-slate-600">JPEG · PNG · WebP · HEIC — max 10 MB</span>
+                  <span className="text-xs text-gray-300 dark:text-slate-600">JPEG · PNG · WebP · HEIC — max 10 MB</span>
                 </div>
               )}
               {preview && (
@@ -168,9 +166,9 @@ export default function SubmitPhotoModal({
               onChange={handleInputChange}
             />
 
-            {/* ── Date ───────────────────────────────────────────────────── */}
+            {/* Date */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-slate-400 text-xs uppercase tracking-wider">
+              <label className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider">
                 Date taken
               </label>
               <input
@@ -178,23 +176,23 @@ export default function SubmitPhotoModal({
                 value={photoDate}
                 onChange={(e) => setPhotoDate(e.target.value)}
                 max={new Date().toISOString().slice(0, 10)}
-                className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-orange-500/50 transition-colors"
+                className="w-full bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/50 rounded-lg px-3 py-2 text-gray-900 dark:text-white text-sm focus:outline-none focus:border-orange-500/50 transition-colors"
               />
             </div>
 
-            {/* ── Location (read-only display) ────────────────────────────── */}
+            {/* Location (read-only) */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-slate-400 text-xs uppercase tracking-wider">
+              <label className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider">
                 Location
               </label>
-              <div className="w-full bg-slate-800/40 border border-slate-700/30 rounded-lg px-3 py-2 text-slate-300 text-sm truncate">
+              <div className="w-full bg-gray-100/40 dark:bg-slate-800/40 border border-gray-200/30 dark:border-slate-700/30 rounded-lg px-3 py-2 text-gray-600 dark:text-slate-300 text-sm truncate">
                 {locationName || `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`}
               </div>
             </div>
 
-            {/* ── Optional message ───────────────────────────────────────── */}
+            {/* Optional message */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-slate-400 text-xs uppercase tracking-wider">
+              <label className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider">
                 Message (optional)
               </label>
               <textarea
@@ -203,22 +201,22 @@ export default function SubmitPhotoModal({
                 placeholder="Tell me about this sunset…"
                 maxLength={1000}
                 rows={3}
-                className="w-full bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-orange-500/50 transition-colors resize-none"
+                className="w-full bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/50 rounded-lg px-3 py-2 text-gray-900 dark:text-white text-sm placeholder-gray-400 dark:placeholder-slate-600 focus:outline-none focus:border-orange-500/50 transition-colors resize-none"
               />
             </div>
 
-            {/* ── Error ──────────────────────────────────────────────────── */}
+            {/* Error */}
             {status === "error" && (
-              <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+              <p className="text-red-500 dark:text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
                 {errorMsg}
               </p>
             )}
 
-            {/* ── Submit ─────────────────────────────────────────────────── */}
+            {/* Submit */}
             <button
               onClick={handleSubmit}
               disabled={!file || status === "submitting"}
-              className="w-full py-2.5 rounded-xl bg-orange-500 hover:bg-orange-400 disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-medium text-sm transition-colors flex items-center justify-center gap-2"
+              className="w-full py-2.5 rounded-xl bg-orange-500 hover:bg-orange-400 disabled:bg-gray-200 dark:disabled:bg-slate-700 disabled:text-gray-400 dark:disabled:text-slate-500 disabled:cursor-not-allowed text-white font-medium text-sm transition-colors flex items-center justify-center gap-2"
             >
               {status === "submitting" ? (
                 <>

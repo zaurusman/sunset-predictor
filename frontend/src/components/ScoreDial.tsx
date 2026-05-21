@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTheme } from "next-themes";
 import type { SunsetCategory } from "@/lib/types";
 import { getCategoryBgColor, getScoreHexColor } from "@/lib/utils";
 
@@ -18,6 +19,7 @@ export default function ScoreDial({
   size = 200,
 }: ScoreDialProps) {
   const [animatedScore, setAnimatedScore] = useState(0);
+  const { resolvedTheme } = useTheme();
 
   // Animate score fill on mount
   useEffect(() => {
@@ -30,15 +32,12 @@ export default function ScoreDial({
   const cy = size / 2;
   const circumference = 2 * Math.PI * radius;
 
-  // We draw a 270-degree arc (from 135° to 405°, i.e. bottom-left around to bottom-right)
-  // using stroke-dasharray trick
-  const arcFraction = 0.75; // 270 degrees = 75% of circle
+  const arcFraction = 0.75;
   const arcLength = circumference * arcFraction;
   const offset = circumference * arcFraction * (1 - animatedScore / 100);
 
   const colour = getScoreHexColor(score);
-
-  // SVG rotation: start arc at 135 degrees (7-o'clock position)
+  const trackColor = resolvedTheme === "dark" ? "#1e293b" : "#e2e8f0";
   const rotation = 135;
 
   return (
@@ -66,7 +65,7 @@ export default function ScoreDial({
             cy={cy}
             r={radius}
             fill="none"
-            stroke="#1e293b"
+            stroke={trackColor}
             strokeWidth="12"
             strokeDasharray={`${arcLength} ${circumference}`}
             strokeDashoffset={0}
@@ -109,7 +108,7 @@ export default function ScoreDial({
             {Math.round(animatedScore)}
           </span>
           <span
-            className="text-slate-400 font-medium uppercase tracking-widest"
+            className="text-gray-400 dark:text-slate-400 font-medium uppercase tracking-widest"
             style={{ fontSize: size * 0.065 }}
           >
             / 100
@@ -125,7 +124,7 @@ export default function ScoreDial({
       </div>
 
       {/* Confidence */}
-      <div className="text-slate-500 text-xs">
+      <div className="text-gray-400 dark:text-slate-500 text-xs">
         {Math.round(confidence)}% confidence
       </div>
     </div>

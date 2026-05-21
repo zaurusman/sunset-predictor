@@ -102,7 +102,7 @@ export default function LocationSearch({
         <div className="relative flex-1">
           <Search
             size={16}
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-slate-400 pointer-events-none"
           />
           <input
             type="text"
@@ -111,12 +111,12 @@ export default function LocationSearch({
             onFocus={() => results.length > 0 && setShowDropdown(true)}
             placeholder="Search location…"
             disabled={disabled}
-            className="w-full bg-slate-800/80 border border-slate-700 rounded-xl pl-9 pr-9 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-orange-500/60 focus:ring-1 focus:ring-orange-500/20 transition-colors disabled:opacity-50"
+            className="w-full bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-xl pl-9 pr-9 py-3 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-slate-500 focus:outline-none focus:border-orange-500/60 focus:ring-1 focus:ring-orange-500/20 transition-colors disabled:opacity-50"
           />
           {query && (
             <button
               onClick={clearInput}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-slate-500 hover:text-gray-600 dark:hover:text-slate-300"
             >
               <X size={14} />
             </button>
@@ -128,10 +128,10 @@ export default function LocationSearch({
           onClick={handleGeolocate}
           disabled={geoLoading || disabled}
           title="Use my location"
-          className="flex items-center justify-center w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 text-slate-400 hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50"
+          className="flex items-center justify-center w-12 h-12 rounded-xl bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 text-gray-400 dark:text-slate-400 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50"
         >
           {geoLoading ? (
-            <div className="w-4 h-4 border-2 border-slate-500 border-t-orange-400 rounded-full animate-spin" />
+            <div className="w-4 h-4 border-2 border-gray-300 dark:border-slate-500 border-t-orange-400 rounded-full animate-spin" />
           ) : (
             <Navigation size={16} />
           )}
@@ -145,7 +145,7 @@ export default function LocationSearch({
 
       {/* Dropdown */}
       {showDropdown && results.length > 0 && (
-        <div className="absolute z-50 w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
+        <div className="absolute z-50 w-full mt-1 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl shadow-2xl overflow-hidden">
           {results.map((result) => {
             const label = [result.name, result.admin1, result.country]
               .filter(Boolean)
@@ -154,11 +154,11 @@ export default function LocationSearch({
               <button
                 key={result.id}
                 onClick={() => handleSelect(result)}
-                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-700/60 transition-colors text-sm"
+                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-100 dark:hover:bg-slate-700/60 transition-colors text-sm"
               >
-                <MapPin size={14} className="text-slate-500 flex-shrink-0" />
-                <span className="text-white truncate">{label}</span>
-                <span className="ml-auto text-slate-500 text-xs flex-shrink-0">
+                <MapPin size={14} className="text-gray-400 dark:text-slate-500 flex-shrink-0" />
+                <span className="text-gray-900 dark:text-white truncate">{label}</span>
+                <span className="ml-auto text-gray-400 dark:text-slate-500 text-xs flex-shrink-0">
                   {result.country_code}
                 </span>
               </button>

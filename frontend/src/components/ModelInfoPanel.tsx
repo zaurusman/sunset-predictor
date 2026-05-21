@@ -16,8 +16,8 @@ export default function ModelInfoPanel() {
 
   if (loading) {
     return (
-      <div className="rounded-xl bg-slate-800/50 border border-slate-700/40 p-4 animate-pulse">
-        <div className="h-4 bg-slate-700 rounded w-1/3" />
+      <div className="rounded-xl bg-gray-100/50 dark:bg-slate-800/50 border border-gray-200/40 dark:border-slate-700/40 p-4 animate-pulse">
+        <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-1/3" />
       </div>
     );
   }
@@ -27,14 +27,14 @@ export default function ModelInfoPanel() {
   const loaded = info.loaded as boolean;
 
   return (
-    <div className="rounded-xl bg-slate-800/50 border border-slate-700/40 p-4 text-sm">
+    <div className="rounded-xl bg-gray-100/50 dark:bg-slate-800/50 border border-gray-200/40 dark:border-slate-700/40 p-4 text-sm">
       <div className="flex items-center gap-2 mb-3">
-        <Brain size={14} className="text-slate-400" />
-        <span className="text-slate-400 text-xs uppercase tracking-wider">ML Model</span>
+        <Brain size={14} className="text-gray-400 dark:text-slate-400" />
+        <span className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider">ML Model</span>
         {loaded ? (
-          <CheckCircle size={12} className="text-emerald-400 ml-auto" />
+          <CheckCircle size={12} className="text-emerald-500 dark:text-emerald-400 ml-auto" />
         ) : (
-          <XCircle size={12} className="text-amber-400 ml-auto" />
+          <XCircle size={12} className="text-amber-500 dark:text-amber-400 ml-auto" />
         )}
       </div>
 
@@ -47,10 +47,10 @@ export default function ModelInfoPanel() {
           <Row label="Blend α" value={String(info.blend_alpha ?? "—")} />
         </div>
       ) : (
-        <p className="text-slate-500 text-xs">
+        <p className="text-gray-400 dark:text-slate-500 text-xs">
           No trained model — running in physics-only mode.
           <br />
-          Run <code className="text-orange-400">python scripts/train_model.py</code> to train.
+          Run <code className="text-orange-500 dark:text-orange-400">python scripts/train_model.py</code> to train.
         </p>
       )}
     </div>
@@ -60,8 +60,8 @@ export default function ModelInfoPanel() {
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between">
-      <span className="text-slate-500">{label}</span>
-      <span className="text-slate-300 font-mono">{value}</span>
+      <span className="text-gray-400 dark:text-slate-500">{label}</span>
+      <span className="text-gray-700 dark:text-slate-300 font-mono">{value}</span>
     </div>
   );
 }

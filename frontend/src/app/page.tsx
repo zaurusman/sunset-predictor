@@ -18,6 +18,7 @@ import ModelInfoPanel from "@/components/ModelInfoPanel";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
 import SubmitPhotoModal from "@/components/SubmitPhotoModal";
+import ThemeToggle from "@/components/ThemeToggle";
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -83,15 +84,20 @@ export default function HomePage() {
   }, [fetchPrediction]);
 
   return (
-    <main className="min-h-screen px-4 py-8 max-w-2xl mx-auto">
+    <main className="min-h-screen bg-gray-50 dark:bg-slate-950 text-gray-900 dark:text-white px-4 py-8 max-w-2xl mx-auto">
       {/* Header */}
-      <header className="mb-8 text-center">
-        <Image src="/logo.jpeg" alt="Afterglow" width={360} height={60} className="mx-auto mb-1" priority />
-        <p className="text-slate-500 text-sm">
-          {selectedDate === todayIso()
-            ? "How beautiful will today\u2019s sunset be?"
-            : "How beautiful was that sunset?"}
-        </p>
+      <header className="mb-8 relative">
+        <div className="absolute right-0 top-0">
+          <ThemeToggle />
+        </div>
+        <div className="text-center">
+          <Image src="/logo.png" alt="Afterglow" width={360} height={60} className="mx-auto mb-1" priority />
+          <p className="text-gray-400 dark:text-slate-500 text-sm">
+            {selectedDate === todayIso()
+              ? "How beautiful will today\u2019s sunset be?"
+              : "How beautiful was that sunset?"}
+          </p>
+        </div>
       </header>
 
       {/* Location search + date picker */}
@@ -110,7 +116,7 @@ export default function HomePage() {
 
       {/* Future date disclaimer */}
       {selectedDate > todayIso() && (
-        <div className="mb-6 flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-sm">
+        <div className="mb-6 flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-600 dark:text-indigo-300 text-sm">
           <Info size={15} className="flex-shrink-0 mt-0.5" />
           <span>
             Weather forecasts are updated daily and cloud cover can shift significantly.
@@ -145,7 +151,7 @@ export default function HomePage() {
         <div className="space-y-6 animate-fade-in">
           {/* Location name + date */}
           {location && (
-            <div className="text-center text-slate-400 text-sm">
+            <div className="text-center text-gray-500 dark:text-slate-400 text-sm">
               {location.name}
             </div>
           )}
@@ -160,7 +166,7 @@ export default function HomePage() {
             />
           </div>
 
-          
+
           {/* Viewing window */}
           <ViewingWindow
             sunsetTime={prediction.sunset_time}
@@ -170,24 +176,24 @@ export default function HomePage() {
 
           {/* Reasons */}
           <section>
-            <h2 className="text-slate-400 text-xs uppercase tracking-wider mb-3">Why</h2>
+            <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-3">Why</h2>
             <ReasonsList reasons={prediction.reasons} />
           </section>
 
           {/* Component breakdown */}
-          <section className="bg-slate-900/60 rounded-2xl border border-slate-700/40 p-5">
-            <h2 className="text-slate-400 text-xs uppercase tracking-wider mb-4">Score Breakdown</h2>
+          <section className="bg-gray-100/60 dark:bg-slate-900/60 rounded-2xl border border-gray-200/40 dark:border-slate-700/40 p-5">
+            <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-4">Score Breakdown</h2>
             <ComponentBreakdown breakdown={prediction.physics_component_breakdown} />
             {prediction.ml_adjustment !== null && (
-              <p className="text-slate-500 text-xs mt-3">
+              <p className="text-gray-400 dark:text-slate-500 text-xs mt-3">
                 ML adjustment: {prediction.ml_adjustment > 0 ? "+" : ""}{prediction.ml_adjustment} pts
               </p>
             )}
           </section>
 
           {/* Weather summary */}
-          <section className="bg-slate-900/60 rounded-2xl border border-slate-700/40 p-5">
-            <h2 className="text-slate-400 text-xs uppercase tracking-wider mb-4">Weather at Sunset</h2>
+          <section className="bg-gray-100/60 dark:bg-slate-900/60 rounded-2xl border border-gray-200/40 dark:border-slate-700/40 p-5">
+            <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-4">Weather at Sunset</h2>
             <div className="grid grid-cols-3 gap-3 text-sm">
               <Stat label="Cloud (total)" value={`${Math.round(prediction.weather_summary.cloud_total_pct)}%`} />
               <Stat label="Cloud (high)" value={`${Math.round(prediction.weather_summary.cloud_high_pct)}%`} />
@@ -211,14 +217,14 @@ export default function HomePage() {
             <div className="flex flex-col gap-2">
               <Link
                 href={`/forecast?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
-                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
               >
                 <CalendarDays size={16} />
                 View 7-day forecast
               </Link>
               <button
                 onClick={() => setShowSubmitModal(true)}
-                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-slate-800/60 border border-slate-700/40 text-slate-300 hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
               >
                 <Camera size={16} />
                 Share your sunset photo
@@ -229,7 +235,7 @@ export default function HomePage() {
           {/* Debug / info section */}
           <button
             onClick={() => setShowDebug((v) => !v)}
-            className="flex items-center gap-1.5 text-slate-600 hover:text-slate-400 text-xs transition-colors mx-auto"
+            className="flex items-center gap-1.5 text-gray-300 dark:text-slate-600 hover:text-gray-500 dark:hover:text-slate-400 text-xs transition-colors mx-auto"
           >
             <Info size={12} />
             {showDebug ? "Hide" : "Show"} model info
@@ -240,9 +246,9 @@ export default function HomePage() {
 
       {/* Empty state — no location yet */}
       {!loading && !prediction && !error && (
-        <div className="text-center py-20 text-slate-600">
-          <Sunset size={52} className="mx-auto mb-4 text-slate-700" />
-          <p className="text-lg font-medium text-slate-500">Search for a location to get started</p>
+        <div className="text-center py-20 text-gray-300 dark:text-slate-600">
+          <Sunset size={52} className="mx-auto mb-4 text-gray-300 dark:text-slate-700" />
+          <p className="text-lg font-medium text-gray-400 dark:text-slate-500">Search for a location to get started</p>
           <p className="text-sm mt-2">or allow location access for your current area</p>
         </div>
       )}
@@ -263,9 +269,9 @@ export default function HomePage() {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-slate-800/40 rounded-lg p-2.5">
-      <div className="text-slate-500 text-xs mb-0.5">{label}</div>
-      <div className="text-white font-medium text-sm">{value}</div>
+    <div className="bg-gray-100/40 dark:bg-slate-800/40 rounded-lg p-2.5">
+      <div className="text-gray-400 dark:text-slate-500 text-xs mb-0.5">{label}</div>
+      <div className="text-gray-900 dark:text-white font-medium text-sm">{value}</div>
     </div>
   );
 }

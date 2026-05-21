@@ -11,6 +11,7 @@ import SunsetCard from "@/components/SunsetCard";
 import ForecastChart from "@/components/ForecastChart";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
+import ThemeToggle from "@/components/ThemeToggle";
 
 function ForecastContent() {
   const params = useSearchParams();
@@ -45,19 +46,20 @@ function ForecastContent() {
   const handleDayClick = (day: DayForecast) => setSelectedDate(day.date);
 
   return (
-    <main className="min-h-screen px-4 py-8 max-w-2xl mx-auto">
+    <main className="min-h-screen bg-gray-50 dark:bg-slate-950 text-gray-900 dark:text-white px-4 py-8 max-w-2xl mx-auto">
       {/* Header */}
       <div className="flex items-center gap-3 mb-6">
         <Link
           href={lat && lon ? `/?lat=${lat}&lon=${lon}&name=${encodeURIComponent(name)}` : "/"}
-          className="w-9 h-9 rounded-xl bg-slate-800/60 border border-slate-700/40 flex items-center justify-center text-slate-400 hover:text-white transition-colors"
+          className="w-9 h-9 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 flex items-center justify-center text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white transition-colors"
         >
           <ArrowLeft size={16} />
         </Link>
-        <div>
-          <h1 className="text-xl font-bold text-white">7-Day Forecast</h1>
-          <p className="text-slate-500 text-sm">{decodeURIComponent(name)}</p>
+        <div className="flex-1">
+          <h1 className="text-xl font-bold text-gray-900 dark:text-white">7-Day Forecast</h1>
+          <p className="text-gray-400 dark:text-slate-500 text-sm">{decodeURIComponent(name)}</p>
         </div>
+        <ThemeToggle />
       </div>
 
       {error && (
@@ -71,7 +73,7 @@ function ForecastContent() {
       {!loading && data && (
         <div className="space-y-6 animate-fade-in">
           {/* Forecast disclaimer */}
-          <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-sm">
+          <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-600 dark:text-indigo-300 text-sm">
             <Info size={15} className="flex-shrink-0 mt-0.5" />
             <span>
               Forecasts are updated daily and cloud cover can change significantly.
@@ -79,8 +81,8 @@ function ForecastContent() {
             </span>
           </div>
           {/* Chart overview */}
-          <section className="bg-slate-900/60 rounded-2xl border border-slate-700/40 p-5">
-            <h2 className="text-slate-400 text-xs uppercase tracking-wider mb-4">Score Overview</h2>
+          <section className="bg-gray-100/60 dark:bg-slate-900/60 rounded-2xl border border-gray-200/40 dark:border-slate-700/40 p-5">
+            <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-4">Score Overview</h2>
             <ForecastChart
               days={data.days}
               onDayClick={handleDayClick}
@@ -99,14 +101,14 @@ function ForecastContent() {
             ))}
           </section>
 
-          <p className="text-slate-600 text-xs text-center">
+          <p className="text-gray-300 dark:text-slate-600 text-xs text-center">
             Algorithm v{data.algorithm_version} · Generated {new Date(data.generated_at).toLocaleTimeString()}
           </p>
         </div>
       )}
 
       {!loading && !data && !error && (
-        <div className="text-center py-20 text-slate-600">
+        <div className="text-center py-20 text-gray-300 dark:text-slate-600">
           <p>No forecast data. Check your location.</p>
         </div>
       )}

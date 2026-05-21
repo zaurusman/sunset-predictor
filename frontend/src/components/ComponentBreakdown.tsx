@@ -28,7 +28,7 @@ function ScoreBar({ score }: { score: number }) {
 
   return (
     <div className="flex items-center gap-3 w-full">
-      <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+      <div className="flex-1 h-2 bg-gray-200 dark:bg-slate-800 rounded-full overflow-hidden">
         <div
           className="h-full rounded-full transition-all duration-700"
           style={{ width: `${score}%`, backgroundColor: colour }}
@@ -51,10 +51,10 @@ export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProp
           <div key={key} className="space-y-1.5">
             <div className="flex items-center justify-between text-sm">
               <div>
-                <span className="text-slate-200 font-medium">{label}</span>
-                <span className="text-slate-500 ml-2 text-xs">({Math.round(weight * 100)}% weight)</span>
+                <span className="text-gray-800 dark:text-slate-200 font-medium">{label}</span>
+                <span className="text-gray-400 dark:text-slate-500 ml-2 text-xs">({Math.round(weight * 100)}% weight)</span>
               </div>
-              <span className="text-slate-500 text-xs">{description}</span>
+              <span className="text-gray-400 dark:text-slate-500 text-xs">{description}</span>
             </div>
             <ScoreBar score={score} />
           </div>
@@ -62,10 +62,10 @@ export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProp
       })}
 
       {/* Overall physics score */}
-      <div className="pt-3 border-t border-slate-700/50 space-y-1.5">
+      <div className="pt-3 border-t border-gray-200/50 dark:border-slate-700/50 space-y-1.5">
         <div className="flex items-center justify-between text-sm">
-          <span className="text-slate-300 font-semibold">Physics Score</span>
-          <span className="text-slate-500 text-xs">weighted average</span>
+          <span className="text-gray-700 dark:text-slate-300 font-semibold">Physics Score</span>
+          <span className="text-gray-400 dark:text-slate-500 text-xs">weighted average</span>
         </div>
         <ScoreBar score={breakdown.weighted_physics_score} />
       </div>

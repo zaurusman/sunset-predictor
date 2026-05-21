@@ -13,7 +13,7 @@ export default function LoadingState({ message = "Fetching forecast…" }: Loadi
         <div className="absolute inset-2 rounded-full border-2 border-orange-400/40 animate-pulse" />
         <div className="absolute inset-4 rounded-full bg-orange-500/30 animate-pulse" />
       </div>
-      <p className="text-slate-400 text-sm">{message}</p>
+      <p className="text-gray-400 dark:text-slate-400 text-sm">{message}</p>
     </div>
   );
 }

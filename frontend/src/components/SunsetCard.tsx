@@ -27,8 +27,8 @@ export default function SunsetCard({ day, defaultExpanded = false }: SunsetCardP
     <div
       className={`rounded-2xl border transition-all duration-200 overflow-hidden ${
         today
-          ? "border-orange-500/40 bg-slate-900/90"
-          : "border-slate-700/50 bg-slate-900/60"
+          ? "border-orange-500/40 bg-gray-100/90 dark:bg-slate-900/90"
+          : "border-gray-200/50 dark:border-slate-700/50 bg-gray-100/60 dark:bg-slate-900/60"
       }`}
     >
       {/* Card header */}
@@ -51,7 +51,7 @@ export default function SunsetCard({ day, defaultExpanded = false }: SunsetCardP
         {/* Date + category */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-white font-semibold">
+            <span className="text-gray-900 dark:text-white font-semibold">
               {today ? "Today" : formatDateShort(day.date)}
             </span>
             <span
@@ -60,29 +60,29 @@ export default function SunsetCard({ day, defaultExpanded = false }: SunsetCardP
               {day.category}
             </span>
           </div>
-          <div className="text-slate-500 text-sm mt-0.5">
+          <div className="text-gray-400 dark:text-slate-500 text-sm mt-0.5">
             Sunset {formatTime(day.sunset_time)} · {Math.round(day.confidence_0_100)}% confidence
           </div>
         </div>
 
         {/* Expand toggle */}
-        <div className="text-slate-600">
+        <div className="text-gray-300 dark:text-slate-600">
           {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </div>
       </button>
 
       {/* Expanded content */}
       {expanded && (
-        <div className="px-5 pb-5 space-y-4 border-t border-slate-700/40 pt-4">
+        <div className="px-5 pb-5 space-y-4 border-t border-gray-200/40 dark:border-slate-700/40 pt-4">
           {/* Reasons */}
           <div>
-            <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Why</h4>
+            <h4 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-2">Why</h4>
             <ReasonsList reasons={day.reasons} />
           </div>
 
           {/* Component breakdown */}
           <div>
-            <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Score Breakdown</h4>
+            <h4 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-2">Score Breakdown</h4>
             <ComponentBreakdown breakdown={day.physics_component_breakdown} />
           </div>
         </div>

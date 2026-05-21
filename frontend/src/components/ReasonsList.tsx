@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, CheckCircle2, Cloud, Droplets, Eye, Mountain, Sun } from "lucide-react";
+import { CheckCircle2, Cloud, Droplets, Eye, Mountain, Sun } from "lucide-react";
 
 interface ReasonsListProps {
   reasons: string[];
@@ -32,12 +32,12 @@ export default function ReasonsList({ reasons }: ReasonsListProps) {
         return (
           <div
             key={i}
-            className="flex items-start gap-3 px-4 py-3 rounded-xl bg-slate-800/50 border border-slate-700/40"
+            className="flex items-start gap-3 px-4 py-3 rounded-xl bg-gray-100/50 dark:bg-slate-800/50 border border-gray-200/40 dark:border-slate-700/40"
           >
-            <span className={positive ? "text-emerald-400" : "text-amber-400"}>
+            <span className={positive ? "text-emerald-500 dark:text-emerald-400" : "text-amber-500 dark:text-amber-400"}>
               {getReasonIcon(reason)}
             </span>
-            <span className="text-slate-300 text-sm leading-relaxed">{reason}</span>
+            <span className="text-gray-700 dark:text-slate-300 text-sm leading-relaxed">{reason}</span>
           </div>
         );
       })}

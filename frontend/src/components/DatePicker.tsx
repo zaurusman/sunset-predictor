@@ -119,32 +119,32 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
       <button
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}
-        className="flex items-center gap-2 px-4 py-2.5 bg-slate-800/80 border border-slate-700 rounded-xl text-sm text-slate-300 hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50 whitespace-nowrap"
+        className="flex items-center gap-2 px-4 py-2.5 bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-xl text-sm text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50 whitespace-nowrap"
       >
         <Calendar size={14} className="flex-shrink-0" />
         <span>{formatLabel(value)}</span>
-        <ChevronDown size={12} className="text-slate-500 flex-shrink-0" />
+        <ChevronDown size={12} className="text-gray-400 dark:text-slate-500 flex-shrink-0" />
       </button>
 
       {/* Calendar popover */}
       {open && (
-        <div className="absolute z-50 top-full mt-2 left-1/2 -translate-x-1/2 bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl p-4 w-72">
+        <div className="absolute z-50 top-full mt-2 left-1/2 -translate-x-1/2 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-2xl p-4 w-72">
           {/* Month/year navigation */}
           <div className="flex items-center justify-between mb-3">
             <button
               onClick={prevMonth}
               disabled={!canPrev}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+              className="p-1.5 rounded-lg text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
             >
               <ChevronLeft size={14} />
             </button>
-            <span className="text-sm font-semibold text-white">
+            <span className="text-sm font-semibold text-gray-900 dark:text-white">
               {MONTH_NAMES[viewMonth]} {viewYear}
             </span>
             <button
               onClick={nextMonth}
               disabled={!canNext}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+              className="p-1.5 rounded-lg text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
             >
               <ChevronRight size={14} />
             </button>
@@ -153,7 +153,7 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
           {/* Weekday headers */}
           <div className="grid grid-cols-7 mb-1">
             {WEEKDAYS.map((d) => (
-              <div key={d} className="text-center text-slate-500 text-xs py-1 font-medium">
+              <div key={d} className="text-center text-gray-400 dark:text-slate-500 text-xs py-1 font-medium">
                 {d}
               </div>
             ))}
@@ -174,15 +174,15 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
               let cls =
                 "text-xs h-8 w-full rounded-lg font-medium transition-colors ";
               if (isDisabled) {
-                cls += "text-slate-600 cursor-not-allowed";
+                cls += "text-gray-300 dark:text-slate-600 cursor-not-allowed";
               } else if (isSelected) {
                 cls += "bg-orange-500 text-white";
               } else if (isToday) {
-                cls += "border border-orange-500/50 text-orange-400 hover:bg-orange-500/10";
+                cls += "border border-orange-500/50 text-orange-500 dark:text-orange-400 hover:bg-orange-500/10";
               } else if (isFuture) {
-                cls += "text-indigo-300 hover:bg-indigo-500/10";
+                cls += "text-indigo-500 dark:text-indigo-300 hover:bg-indigo-500/10";
               } else {
-                cls += "text-slate-300 hover:bg-slate-700";
+                cls += "text-gray-700 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700";
               }
 
               return (
@@ -199,15 +199,15 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
           </div>
 
           {/* Footer */}
-          <div className="mt-3 pt-3 border-t border-slate-700/60 flex items-center justify-between gap-2">
-            <span className="text-xs text-indigo-300/70 flex items-center gap-1">
+          <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-700/60 flex items-center justify-between gap-2">
+            <span className="text-xs text-indigo-400/70 dark:text-indigo-300/70 flex items-center gap-1">
               <span className="inline-block w-2 h-2 rounded-sm bg-indigo-400/40" />
               Forecast dates
             </span>
             {value !== todayIso() && (
               <button
                 onClick={goToday}
-                className="text-xs text-orange-400 hover:text-orange-300 transition-colors"
+                className="text-xs text-orange-500 dark:text-orange-400 hover:text-orange-400 dark:hover:text-orange-300 transition-colors"
               >
                 Back to today
               </button>

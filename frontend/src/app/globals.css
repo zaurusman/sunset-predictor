@@ -2,35 +2,49 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Light mode (default) ───────────────────────────────────────────────── */
 :root {
-  --background: #0a0f1a;
-  --foreground: #f1f5f9;
+  color-scheme: light;
+}
+
+/* ── Dark mode ──────────────────────────────────────────────────────────── */
+.dark {
+  color-scheme: dark;
 }
 
 body {
-  background-color: var(--background);
-  color: var(--foreground);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar — light */
 ::-webkit-scrollbar {
   width: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f172a;
+  background: #f1f5f9;
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: #cbd5e1;
   border-radius: 3px;
+}
+
+/* Custom scrollbar — dark */
+.dark ::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
 }
 
 /* Glassmorphism helper */
 .glass {
-  background: rgba(15, 23, 42, 0.8);
+  background: rgba(255, 255, 255, 0.8);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
+}
+.dark .glass {
+  background: rgba(15, 23, 42, 0.8);
 }
 
 /* Gradient text */
