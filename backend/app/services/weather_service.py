@@ -265,6 +265,12 @@ class WeatherService:
         weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
         aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
 
+        # Pre-parse timestamps once so the per-day extraction loop doesn't
+        # re-parse the same list on every call to _extract_snapshot_for_hour.
+        _prepopulate_parsed_times(weather_data)
+        if aq_data is not None:
+            _prepopulate_parsed_times(aq_data)
+
         results: list[tuple[date, list[WeatherSnapshot]]] = []
         for offset in range(days):
             d = today + timedelta(days=offset)
@@ -326,6 +332,12 @@ class WeatherService:
         if end_date > archive_boundary:
             recent_weather = await self._fetch_forecast_raw(lat, lon, days=1, past_days=7)
             recent_aq = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=7)
+
+        # Pre-parse timestamps once so the per-day loop doesn't re-parse the
+        # same 8760-entry list on every _extract_snapshot_for_hour / _extract_trends call.
+        for _d in [archive_data, recent_weather, recent_aq]:
+            if _d is not None:
+                _prepopulate_parsed_times(_d)
 
         results: list[tuple[date, list[WeatherSnapshot]]] = []
         current = start_date
@@ -481,8 +493,9 @@ class WeatherService:
         if not time_strs:
             raise ValueError("No hourly time data in Open-Meteo response")
 
-        # Parse all timestamps (they come as naive UTC strings from API)
-        times = [
+        # Use pre-parsed list when available (populated by _prepopulate_parsed_times
+        # in batch callers); fall back to parsing on first use for single-snapshot paths.
+        times: list[datetime] = hourly.get("_times_parsed") or [
             datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs
         ]
 
@@ -618,7 +631,9 @@ class WeatherService:
         if not time_strs:
             return {}
 
-        times = [datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs]
+        times = hourly.get("_times_parsed") or [
+            datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs
+        ]
         sunset_idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
         past_idx = max(0, sunset_idx - 3)
 
@@ -669,6 +684,21 @@ _REQUIRED_OVERRIDE_FIELDS = {
     "cloud_low", "cloud_mid", "cloud_high", "cloud_total",
     "visibility_m", "relative_humidity", "precipitation_mm",
 }
+
+
+def _prepopulate_parsed_times(data: dict) -> None:
+    """
+    Parse the hourly time strings in *data* once and store the result under
+    the ``_times_parsed`` key so repeated calls to ``_extract_snapshot_for_hour``
+    and ``_extract_trends`` on the same raw dict skip re-parsing.
+
+    Mutates *data* in-place; safe because the dict is local to a single request.
+    """
+    hourly = data.get("hourly", {})
+    if hourly.get("time") and "_times_parsed" not in hourly:
+        hourly["_times_parsed"] = [
+            datetime.fromisoformat(t).replace(tzinfo=UTC) for t in hourly["time"]
+        ]
 
 
 def _override_is_complete(override: WeatherOverride) -> bool:
