@@ -14,6 +14,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.models.ml_model import MLModel
 from app.schemas.forecast import DayForecast, ForecastRequest, ForecastResponse
+from app.schemas.heatmap import HeatmapDay, HeatmapResponse
 from app.schemas.prediction import (
     PredictRequest,
     PredictResponse,
@@ -205,6 +206,62 @@ class PredictionService:
             days=valid_days,
             location={"latitude": lat, "longitude": lon},
             algorithm_version=self._settings.ALGORITHM_VERSION,
+            generated_at=utcnow(),
+        )
+
+    # ------------------------------------------------------------------
+    # Historical heatmap
+    # ------------------------------------------------------------------
+
+    async def heatmap(self, lat: float, lon: float, months: int = 12) -> HeatmapResponse:
+        """Return one scored day per calendar day for the past *months* months."""
+        today = date.today()
+        end_date = today - timedelta(days=1)  # yesterday; recent dates use forecast API, not archive
+
+        # Compute start_date as the 1st of the month N months back
+        month = end_date.month - months
+        year = end_date.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        start_date = date(year, month, 1)
+
+        daily_windows = await self._weather.get_historical_range_windows(lat, lon, start_date, end_date)
+
+        result_days: list[HeatmapDay] = []
+        for d, window_snaps in daily_windows:
+            # Mirror _score_day exactly so heatmap scores match single-date predict scores
+            scored: list[tuple[str, float]] = []
+            snap_results: dict[str, tuple] = {}
+            for snap in window_snaps:
+                r = self._scoring.score(snap, horizon_obstruction_deg=2.0)
+                label = snap.timestamp_label or "sunset"
+                scored.append((label, r.physics_score))
+                snap_results[label] = (r, snap)
+
+            window_result = self._scoring.score_window(scored)
+            best_label = window_result.best_label
+            _, primary_weather = snap_results[best_label]
+
+            ml_score: Optional[float] = None
+            if self._ml.is_loaded():
+                ml_score = self._ml.predict_calibrated_score(
+                    weather=primary_weather,
+                    physics_score=window_result.final_score,
+                    target_date_or_month=d.month,
+                    horizon_obstruction_deg=2.0,
+                )
+
+            final_score = round(self._ml.blend(window_result.final_score, ml_score), 1)
+            result_days.append(HeatmapDay(
+                date=d,
+                score=final_score,
+                category=self._scoring.score_to_category(final_score),
+            ))
+
+        return HeatmapResponse(
+            days=result_days,
+            location={"latitude": lat, "longitude": lon},
             generated_at=utcnow(),
         )
 

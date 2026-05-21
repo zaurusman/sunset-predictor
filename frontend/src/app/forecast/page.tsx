@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Info } from "lucide-react";
+import { ArrowLeft, History, Info } from "lucide-react";
 import { forecast } from "@/lib/api";
 import type { DayForecast, ForecastResponse } from "@/lib/types";
 
@@ -100,6 +100,14 @@ function ForecastContent() {
               />
             ))}
           </section>
+
+          <Link
+            href={`/heatmap?lat=${lat}&lon=${lon}&name=${encodeURIComponent(name)}`}
+            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+          >
+            <History size={16} />
+            Sunset history
+          </Link>
 
           <p className="text-gray-300 dark:text-slate-600 text-xs text-center">
             Algorithm v{data.algorithm_version} · Generated {new Date(data.generated_at).toLocaleTimeString()}

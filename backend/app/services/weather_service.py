@@ -287,6 +287,75 @@ class WeatherService:
         sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
         return await self._fetch_archive_snapshot(lat, lon, target_date, sunset_time)
 
+    async def get_historical_range_windows(
+        self,
+        lat: float,
+        lon: float,
+        start_date: date,
+        end_date: date,
+    ) -> list[tuple[date, list[WeatherSnapshot]]]:
+        """
+        Fetch 4-point window snapshots per day for [start_date, end_date].
+
+        Mirrors predict()'s data-source split exactly so heatmap scores match:
+          - days_ago > 7  → archive API (one bulk request for the whole range)
+          - days_ago <= 7 → forecast API with past_days (same as get_window_snapshots)
+        """
+        cache_key = TTLCache.make_key("hist_range_windows", lat, lon, str(start_date), str(end_date))
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.debug(
+                "Cache hit for hist_range_windows lat=%.4f lon=%.4f %s..%s",
+                lat, lon, start_date, end_date,
+            )
+            return cached
+
+        today = datetime.now(UTC).date()
+        # dates with days_ago > 7 are safely in the archive; ≤7 use forecast+past_days
+        archive_boundary = today - timedelta(days=8)
+
+        # One bulk archive fetch for the old portion
+        archive_data: Optional[dict] = None
+        if start_date <= archive_boundary:
+            archive_end = min(end_date, archive_boundary)
+            archive_data = await self._fetch_archive_range_raw(lat, lon, start_date, archive_end)
+
+        # One forecast fetch covers all of the recent 7 days
+        recent_weather: Optional[dict] = None
+        recent_aq: Optional[dict] = None
+        if end_date > archive_boundary:
+            recent_weather = await self._fetch_forecast_raw(lat, lon, days=1, past_days=7)
+            recent_aq = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=7)
+
+        results: list[tuple[date, list[WeatherSnapshot]]] = []
+        current = start_date
+        while current <= end_date:
+            try:
+                days_ago = (today - current).days
+                if days_ago <= 7:
+                    weather_data, aq_data = recent_weather, recent_aq
+                else:
+                    weather_data, aq_data = archive_data, None
+
+                if weather_data is None:
+                    logger.warning("No weather data source available for %s, skipping", current)
+                    current += timedelta(days=1)
+                    continue
+
+                sunset_time = self._astro.get_sunset_time(lat, lon, current)
+                window_snaps = self._extract_window_snapshots_from_raw(
+                    weather_data, aq_data, lat, lon, sunset_time
+                )
+                results.append((current, window_snaps))
+            except Exception as exc:
+                logger.warning("Failed to build window snapshots for %s: %s", current, exc)
+            current += timedelta(days=1)
+
+        # Archive data never changes; recent forecast data can be refreshed — use default TTL
+        ttl = 86400 if end_date <= archive_boundary else None
+        self._cache.set(cache_key, results, ttl_override=ttl)
+        return results
+
     # ------------------------------------------------------------------
     # Internal: fetch helpers
     # ------------------------------------------------------------------
@@ -342,6 +411,25 @@ class WeatherService:
             "hourly": ARCHIVE_HOURLY_VARS,
             "start_date": str(target_date),
             "end_date": str(target_date),
+            "timezone": "UTC",
+        }
+        return await self._get_json(url, params)
+
+    async def _fetch_archive_range_raw(
+        self,
+        lat: float,
+        lon: float,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, Any]:
+        """Fetch a date range of archive data in one HTTP request."""
+        url = f"{self._settings.OPEN_METEO_ARCHIVE_URL}/archive"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": ARCHIVE_HOURLY_VARS,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
             "timezone": "UTC",
         }
         return await self._get_json(url, params)

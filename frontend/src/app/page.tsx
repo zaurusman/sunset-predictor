@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { CalendarDays, Camera, Info, Sunset } from "lucide-react";
+import { CalendarDays, Camera, History, Info, Sunset } from "lucide-react";
 import { predict } from "@/lib/api";
 import type { LocationState, PredictResponse } from "@/lib/types";
 
@@ -221,6 +221,13 @@ export default function HomePage() {
               >
                 <CalendarDays size={16} />
                 View 7-day forecast
+              </Link>
+              <Link
+                href={`/heatmap?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
+              >
+                <History size={16} />
+                Sunset history
               </Link>
               <button
                 onClick={() => setShowSubmitModal(true)}

@@ -14,7 +14,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health, predict, forecast, model_info, geocode, submit
+from app.api import health, predict, forecast, heatmap, model_info, geocode, submit
 from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
 from app.models.ml_model import MLModel
@@ -121,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(predict.router)
     app.include_router(forecast.router)
+    app.include_router(heatmap.router)
     app.include_router(model_info.router)
     app.include_router(geocode.router)
     app.include_router(submit.router)

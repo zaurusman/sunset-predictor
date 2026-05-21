@@ -9,6 +9,7 @@ import type {
   ForecastRequest,
   ForecastResponse,
   GeocodingResult,
+  HeatmapResponse,
   HealthResponse,
   PredictRequest,
   PredictResponse,
@@ -112,6 +113,16 @@ export async function submitPhoto(params: {
   }
 
   return res.json() as Promise<SubmitPhotoResponse>;
+}
+
+/** Fetch historical sunset score heatmap for a location. */
+export async function heatmap(params: {
+  lat: number;
+  lon: number;
+  months?: number;
+}): Promise<HeatmapResponse> {
+  const url = `${API_BASE}/heatmap?lat=${params.lat}&lon=${params.lon}&months=${params.months ?? 12}`;
+  return request<HeatmapResponse>(url);
 }
 
 // ---------------------------------------------------------------------------

@@ -37,10 +37,11 @@ class TTLCache:
                 return None
             return value
 
-    def set(self, key: str, value: Any) -> None:
-        """Store *value* under *key* for TTL seconds."""
+    def set(self, key: str, value: Any, ttl_override: Optional[int] = None) -> None:
+        """Store *value* under *key* for TTL seconds (or ttl_override if given)."""
+        ttl = ttl_override if ttl_override is not None else self._ttl
         with self._lock:
-            expires_at = time.monotonic() + self._ttl
+            expires_at = time.monotonic() + ttl
             self._store[key] = (value, expires_at)
             self._set_count += 1
             if self._set_count % 100 == 0:

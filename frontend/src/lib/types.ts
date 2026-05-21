@@ -132,6 +132,20 @@ export interface SubmitPhotoResponse {
   message: string;
 }
 
+// ── Heatmap ───────────────────────────────────────────────────────────────────
+
+export interface HeatmapDay {
+  date: string; // "YYYY-MM-DD"
+  score: number;
+  category: SunsetCategory;
+}
+
+export interface HeatmapResponse {
+  days: HeatmapDay[];
+  location: { latitude: number; longitude: number };
+  generated_at: string;
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 export interface LocationState {
