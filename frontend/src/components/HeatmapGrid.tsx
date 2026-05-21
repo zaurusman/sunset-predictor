@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { HeatmapDay } from "@/lib/types";
+import { getCategoryColor } from "@/lib/utils";
 
 interface DayCell extends HeatmapDay {
   level: number;
@@ -13,14 +14,15 @@ interface Week {
   monthLabel?: string;
 }
 
-// Full class strings so Tailwind JIT can detect them
+// Full class strings so Tailwind JIT can detect them.
+// Colors match getScoreHexColor / getCategoryBgColor in lib/utils.ts exactly.
 const LEVEL_CLASSES: string[] = [
-  "bg-gray-100 dark:bg-slate-800",        // 0: empty cell
-  "bg-orange-100 dark:bg-orange-950",     // 1: poor (0–29)
-  "bg-orange-200 dark:bg-orange-800",     // 2: decent (30–49)
-  "bg-orange-300 dark:bg-orange-600",     // 3: good (50–64)
-  "bg-orange-400 dark:bg-orange-400",     // 4: great (65–79)
-  "bg-orange-500 dark:bg-orange-300",     // 5: epic (80+)
+  "bg-gray-200 dark:bg-slate-700",  // 0: empty cell
+  "bg-red-400",                      // 1: poor    (0–29)
+  "bg-orange-400",                   // 2: decent  (30–49)
+  "bg-amber-400",                    // 3: good    (50–64)
+  "bg-emerald-400",                  // 4: great   (65–79)
+  "bg-purple-500",                   // 5: epic    (80+)
 ];
 
 const LEVEL_LABELS = ["No data", "Poor (0–29)", "Decent (30–49)", "Good (50–64)", "Great (65–79)", "Epic (80+)"];
@@ -96,7 +98,8 @@ export default function HeatmapGrid({ days }: { days: HeatmapDay[] }) {
             })}
             {" — "}
             <strong>{Math.round(hovered.score)}</strong>
-            <span className="text-gray-500 dark:text-slate-400">/100 · {hovered.category}</span>
+            <span className="text-gray-500 dark:text-slate-400">/100 · </span>
+            <span className={getCategoryColor(hovered.category)}>{hovered.category}</span>
           </span>
         ) : (
           <span className="text-gray-400 dark:text-slate-500 text-xs">
