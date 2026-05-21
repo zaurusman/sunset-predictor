@@ -121,7 +121,7 @@ export async function heatmap(params: {
   lon: number;
   months?: number;
 }): Promise<HeatmapResponse> {
-  const url = `${API_BASE}/heatmap?lat=${params.lat}&lon=${params.lon}&months=${params.months ?? 12}`;
+  const url = `${API_BASE}/heatmap?lat=${params.lat}&lon=${params.lon}&months=${params.months ?? 6}`;
   return request<HeatmapResponse>(url);
 }
 

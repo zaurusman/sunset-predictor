@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
@@ -35,23 +35,85 @@ function computeBestMonths(days: HeatmapDay[]): { month: string; avg: number }[]
     .slice(0, 3);
 }
 
+// Animated progress bar that fills to ~85% while loading, then snaps to 100% on done.
+function ProgressBar({ loading, months }: { loading: boolean; months: number }) {
+  const [width, setWidth] = useState(0);
+  const [visible, setVisible] = useState(false);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (loading) {
+      // Reset to 0 (no transition), then animate to 85% slowly
+      setWidth(0);
+      setVisible(true);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+      const t = setTimeout(() => setWidth(85), 60);
+      return () => clearTimeout(t);
+    } else if (visible) {
+      // Snap to 100%, then fade out
+      setWidth(100);
+      hideTimer.current = setTimeout(() => setVisible(false), 500);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  if (!visible) return null;
+
+  return (
+    <div className="mb-5">
+      <div className="h-1.5 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-orange-400 rounded-full"
+          style={{
+            width: `${width}%`,
+            transition:
+              width === 0
+                ? "none"
+                : width === 100
+                ? "width 0.4s ease"
+                : "width 25s cubic-bezier(0.1, 0.4, 0.3, 1)",
+          }}
+        />
+      </div>
+      <p className="mt-2 text-xs text-gray-400 dark:text-slate-500 text-center">
+        Computing {months} months of sunset scores — this takes a few seconds…
+      </p>
+    </div>
+  );
+}
+
 function HeatmapContent() {
   const params = useSearchParams();
   const lat = parseFloat(params.get("lat") ?? "0");
   const lon = parseFloat(params.get("lon") ?? "0");
   const name = params.get("name") ?? `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
 
-  const [months, setMonths] = useState<MonthsOption>(12);
+  // Client-side cache: avoid re-fetching months we already have
+  const dataCache = useRef<Map<MonthsOption, HeatmapResponse>>(new Map());
+
+  const [months, setMonths] = useState<MonthsOption>(6);
   const [data, setData] = useState<HeatmapResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async (m: MonthsOption) => {
+  const load = async (m: MonthsOption, force = false) => {
     if (!lat || !lon) return;
+
+    // Serve from cache if available (unless forced refresh)
+    if (!force) {
+      const cached = dataCache.current.get(m);
+      if (cached) {
+        setData(cached);
+        setError(null);
+        return;
+      }
+    }
+
     setLoading(true);
     setError(null);
     try {
       const result = await fetchHeatmap({ lat, lon, months: m });
+      dataCache.current.set(m, result);
       setData(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load sunset history.");
@@ -63,7 +125,12 @@ function HeatmapContent() {
   useEffect(() => {
     load(months);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lat, lon, months]);
+  }, [lat, lon]);
+
+  const handleMonthsChange = (m: MonthsOption) => {
+    setMonths(m);
+    load(m);
+  };
 
   const bestMonths = data ? computeBestMonths(data.days) : [];
 
@@ -89,8 +156,9 @@ function HeatmapContent() {
         {MONTHS_OPTIONS.map((m) => (
           <button
             key={m}
-            onClick={() => setMonths(m)}
-            className={`px-4 py-2 rounded-xl text-sm font-medium border transition-colors ${
+            onClick={() => handleMonthsChange(m)}
+            disabled={loading}
+            className={`px-4 py-2 rounded-xl text-sm font-medium border transition-colors disabled:opacity-50 ${
               months === m
                 ? "bg-orange-500 border-orange-500 text-white"
                 : "bg-gray-100/60 dark:bg-slate-800/60 border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-400 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30"
@@ -101,16 +169,23 @@ function HeatmapContent() {
         ))}
       </div>
 
+      {/* Progress bar — shown above content while loading */}
+      <ProgressBar loading={loading} months={months} />
+
       {error && (
         <div className="mb-6">
-          <ErrorAlert message={error} onRetry={() => load(months)} />
+          <ErrorAlert message={error} onRetry={() => load(months, true)} />
         </div>
       )}
 
-      {loading && <LoadingState message="Loading sunset history…" />}
+      {!loading && !data && !error && (
+        <div className="text-center py-20 text-gray-300 dark:text-slate-600">
+          <p>No history data. Check your location.</p>
+        </div>
+      )}
 
-      {!loading && data && (
-        <div className="space-y-6 animate-fade-in">
+      {data && (
+        <div className={`space-y-6 ${loading ? "opacity-40 pointer-events-none" : "animate-fade-in"}`}>
           {/* Heatmap grid */}
           <section className="bg-gray-100/60 dark:bg-slate-900/60 rounded-2xl border border-gray-200/40 dark:border-slate-700/40 p-5">
             <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-4">
@@ -155,12 +230,6 @@ function HeatmapContent() {
             {data.days.length} days · Generated{" "}
             {new Date(data.generated_at).toLocaleTimeString()}
           </p>
-        </div>
-      )}
-
-      {!loading && !data && !error && (
-        <div className="text-center py-20 text-gray-300 dark:text-slate-600">
-          <p>No history data. Check your location.</p>
         </div>
       )}
     </main>
