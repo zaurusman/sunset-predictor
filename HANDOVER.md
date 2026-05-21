@@ -1,5 +1,34 @@
 # Afterglow — Agent Handover Note
 
+## Git Workflow
+
+Every feature gets its own branch. Only merge to `main` when the feature is complete.
+
+```bash
+# Start a new feature
+git checkout main && git pull
+git checkout -b feature/my-feature
+
+# Work, commit freely on the branch
+git add <files>
+git commit -m "..."
+
+# When done: rebase onto latest main, then merge
+git fetch origin
+git rebase origin/main
+git checkout main
+git merge --ff-only feature/my-feature
+git push origin main
+git branch -d feature/my-feature
+```
+
+- Branch naming: `feature/`, `fix/`, `chore/` prefixes
+- Never commit directly to `main`
+- One branch per logical feature — don't pile unrelated changes together
+- Squash noisy WIP commits before rebasing if needed (`git rebase -i origin/main`)
+
+---
+
 ## What This Project Is
 
 **Afterglow** is a sunset beauty predictor web app. Given a location and date it returns a 0–100 score, category, reasons, and the best viewing window. It has two parts:
