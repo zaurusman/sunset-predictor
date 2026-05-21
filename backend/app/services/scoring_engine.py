@@ -232,9 +232,10 @@ class ScoringEngine:
             best_label = afterglow_label
             best_score = scores[afterglow_label]
 
-        # Consistency bonus: fraction of points ≥ 50, scaled to +5 pts max
+        # Consistency bonus: fraction of points ≥ 50, scaled to +3 pts max
+        # (was +5 — reduced because inflated atmosphere made it fire too easily)
         good_count = sum(1 for v in vals if v >= 50.0)
-        consistency_bonus = (good_count / len(vals)) * 5.0 if len(vals) > 1 else 0.0
+        consistency_bonus = (good_count / len(vals)) * 3.0 if len(vals) > 1 else 0.0
 
         # Volatility penalty: spread > 30 → scale up to −8 pts
         spread = max(vals) - min(vals)
@@ -479,8 +480,11 @@ class ScoringEngine:
             # Peak at AOD ≈ 0.18 (light haze for warm tones)
             aer_score = bell_curve(aerosol_od, peak=0.18, sigma=0.15) * 100.0
         else:
-            # Gentle proxy — never below 40 regardless of visibility
-            aer_score = max(40.0, vis_score * 0.80)
+            # Estimated AOD: no artificial floor — tie it directly to visibility
+            # so that the default 15 km archive baseline produces a neutral score,
+            # not a phantom-high one.  Previously max(40, vis*0.80) could give ~77
+            # even with mediocre visibility; now it scales proportionally.
+            aer_score = vis_score * 0.75
 
         # Humidity: mild penalty above 75 % (max −18 pts at 100 %)
         hum_penalty = max(0.0, (humidity_pct - 75.0) / 25.0 * 18.0)
