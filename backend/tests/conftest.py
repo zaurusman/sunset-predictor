@@ -9,6 +9,23 @@ from app.schemas.weather import WeatherSnapshot
 from app.services.scoring_engine import ScoringEngine
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--live",
+        action="store_true",
+        default=False,
+        help="Run tests marked 'live' that make real HTTP calls to Open-Meteo",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--live"):
+        skip = pytest.mark.skip(reason="Skipped by default — run with: pytest -m live --live")
+        for item in items:
+            if item.get_closest_marker("live"):
+                item.add_marker(skip)
+
+
 @pytest.fixture(scope="session")
 def client() -> TestClient:
     """TestClient that drives the full FastAPI app."""
