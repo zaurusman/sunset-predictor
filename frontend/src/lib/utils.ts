@@ -78,7 +78,7 @@ export function formatTime(isoString: string): string {
 export function formatDateShort(isoString: string): string {
   try {
     const dt = new Date(isoString);
-    return dt.toLocaleDateString(undefined, {
+    return dt.toLocaleDateString("en-US", {
       weekday: "short",
       day: "numeric",
       month: "short",
@@ -92,7 +92,7 @@ export function formatDateShort(isoString: string): string {
 export function formatDateLong(isoString: string): string {
   try {
     const dt = new Date(isoString);
-    return dt.toLocaleDateString(undefined, {
+    return dt.toLocaleDateString("en-US", {
       weekday: "long",
       day: "numeric",
       month: "long",

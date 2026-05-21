@@ -141,7 +141,7 @@ export default function HomePage() {
           message={
             selectedDate === todayIso()
               ? "Predicting tonight\u2019s sunset\u2026"
-              : `Looking up the sunset for ${new Date(selectedDate + "T12:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}\u2026`
+              : `Looking up the sunset for ${new Date(selectedDate + "T12:00:00").toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" })}\u2026`
           }
         />
       )}

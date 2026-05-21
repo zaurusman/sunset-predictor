@@ -34,7 +34,7 @@ function todayIso(): string {
 function formatLabel(iso: string): string {
   if (iso === todayIso()) return "Today";
   const d = parseIso(iso);
-  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  return d.toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" });
 }
 
 const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
