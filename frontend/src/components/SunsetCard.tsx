@@ -7,6 +7,8 @@ import {
   formatDateShort,
   formatTime,
   getCategoryBgColor,
+  getConfidenceBadgeColor,
+  getConfidenceTier,
   getScoreHexColor,
   isToday,
 } from "@/lib/utils";
@@ -60,8 +62,15 @@ export default function SunsetCard({ day, defaultExpanded = false }: SunsetCardP
               {day.category}
             </span>
           </div>
-          <div className="text-gray-400 dark:text-slate-500 text-sm mt-0.5">
-            Sunset {formatTime(day.sunset_time)} · {Math.round(day.confidence_0_100)}% confidence
+          <div className="text-gray-400 dark:text-slate-500 text-sm mt-0.5 flex items-center gap-1.5">
+            <span>Sunset {formatTime(day.sunset_time)}</span>
+            <span className="text-gray-300 dark:text-slate-600">·</span>
+            <span className="text-xs uppercase tracking-wide">Confidence</span>
+            <span
+              className={`px-1.5 py-0.5 rounded-full border text-xs font-medium ${getConfidenceBadgeColor(day.confidence_0_100)}`}
+            >
+              {getConfidenceTier(day.confidence_0_100)}
+            </span>
           </div>
         </div>
 

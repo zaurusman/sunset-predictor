@@ -44,6 +44,37 @@ export function getCategoryBgColor(category: SunsetCategory): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Confidence styling
+// ---------------------------------------------------------------------------
+
+export type ConfidenceTier = "Low" | "Medium" | "High" | "Very High";
+
+/**
+ * Map a numeric confidence (0–100, realistically ~15–92) to a 4-tier label.
+ * The raw percentage is intentionally hidden from the UI.
+ */
+export function getConfidenceTier(confidence: number): ConfidenceTier {
+  if (confidence >= 79) return "Very High";
+  if (confidence >= 65) return "High";
+  if (confidence >= 50) return "Medium";
+  return "Low";
+}
+
+/** Tailwind pill classes for a confidence tier (matches getCategoryBgColor style). */
+export function getConfidenceBadgeColor(confidence: number): string {
+  switch (getConfidenceTier(confidence)) {
+    case "Very High":
+      return "bg-purple-500/20 text-purple-300 border-purple-500/30";
+    case "High":
+      return "bg-emerald-500/20 text-emerald-300 border-emerald-500/30";
+    case "Medium":
+      return "bg-amber-500/20 text-amber-300 border-amber-500/30";
+    case "Low":
+      return "bg-red-500/20 text-red-300 border-red-500/30";
+  }
+}
+
 /**
  * Return a hex colour string for a numeric score (0–100).
  * Blends from red → amber → yellow → emerald → purple.
