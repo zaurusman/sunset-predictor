@@ -1,6 +1,9 @@
 """Application configuration loaded from environment variables."""
 from __future__ import annotations
 
+import os
+import tempfile
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,8 +37,25 @@ class Settings(BaseSettings):
     # Default horizon obstruction in degrees (0 = open ocean/flat horizon)
     DEFAULT_HORIZON_OBSTRUCTION_DEG: float = 2.0
 
-    # In-memory weather cache TTL (seconds)
-    CACHE_TTL_SECONDS: int = 900
+    # Weather cache TTL (seconds). Open-Meteo's global models refresh every ~6 h
+    # (regional/rapid models as often as hourly), so a 2-hour TTL cuts redundant
+    # calls while staying within one model-run of fresh data.
+    CACHE_TTL_SECONDS: int = 7200
+
+    # Persist the weather cache to disk so it survives process restarts
+    # (notably `uvicorn --reload`, which otherwise wipes the in-memory cache on
+    # every code change and forces a full re-fetch). Defaults to a temp-dir file;
+    # set to empty string to disable persistence.
+    CACHE_PERSIST_PATH: str = os.path.join(
+        tempfile.gettempdir(), "afterglow_weather_cache.pkl"
+    )
+
+    # Decimal places used to round coordinates in cache keys, so nearby lookups
+    # (different users, jittery geolocation) share one Open-Meteo fetch:
+    #   2 → ~1 km (lossless on Open-Meteo's grid)
+    #   1 → ~11 km (collapses more users onto one call; may merge distinct
+    #       high-resolution grid cells in complex coastal/mountain terrain)
+    CACHE_COORD_DECIMALS: int = 1
 
     # Displayed in /health and API responses
     ALGORITHM_VERSION: str = "1.0.0"
@@ -44,6 +64,13 @@ class Settings(BaseSettings):
 
     # HTTP client timeout (seconds)
     HTTP_TIMEOUT: float = 15.0
+
+    # Resilience to Open-Meteo rate-limits (HTTP 429) and transient 5xx errors.
+    # Retries use exponential backoff; the Retry-After header (when present)
+    # overrides the computed delay. Delays are capped at HTTP_MAX_RETRY_DELAY.
+    HTTP_MAX_RETRIES: int = 3
+    HTTP_BACKOFF_BASE: float = 0.5      # seconds; delay = BASE * 2**attempt (+jitter)
+    HTTP_MAX_RETRY_DELAY: float = 8.0   # seconds; ceiling for any single backoff wait
 
     # ── Email / photo submission ──────────────────────────────────────────────
     # Resend API key for sending photo submissions to the developer.

@@ -1,7 +1,9 @@
 """Weather data service: fetches and normalises Open-Meteo API data."""
 from __future__ import annotations
 
+import asyncio
 import math
+import random
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -15,6 +17,20 @@ from app.utils.cache import TTLCache
 
 logger = get_logger(__name__)
 UTC = timezone.utc
+
+# HTTP status codes worth retrying: 429 (rate-limited) and any 5xx (transient
+# server error). Other 4xx (e.g. 400 bad params) won't fix themselves on retry.
+_RETRYABLE_STATUS = {429}
+
+
+class WeatherUnavailableError(Exception):
+    """Raised when the weather provider is unreachable or rate-limiting us
+    after exhausting retries.
+
+    Mapped to HTTP 503 at the API layer so callers see a clear "try again
+    shortly" signal instead of a generic 500.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Open-Meteo variable lists
@@ -72,6 +88,17 @@ class WeatherService:
         self._cache = cache
         self._settings = settings
 
+    def _ckey_coords(self, lat: float, lon: float) -> tuple[float, float]:
+        """Round (lat, lon) for the cache key (not for the actual fetch).
+
+        Open-Meteo grid-snaps coordinates, so rounding lets nearby lookups —
+        different users, jittery geolocation — share one cached fetch instead
+        of each triggering another API call. Precision is configurable via
+        CACHE_COORD_DECIMALS (1 ≈ 11 km, 2 ≈ 1 km).
+        """
+        decimals = self._settings.CACHE_COORD_DECIMALS
+        return round(lat, decimals), round(lon, decimals)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -116,7 +143,7 @@ class WeatherService:
                 aerosol_is_estimated=override.aerosol_optical_depth is None,
             )
 
-        cache_key = TTLCache.make_key("snapshot", lat, lon, str(target_date))
+        cache_key = TTLCache.make_key("snapshot", *self._ckey_coords(lat, lon), str(target_date))
         if override is None:
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -157,7 +184,7 @@ class WeatherService:
 
         Uses a single Open-Meteo API call for all days, then slices per day.
         """
-        cache_key = TTLCache.make_key("forecast_range", lat, lon, days)
+        cache_key = TTLCache.make_key("forecast_range", *self._ckey_coords(lat, lon), days)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
@@ -214,7 +241,7 @@ class WeatherService:
         Results are cached for the configured TTL to avoid redundant API calls
         and to keep the score stable within a single server session.
         """
-        cache_key = TTLCache.make_key("window_snaps", lat, lon, str(target_date))
+        cache_key = TTLCache.make_key("window_snaps", *self._ckey_coords(lat, lon), str(target_date))
         cached = self._cache.get(cache_key)
         if cached is not None:
             logger.debug("Cache hit for window_snaps lat=%.4f lon=%.4f date=%s", lat, lon, target_date)
@@ -256,7 +283,7 @@ class WeatherService:
         day now gets window-level (4-point) scoring instead of a single snapshot.
         Results are cached for the configured TTL.
         """
-        cache_key = TTLCache.make_key("forecast_range_windows", lat, lon, days)
+        cache_key = TTLCache.make_key("forecast_range_windows", *self._ckey_coords(lat, lon), days)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
@@ -307,7 +334,7 @@ class WeatherService:
           - days_ago > 7  → archive API (one bulk request for the whole range)
           - days_ago <= 7 → forecast API with past_days (same as get_window_snapshots)
         """
-        cache_key = TTLCache.make_key("hist_range_windows", lat, lon, str(start_date), str(end_date))
+        cache_key = TTLCache.make_key("hist_range_windows", *self._ckey_coords(lat, lon), str(start_date), str(end_date))
         cached = self._cache.get(cache_key)
         if cached is not None:
             logger.debug(
@@ -467,10 +494,74 @@ class WeatherService:
             return None
 
     async def _get_json(self, url: str, params: dict) -> dict[str, Any]:
-        """Execute a GET request and return parsed JSON."""
-        response = await self._http.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
+        """Execute a GET request and return parsed JSON.
+
+        Retries on transient failures — Open-Meteo rate-limits (HTTP 429),
+        transient 5xx responses, and connection/timeout errors — using
+        exponential backoff with jitter. When the response carries a
+        ``Retry-After`` header it overrides the computed delay so we wait
+        exactly as long as the provider asks.
+
+        Non-retryable client errors (e.g. 400) fail fast. If retries are
+        exhausted, raises :class:`WeatherUnavailableError` (→ HTTP 503).
+        """
+        max_retries = self._settings.HTTP_MAX_RETRIES
+        last_exc: Exception | None = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self._http.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status not in _RETRYABLE_STATUS and status < 500:
+                    raise  # genuine client error — retrying won't help
+                last_exc = exc
+                if attempt >= max_retries:
+                    break
+                delay = self._retry_delay(exc.response, attempt)
+                logger.warning(
+                    "Open-Meteo %s for %s (attempt %d/%d) — retrying in %.1fs",
+                    status, url, attempt + 1, max_retries + 1, delay,
+                )
+            except httpx.TransportError as exc:
+                # Connection reset, timeout, DNS failure — transient.
+                last_exc = exc
+                if attempt >= max_retries:
+                    break
+                delay = self._backoff_delay(attempt)
+                logger.warning(
+                    "Open-Meteo transport error for %s (attempt %d/%d): %s — retrying in %.1fs",
+                    url, attempt + 1, max_retries + 1, exc, delay,
+                )
+
+            await asyncio.sleep(delay)
+
+        raise WeatherUnavailableError(
+            f"Weather provider unavailable after {max_retries + 1} attempt(s): {last_exc}"
+        ) from last_exc
+
+    def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
+        """Delay before the next retry.
+
+        Honours an integer ``Retry-After`` header (seconds) when present,
+        otherwise falls back to exponential backoff. Always capped at
+        HTTP_MAX_RETRY_DELAY.
+        """
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return min(float(retry_after), self._settings.HTTP_MAX_RETRY_DELAY)
+            except ValueError:
+                pass  # HTTP-date form — fall back to computed backoff
+        return self._backoff_delay(attempt)
+
+    def _backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff with jitter, capped at HTTP_MAX_RETRY_DELAY."""
+        base = self._settings.HTTP_BACKOFF_BASE
+        delay = base * (2 ** attempt) + random.uniform(0.0, base)
+        return min(delay, self._settings.HTTP_MAX_RETRY_DELAY)
 
     # ------------------------------------------------------------------
     # Internal: data extraction
