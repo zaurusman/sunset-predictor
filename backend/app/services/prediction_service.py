@@ -127,6 +127,7 @@ class PredictionService:
 
         category = self._scoring.score_to_category(final_score)
 
+        lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
         confidence = self._scoring.compute_confidence(
             weather=primary_weather,
             component_scores={
@@ -138,6 +139,7 @@ class PredictionService:
             physics_score=final_score,
             has_ml=self._ml.is_loaded(),
             window_scores=list(window_result.window_scores.values()),
+            lead_time_hours=lead_time_hours,
         )
 
         reasons = self._explanation.generate(
@@ -304,6 +306,7 @@ class PredictionService:
 
         final_score = self._ml.blend(window_result.final_score, ml_score)
         category = self._scoring.score_to_category(final_score)
+        lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
         confidence = self._scoring.compute_confidence(
             weather=primary_weather,
             component_scores={
@@ -315,6 +318,7 @@ class PredictionService:
             physics_score=final_score,
             has_ml=self._ml.is_loaded(),
             window_scores=list(window_result.window_scores.values()),
+            lead_time_hours=lead_time_hours,
         )
         reasons = self._explanation.generate(
             weather=primary_weather,
