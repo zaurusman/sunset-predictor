@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -163,6 +164,26 @@ def test_predict_invalid_longitude(client):
     """Longitude out of [-180, 180] should return 422."""
     resp = client.post("/predict", json={"latitude": 0.0, "longitude": 999.0})
     assert resp.status_code == 422
+
+
+def test_predict_returns_503_when_weather_rate_limited(client, monkeypatch):
+    """A persistent Open-Meteo 429 should surface as a clean 503, not a 500."""
+    weather = app.state.prediction_service._weather
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429)
+
+    monkeypatch.setattr(weather, "_http", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(weather._settings, "HTTP_BACKOFF_BASE", 0.0)
+    monkeypatch.setattr(weather._settings, "HTTP_MAX_RETRY_DELAY", 0.0)
+    weather._cache.clear()
+
+    resp = client.post("/predict", json={"latitude": 12.34, "longitude": 56.78})
+
+    assert resp.status_code == 503, f"Expected 503, got {resp.status_code}: {resp.text}"
+    assert "Retry-After" in resp.headers
+    body = resp.text.lower()
+    assert "rate" in body or "unavailable" in body or "try again" in body
 
 
 def test_model_info_endpoint(client):

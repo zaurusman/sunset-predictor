@@ -50,7 +50,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     http_client = httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT)
 
     # Infrastructure
-    cache = TTLCache(ttl_seconds=settings.CACHE_TTL_SECONDS)
+    cache = TTLCache(
+        ttl_seconds=settings.CACHE_TTL_SECONDS,
+        persist_path=settings.CACHE_PERSIST_PATH or None,
+    )
+    logger.info(
+        "Weather cache: ttl=%ss, persist=%s",
+        settings.CACHE_TTL_SECONDS,
+        settings.CACHE_PERSIST_PATH or "disabled",
+    )
     registry = ModelRegistry(settings=settings)
 
     # Services

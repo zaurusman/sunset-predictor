@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.core.logging import get_logger
 from app.schemas.heatmap import HeatmapResponse
+from app.services.weather_service import WeatherUnavailableError
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["heatmap"])
@@ -26,6 +27,13 @@ async def get_heatmap(
     svc = request.app.state.prediction_service
     try:
         return await svc.heatmap(lat=lat, lon=lon, months=months)
+    except WeatherUnavailableError as exc:
+        logger.warning("Weather provider unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Weather data provider is temporarily rate-limited or unavailable. Please try again shortly.",
+            headers={"Retry-After": "30"},
+        ) from exc
     except Exception as exc:
         logger.error("Heatmap failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Heatmap error: {exc}") from exc
