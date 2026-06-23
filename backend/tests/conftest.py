@@ -1,6 +1,13 @@
 """Shared test fixtures."""
 from __future__ import annotations
 
+import os
+
+# Disable on-disk cache persistence during tests so the suite stays hermetic
+# (no shared temp cache file across runs). Must be set before the app — and its
+# settings singleton — is imported below.
+os.environ["CACHE_PERSIST_PATH"] = ""
+
 import pytest
 from fastapi.testclient import TestClient
 
