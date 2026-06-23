@@ -3,7 +3,12 @@
 import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import type { SunsetCategory } from "@/lib/types";
-import { getCategoryBgColor, getScoreHexColor } from "@/lib/utils";
+import {
+  getCategoryBgColor,
+  getConfidenceBadgeColor,
+  getConfidenceTier,
+  getScoreHexColor,
+} from "@/lib/utils";
 
 interface ScoreDialProps {
   score: number;
@@ -124,8 +129,15 @@ export default function ScoreDial({
       </div>
 
       {/* Confidence */}
-      <div className="text-gray-400 dark:text-slate-500 text-xs">
-        {Math.round(confidence)}% confidence
+      <div className="flex items-center gap-2">
+        <span className="text-gray-400 dark:text-slate-500 text-xs uppercase tracking-wide">
+          Confidence
+        </span>
+        <span
+          className={`px-2 py-0.5 rounded-full border text-xs font-semibold ${getConfidenceBadgeColor(confidence)}`}
+        >
+          {getConfidenceTier(confidence)}
+        </span>
       </div>
     </div>
   );
