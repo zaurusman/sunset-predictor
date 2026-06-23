@@ -1,6 +1,8 @@
 """Integration tests for API endpoints using TestClient."""
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -11,6 +13,37 @@ from app.main import app
 def client():
     with TestClient(app) as c:
         yield c
+
+
+_FULL_OVERRIDE = {
+    "cloud_low": 5.0,
+    "cloud_mid": 20.0,
+    "cloud_high": 50.0,
+    "cloud_total": 60.0,
+    "visibility_m": 22000.0,
+    "relative_humidity": 50.0,
+    "dewpoint_c": 8.0,
+    "temperature_c": 18.0,
+    "precipitation_mm": 0.0,
+    "wind_speed_kmh": 8.0,
+    "pressure_hpa": 1015.0,
+    "aerosol_optical_depth": 0.18,
+}
+
+
+def test_predict_confidence_drops_for_distant_future(client):
+    """Identical conditions 14 days out should be less confident than today —
+    forecast skill decays with lead time."""
+    base = {"latitude": 32.08, "longitude": 34.78, "weather_override": _FULL_OVERRIDE}
+    r_today = client.post("/predict", json={**base, "target_date": date.today().isoformat()})
+    r_far = client.post(
+        "/predict",
+        json={**base, "target_date": (date.today() + timedelta(days=14)).isoformat()},
+    )
+    assert r_today.status_code == 200 and r_far.status_code == 200, (r_today.text, r_far.text)
+    c_today = r_today.json()["confidence_0_100"]
+    c_far = r_far.json()["confidence_0_100"]
+    assert c_far < c_today, f"14-days-out confidence {c_far} should be < today {c_today}"
 
 
 def test_health_endpoint(client):

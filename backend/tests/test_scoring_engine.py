@@ -498,3 +498,66 @@ def test_afterglow_stored_in_scoring_result():
     assert result_post.physics_score > result_pre.physics_score, (
         "Post-sunset score should exceed pre-sunset for the same cloud conditions"
     )
+
+
+# ---------------------------------------------------------------------------
+# Lead-time confidence adjustment
+# ---------------------------------------------------------------------------
+
+def _conf(engine, lead_time_hours):
+    """compute_confidence for a fixed strong prediction at a given lead time."""
+    return engine.compute_confidence(
+        weather=_snap(),
+        component_scores={"cloud_quality": 70, "atmosphere": 65, "moisture": 80, "horizon": 95},
+        physics_score=72.0,
+        window_scores=[70.0, 72.0, 74.0, 71.0],
+        lead_time_hours=lead_time_hours,
+    )
+
+
+def test_lead_time_none_leaves_confidence_unchanged():
+    """Omitting lead_time_hours keeps the original (no lead-time) confidence."""
+    engine = ScoringEngine()
+    baseline = engine.compute_confidence(
+        weather=_snap(),
+        component_scores={"cloud_quality": 70, "atmosphere": 65, "moisture": 80, "horizon": 95},
+        physics_score=72.0,
+        window_scores=[70.0, 72.0, 74.0, 71.0],
+    )
+    assert _conf(engine, None) == baseline
+
+
+def test_lead_time_one_day_is_neutral():
+    """~24h out is the neutral pivot — same as no lead-time adjustment."""
+    engine = ScoringEngine()
+    assert _conf(engine, 24.0) == pytest.approx(_conf(engine, None))
+
+
+def test_lead_time_imminent_boosts_above_neutral():
+    """A sunset minutes away is more certain than one a day out."""
+    engine = ScoringEngine()
+    assert _conf(engine, 0.5) > _conf(engine, 24.0)
+
+
+def test_lead_time_closer_today_higher_than_earlier_today():
+    """Within the same day, confidence rises as sunset approaches."""
+    engine = ScoringEngine()
+    assert _conf(engine, 2.0) > _conf(engine, 20.0)
+
+
+def test_lead_time_decays_monotonically_with_distance():
+    """Confidence falls as the target sunset moves further into the future."""
+    engine = ScoringEngine()
+    assert _conf(engine, 0.0) > _conf(engine, 24.0) > _conf(engine, 72.0) > _conf(engine, 336.0)
+
+
+def test_lead_time_distant_forecast_strongly_penalized():
+    """A 14-day-out sunset is far less confident than a 1-day-out one."""
+    engine = ScoringEngine()
+    assert _conf(engine, 336.0) < _conf(engine, 24.0) - 20
+
+
+def test_past_date_negative_lead_treated_as_imminent():
+    """Observed past dates (negative lead) get the imminent boost, not a penalty."""
+    engine = ScoringEngine()
+    assert _conf(engine, -48.0) == pytest.approx(_conf(engine, 0.0))

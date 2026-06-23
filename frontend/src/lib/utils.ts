@@ -61,17 +61,31 @@ export function getConfidenceTier(confidence: number): ConfidenceTier {
   return "Low";
 }
 
-/** Tailwind pill classes for a confidence tier (matches getCategoryBgColor style). */
-export function getConfidenceBadgeColor(confidence: number): string {
+/** Number of filled segments (1–4) for the confidence meter. */
+export function getConfidenceLevel(confidence: number): number {
   switch (getConfidenceTier(confidence)) {
     case "Very High":
-      return "bg-purple-500/20 text-purple-300 border-purple-500/30";
+      return 4;
     case "High":
-      return "bg-emerald-500/20 text-emerald-300 border-emerald-500/30";
+      return 3;
     case "Medium":
-      return "bg-amber-500/20 text-amber-300 border-amber-500/30";
+      return 2;
     case "Low":
-      return "bg-red-500/20 text-red-300 border-red-500/30";
+      return 1;
+  }
+}
+
+/** Solid fill colour for the filled segments of the confidence meter. */
+export function getConfidenceFillColor(confidence: number): string {
+  switch (getConfidenceTier(confidence)) {
+    case "Very High":
+      return "bg-purple-400";
+    case "High":
+      return "bg-emerald-400";
+    case "Medium":
+      return "bg-amber-400";
+    case "Low":
+      return "bg-red-400";
   }
 }
 

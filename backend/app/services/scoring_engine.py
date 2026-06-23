@@ -583,6 +583,7 @@ class ScoringEngine:
         physics_score: float,
         has_ml: bool = False,
         window_scores: Optional[list[float]] = None,
+        lead_time_hours: Optional[float] = None,
     ) -> float:
         """
         Estimate prediction confidence in [15, 92].
@@ -591,12 +592,17 @@ class ScoringEngine:
         - The score is far from the ambiguous middle (40–60)
         - Multiple window points agree
         - Aerosol data is real (not proxy-estimated)
+        - The sunset is imminent (forecast refreshes hourly and firms up)
 
         Confidence is lower when:
         - Signals conflict (good clouds + active rain)
         - The window is highly volatile (one great point, rest collapse)
         - Aerosol is estimated
         - Active rain conflicts with otherwise strong sky structure
+        - The target sunset is many days out (forecast skill decays with lead time)
+
+        *lead_time_hours* is the gap from now to the target sunset; pass None
+        (the default) to skip the lead-time term entirely (e.g. for overrides).
         """
         base = 60.0
 
@@ -631,4 +637,26 @@ class ScoringEngine:
         if has_ml:
             base += 4.0
 
+        # Forecast lead-time: imminent sunsets (and observed past dates) get a
+        # small boost; ~1 day out is neutral; each further day is penalised,
+        # reflecting how forecast skill decays with lead time.
+        if lead_time_hours is not None:
+            base += self._lead_time_adjustment(lead_time_hours)
+
         return clamp(base, lo=15.0, hi=92.0)
+
+    @staticmethod
+    def _lead_time_adjustment(lead_time_hours: float) -> float:
+        """Confidence adjustment (points) for how far the sunset is from now.
+
+        +MAX_BONUS at/after the sunset moment (and for observed past dates),
+        tapering to 0 at ~24h out, then -PER_DAY_PENALTY for every extra day.
+        """
+        MAX_BONUS = 5.0
+        PER_DAY_PENALTY = 2.5
+        if lead_time_hours <= 0.0:
+            return MAX_BONUS
+        if lead_time_hours < 24.0:
+            return MAX_BONUS * (1.0 - lead_time_hours / 24.0)
+        days_beyond = (lead_time_hours - 24.0) / 24.0
+        return -PER_DAY_PENALTY * days_beyond
