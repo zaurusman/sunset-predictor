@@ -1,74 +1,70 @@
 "use client";
 
 import type { PhysicsBreakdown } from "@/lib/types";
+import { getComponentHexColor } from "@/lib/utils";
+import { useIsDark } from "@/lib/useIsDark";
 
 interface ComponentBreakdownProps {
   breakdown: PhysicsBreakdown;
 }
 
 interface ComponentRow {
-  key: keyof Omit<PhysicsBreakdown, "weighted_physics_score" | "component_weights">;
+  key: keyof Pick<
+    PhysicsBreakdown,
+    "cloud_quality_score" | "atmosphere_score" | "moisture_score" | "horizon_score"
+  >;
   label: string;
-  description: string;
 }
 
 const COMPONENTS: ComponentRow[] = [
-  { key: "cloud_quality_score", label: "Cloud Quality", description: "High/mid cloud distribution for colour" },
-  { key: "atmosphere_score", label: "Atmosphere", description: "Visibility, aerosol, clarity" },
-  { key: "moisture_score", label: "Moisture", description: "Rain and humidity conditions" },
-  { key: "horizon_score", label: "Horizon", description: "Obstruction by terrain / buildings" },
+  { key: "cloud_quality_score", label: "Cloud quality" },
+  { key: "atmosphere_score", label: "Atmosphere" },
+  { key: "moisture_score", label: "Moisture" },
+  { key: "horizon_score", label: "Horizon" },
 ];
 
-function ScoreBar({ score }: { score: number }) {
-  const colour =
-    score >= 75 ? "#34d399" :
-    score >= 50 ? "#fbbf24" :
-    score >= 30 ? "#fb923c" :
-    "#f87171";
-
-  return (
-    <div className="flex items-center gap-3 w-full">
-      <div className="flex-1 h-2 bg-gray-200 dark:bg-slate-800 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${score}%`, backgroundColor: colour }}
-        />
-      </div>
-      <span className="text-sm font-semibold tabular-nums w-8 text-right" style={{ color: colour }}>
-        {Math.round(score)}
-      </span>
-    </div>
-  );
-}
-
+/**
+ * The four scored components.
+ *
+ * Each row is a single baseline-aligned line — label, weight, value — rather
+ * than two competing columns, which used to collide at 375px once "(42%
+ * weight)" wrapped underneath the label and ran into the description text.
+ */
 export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProps) {
+  const isDark = useIsDark();
+
   return (
-    <div className="space-y-4">
-      {COMPONENTS.map(({ key, label, description }) => {
-        const score = breakdown[key] as number;
+    <div className="flex flex-col gap-3.5">
+      {COMPONENTS.map(({ key, label }) => {
+        const score = breakdown[key];
         const weight = breakdown.component_weights[key.replace("_score", "")] ?? 0;
+        const colour = getComponentHexColor(score, isDark);
+
         return (
-          <div key={key} className="space-y-1.5">
-            <div className="flex items-center justify-between text-sm">
-              <div>
-                <span className="text-gray-800 dark:text-slate-200 font-medium">{label}</span>
-                <span className="text-gray-400 dark:text-slate-500 ml-2 text-xs">({Math.round(weight * 100)}% weight)</span>
-              </div>
-              <span className="text-gray-400 dark:text-slate-500 text-xs">{description}</span>
+          <div key={key} className="flex flex-col gap-1.5">
+            <div className="flex items-baseline gap-2">
+              <span className="flex-1 min-w-0 text-sm font-medium text-gray-900 dark:text-slate-200">
+                {label}
+              </span>
+              <span className="text-xs text-gray-600 dark:text-slate-400 tabular-nums">
+                {Math.round(weight * 100)}%
+              </span>
+              <span
+                className="text-sm font-semibold tabular-nums w-7 text-right"
+                style={{ color: colour }}
+              >
+                {Math.round(score)}
+              </span>
             </div>
-            <ScoreBar score={score} />
+            <div className="h-1.5 bg-gray-200 dark:bg-slate-800 rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-700"
+                style={{ width: `${score}%`, backgroundColor: colour }}
+              />
+            </div>
           </div>
         );
       })}
-
-      {/* Overall physics score */}
-      <div className="pt-3 border-t border-gray-200/50 dark:border-slate-700/50 space-y-1.5">
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-gray-700 dark:text-slate-300 font-semibold">Physics Score</span>
-          <span className="text-gray-400 dark:text-slate-500 text-xs">weighted average</span>
-        </div>
-        <ScoreBar score={breakdown.weighted_physics_score} />
-      </div>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import type { DayForecast } from "@/lib/types";
 import {
   formatDateShort,
@@ -10,9 +10,10 @@ import {
   getScoreHexColor,
   isToday,
 } from "@/lib/utils";
-import ConfidenceMeter from "./ConfidenceMeter";
+import { useIsDark } from "@/lib/useIsDark";
 import ComponentBreakdown from "./ComponentBreakdown";
 import ReasonsList from "./ReasonsList";
+import ViewingCurve from "./ViewingCurve";
 
 interface SunsetCardProps {
   day: DayForecast;
@@ -21,71 +22,77 @@ interface SunsetCardProps {
 
 export default function SunsetCard({ day, defaultExpanded = false }: SunsetCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  const scoreColor = getScoreHexColor(day.beauty_score_0_100);
+  const isDark = useIsDark();
+
+  const score = Math.round(day.beauty_score_0_100);
+  const scoreColor = getScoreHexColor(score, isDark);
   const today = isToday(day.date);
 
   return (
     <div
       className={`rounded-2xl border transition-all duration-200 overflow-hidden ${
         today
-          ? "border-orange-500/40 bg-gray-100/90 dark:bg-slate-900/90"
-          : "border-gray-200/50 dark:border-slate-700/50 bg-gray-100/60 dark:bg-slate-900/60"
+          ? "border-orange-500/50 bg-white dark:bg-slate-900/90"
+          : "border-gray-200 dark:border-slate-700/50 bg-white dark:bg-slate-900/60"
       }`}
     >
-      {/* Card header */}
       <button
         className="w-full flex items-center gap-4 px-5 py-4 text-left"
         onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
       >
-        {/* Score circle */}
         <div
-          className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg flex-shrink-0"
+          className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg tabular-nums flex-shrink-0"
           style={{
-            background: `${scoreColor}22`,
-            border: `2px solid ${scoreColor}55`,
+            background: `${scoreColor}1a`,
+            border: `2px solid ${scoreColor}59`,
             color: scoreColor,
           }}
         >
-          {Math.round(day.beauty_score_0_100)}
+          {score}
         </div>
 
-        {/* Date + category */}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-gray-900 dark:text-white font-semibold">
               {today ? "Today" : formatDateShort(day.date)}
             </span>
             <span
-              className={`text-xs px-2 py-0.5 rounded-full border font-medium ${getCategoryBgColor(day.category)}`}
+              className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${getCategoryBgColor(day.category)}`}
             >
               {day.category}
             </span>
           </div>
-          <div className="text-gray-400 dark:text-slate-500 text-sm mt-0.5 flex items-center gap-2">
-            <span>Sunset {formatTime(day.sunset_time)}</span>
-            <span className="text-gray-300 dark:text-slate-600">·</span>
-            <ConfidenceMeter confidence={day.confidence_0_100} label={false} />
+          <div className="text-gray-600 dark:text-slate-400 text-sm mt-0.5 tabular-nums">
+            Sunset {formatTime(day.sunset_time)}
           </div>
         </div>
 
-        {/* Expand toggle */}
-        <div className="text-gray-300 dark:text-slate-600">
-          {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-        </div>
+        <ChevronDown
+          size={16}
+          className={`text-gray-500 dark:text-slate-400 transition-transform ${expanded ? "rotate-180" : ""}`}
+        />
       </button>
 
-      {/* Expanded content */}
       {expanded && (
-        <div className="px-5 pb-5 space-y-4 border-t border-gray-200/40 dark:border-slate-700/40 pt-4">
-          {/* Reasons */}
+        <div className="px-5 pb-5 flex flex-col gap-4 border-t border-gray-200 dark:border-slate-700/40 pt-4">
+          <ViewingCurve
+            windowScores={day.window_scores}
+            bestPoint={day.best_window_point}
+            sunsetTime={day.sunset_time}
+          />
+
           <div>
-            <h4 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-2">Why</h4>
+            <h4 className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold mb-2">
+              Why
+            </h4>
             <ReasonsList reasons={day.reasons} />
           </div>
 
-          {/* Component breakdown */}
           <div>
-            <h4 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-2">Score Breakdown</h4>
+            <h4 className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold mb-3">
+              Breakdown
+            </h4>
             <ComponentBreakdown breakdown={day.physics_component_breakdown} />
           </div>
         </div>

@@ -104,6 +104,19 @@ export function getScoreTextColor(score: number): string {
   return getCategoryColor(scoreCategory(score));
 }
 
+/**
+ * Colour for a component sub-score (cloud quality, atmosphere, …).
+ *
+ * Same bands as the overall score — that consistency is the whole point — but
+ * the top band renders emerald rather than violet. Violet reads as "an Epic
+ * sunset", and a 95 for Atmosphere is a healthy input, not a verdict.
+ */
+export function getComponentHexColor(score: number, isDark = false): string {
+  const category = scoreCategory(score);
+  const band = category === "Epic" ? "Great" : category;
+  return (isDark ? SCORE_HEX_DARK : SCORE_HEX_LIGHT)[band];
+}
+
 // ---------------------------------------------------------------------------
 // Weather phrasing
 // ---------------------------------------------------------------------------
@@ -119,6 +132,23 @@ export function hazeLabel(aod: number | null): string | null {
   if (aod < 0.35) return "Moderate";
   if (aod < 0.5) return "High";
   return "Very high";
+}
+
+/**
+ * Whether an explanation reads as helping or holding the score back.
+ *
+ * The backend sends reasons as plain strings with no polarity, so this is a
+ * word-list heuristic. It only drives colour and grouping — a miss is cosmetic.
+ */
+const NEGATIVE_REASON_WORDS = [
+  "block", "reduce", "mute", "poor", "rain", "haze", "heavy", "overcast",
+  "obstruction", "dampen", "wash", "diffuse", "milky", "clip", "limited",
+  "bad", "not ideal", "worst", "less", "few", "little",
+];
+
+export function isPositiveReason(reason: string): boolean {
+  const lower = reason.toLowerCase();
+  return !NEGATIVE_REASON_WORDS.some((w) => lower.includes(w));
 }
 
 // ---------------------------------------------------------------------------

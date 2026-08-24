@@ -10,9 +10,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useTheme } from "next-themes";
 import type { DayForecast } from "@/lib/types";
 import { formatDateShort, formatTime, getScoreHexColor } from "@/lib/utils";
+import { useIsDark } from "@/lib/useIsDark";
 
 interface ForecastChartProps {
   days: DayForecast[];
@@ -26,9 +26,9 @@ function CustomTooltip({ active, payload }: { active?: boolean; payload?: Array<
   return (
     <div className="bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 shadow-2xl text-sm">
       <div className="font-semibold text-gray-900 dark:text-white mb-1">{d.displayDate}</div>
-      <div className="text-orange-500 dark:text-orange-400 font-bold text-lg">{d.beauty_score_0_100}</div>
-      <div className="text-gray-500 dark:text-slate-400">{d.category}</div>
-      <div className="text-gray-400 dark:text-slate-500 text-xs mt-1">Sunset {formatTime(d.sunset_time)}</div>
+      <div className="text-orange-700 dark:text-orange-400 font-bold text-lg tabular-nums">{Math.round(d.beauty_score_0_100)}</div>
+      <div className="text-gray-700 dark:text-slate-300">{d.category}</div>
+      <div className="text-gray-600 dark:text-slate-400 text-xs mt-1 tabular-nums">Sunset {formatTime(d.sunset_time)}</div>
     </div>
   );
 }
@@ -38,8 +38,7 @@ export default function ForecastChart({
   onDayClick,
   selectedDate,
 }: ForecastChartProps) {
-  const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme === "dark";
+  const isDark = useIsDark();
 
   const chartData = days.map((d) => ({
     ...d,
@@ -81,7 +80,7 @@ export default function ForecastChart({
           {chartData.map((entry, index) => (
             <Cell
               key={`cell-${index}`}
-              fill={getScoreHexColor(entry.beauty_score_0_100)}
+              fill={getScoreHexColor(entry.beauty_score_0_100, isDark)}
               opacity={selectedDate && entry.date !== selectedDate ? 0.45 : 1}
               style={{ cursor: onDayClick ? "pointer" : "default" }}
             />
