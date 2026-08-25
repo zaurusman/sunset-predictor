@@ -82,6 +82,39 @@ SCORE_THRESHOLDS: list[tuple[float, str]] = [
     (0, "Poor"),
 ]
 
+# ---------------------------------------------------------------------------
+# Percentile → displayed score calibration
+# ---------------------------------------------------------------------------
+#
+# The displayed 0-100 is a RANK against the location's own history, not the raw
+# physics score. Raw scores are not comparable between places: a median evening
+# is ~47 in Tel Aviv and ~42 in San Francisco, and the bottom decile is 42.5 vs
+# 23.4 in London. Fixed cutoffs on that scale meant "Epic" fired on 10-15 % of
+# evenings in one city while "Decent" covered 75 % in another.
+#
+# Anchoring the bands to percentiles fixes the share of evenings in each band BY
+# CONSTRUCTION, in every climate. The shares below are a product judgement about
+# what a daily-glance app should say, not a physical claim — they are the one
+# place that judgement is expressed, and the only place to change it:
+#
+#     Poor    bottom 30 %   "don't bother"
+#     Decent  next   38 %   "ordinary evening"
+#     Good    next   20 %   "nice if you're out"
+#     Great   next    9 %   "worth stepping outside for"
+#     Epic    top     3 %   "roughly ten nights a year"
+#
+# GO_OUTSIDE_THRESHOLD = 70 therefore means "the top ~7 % of evenings here",
+# which is a definition rather than a knob.
+CALIBRATION_ANCHORS: list[tuple[float, float]] = [
+    # (cumulative percentile, displayed score at that percentile)
+    (0.00,   0.0),
+    (0.30,  30.0),   # Poor   → Decent
+    (0.68,  50.0),   # Decent → Good
+    (0.88,  65.0),   # Good   → Great
+    (0.97,  80.0),   # Great  → Epic
+    (1.00, 100.0),
+]
+
 # Score at which we recommend going outside.
 # This is the bar for "worth changing your plans for", not "better than
 # average" — most evenings land in the 40s and 50s, so a 45 recommended
@@ -795,6 +828,25 @@ class ScoringEngine:
     # ------------------------------------------------------------------
     # Category mapping
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def percentile_to_display_score(percentile: float) -> float:
+        """Map a climatological percentile in [0, 1] onto the displayed 0-100.
+
+        Piecewise-linear through CALIBRATION_ANCHORS, so each band ends up with
+        a fixed share of evenings regardless of climate. Monotone by
+        construction: a better evening never displays a lower number.
+        """
+        p = clamp(percentile, lo=0.0, hi=1.0)
+        anchors = CALIBRATION_ANCHORS
+        for i in range(len(anchors) - 1):
+            p_lo, s_lo = anchors[i]
+            p_hi, s_hi = anchors[i + 1]
+            if p_lo <= p <= p_hi:
+                span = p_hi - p_lo
+                frac = 0.0 if span == 0 else (p - p_lo) / span
+                return clamp(s_lo + frac * (s_hi - s_lo))
+        return 100.0
 
     @staticmethod
     def score_to_category(score: float) -> str:

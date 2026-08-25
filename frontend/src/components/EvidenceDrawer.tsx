@@ -31,10 +31,15 @@ export default function EvidenceDrawer({ prediction }: EvidenceDrawerProps) {
 
   const helping = prediction.reasons.filter(isPositiveReason);
   const hurting = prediction.reasons.filter((r) => !isPositiveReason(r));
-  const summary = [
-    ...helping.slice(0, 1).map((text) => ({ text, positive: true })),
-    ...hurting.slice(0, 1).map((text) => ({ text, positive: false })),
-  ];
+  // One line each way, but the side that matches the verdict leads. Always
+  // putting the positive first meant a "Not tonight" evening opened with
+  // "clear air will help colours pop", which reads as a contradiction.
+  const positiveFirst = prediction.beauty_score_0_100 >= 50;
+  const helpingLine = helping.slice(0, 1).map((text) => ({ text, positive: true }));
+  const hurtingLine = hurting.slice(0, 1).map((text) => ({ text, positive: false }));
+  const summary = positiveFirst
+    ? [...helpingLine, ...hurtingLine]
+    : [...hurtingLine, ...helpingLine];
 
   const w = prediction.weather_summary;
   const haze = hazeLabel(w.aerosol_optical_depth);

@@ -15,6 +15,11 @@ from app.schemas.weather import WeatherSnapshot
 if TYPE_CHECKING:
     from app.services.scoring_engine import WindowResult
 
+# Priority floor for gate reasons. Component scores top out at 100, so this
+# guarantees a biting gate outranks any component — which is correct, because
+# a gate bounds what the evening can be rather than contributing to it.
+GATE_PRIORITY = 110.0
+
 
 class ExplanationEngine:
     """
@@ -55,6 +60,62 @@ class ExplanationEngine:
             # Volatile window note
             if window_result.volatility_penalty > 4.0:
                 candidates.append((30.0, "Conditions look inconsistent across the window — confidence is moderate."))
+
+        # -----------------------------------------------------------------
+        # Gates — the binding constraints
+        #
+        # These are given priority above any component score, because when a
+        # gate is biting it IS the reason. Without this an evening suppressed
+        # to "Not tonight" by a blocked light corridor would lead with
+        # "clear air will help colours pop", which reads as a contradiction:
+        # the atmosphere component is genuinely high, it just no longer
+        # determines the outcome.
+        # -----------------------------------------------------------------
+        corridor = breakdown.light_corridor_factor
+        if corridor is not None and corridor < 0.85:
+            severity = (1.0 - corridor) * 100.0
+            if corridor < 0.45:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Cloud well to the west is blocking the sunlight before it reaches you — "
+                    "the sky overhead may look fine but there is little light to colour it.",
+                ))
+            elif corridor < 0.7:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Cloud upstream is shading the light path, so colours will likely be muted "
+                    "even if the sky above looks promising.",
+                ))
+            else:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "A little cloud along the light path may take some intensity out of the colour.",
+                ))
+        elif corridor is not None and corridor >= 0.95:
+            candidates.append((
+                60.0,
+                "The light path to the west is clear, so the sun's last light should arrive unblocked.",
+            ))
+
+        if breakdown.precipitation_gate < 0.85:
+            severity = (1.0 - breakdown.precipitation_gate) * 100.0
+            if breakdown.precipitation_gate < 0.4:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Rain around sunset will most likely replace the colour altogether.",
+                ))
+            else:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Showers near sunset could interrupt the view, though a break in the rain "
+                    "can be spectacular.",
+                ))
+
+        if breakdown.horizon_gate < 0.85:
+            candidates.append((
+                GATE_PRIORITY + (1.0 - breakdown.horizon_gate) * 60.0,
+                "Your horizon is obstructed enough to hide the lowest, brightest part of the sky.",
+            ))
 
         # -----------------------------------------------------------------
         # Afterglow reasons (sun below horizon with supporting conditions)

@@ -20,6 +20,7 @@ from app.core.logging import get_logger, setup_logging
 from app.models.ml_model import MLModel
 from app.models.model_registry import ModelRegistry
 from app.services.astronomy_service import AstronomyService
+from app.services.climatology_service import ClimatologyService
 from app.services.explanation_engine import ExplanationEngine
 from app.services.prediction_service import PredictionService
 from app.services.rating_store import RatingStore
@@ -78,6 +79,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ml_model = MLModel(registry=registry, settings=settings)
     ml_model.load()
 
+    # Local climatology — turns the raw physics score into a rank against this
+    # location's own history. Shares the persisted cache, so a warmed curve
+    # survives restarts.
+    climatology = ClimatologyService(
+        weather_service=weather_service,
+        astro_service=astro_service,
+        scoring_engine=scoring_engine,
+        cache=cache,
+    )
+
     # Orchestration
     prediction_service = PredictionService(
         weather_service=weather_service,
@@ -86,6 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         explanation_engine=explanation_engine,
         ml_model=ml_model,
         settings=settings,
+        climatology=climatology,
     )
 
     # Attach to app state for injection via Request

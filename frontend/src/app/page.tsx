@@ -207,6 +207,7 @@ function HomeContent() {
             windowScores={prediction.window_scores}
             bestPoint={prediction.best_window_point}
             sunsetTime={prediction.sunset_time}
+            cloudHighPct={prediction.weather_summary.cloud_high_pct}
           />
 
           <EvidenceDrawer prediction={prediction} />

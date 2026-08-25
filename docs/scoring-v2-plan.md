@@ -6,12 +6,12 @@ Written 2026-08-25.
 
 | Phase | State |
 |---|---|
-| 0 — Measuring stick | **Partly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with raw inputs; one-tap UI on the verdict card. Webcam labels and the offline replay harness not started. |
+| 0 — Measuring stick | **Mostly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with their raw inputs; one-tap UI on the verdict card. `scripts/evaluate.py` is the committed harness — distribution stats, guardrails, and label correlation. Webcam labels not started. |
 | 1 — Neutralise dead weight | **Done.** Horizon and precipitation are now multiplicative gates, not weighted components; weights are 0.60/0.25/0.15. |
 | 2 — Light corridor | **Done.** Wired into predict, forecast and heatmap. |
 | 3 — Aerosol + column moisture | Not started |
 | 4 — Earth-shadow afterglow timing | Not started |
-| 5 — Calibrate the scale | Not started — **now load-bearing**, see below. |
+| 5 — Calibrate the scale | **Done.** Displayed score is a percentile against local climatology; band shares are fixed by construction. |
 | 6 — Make ML shelving explicit | **Done.** `ML_BLEND_ALPHA = 1.0`, load-time quality gate, artifact moved to `data/dead/`. |
 | 7 — Better inputs (ICON, ensemble confidence) | Not started |
 
@@ -77,6 +77,32 @@ how the engine got into this state. The fix is Phase 5 — percentile-map the ra
 score against multi-year climatology at the user's own location, so the bands
 mean the same thing in Tel Aviv and London. Phase 5 is therefore no longer
 optional polish; it is a prerequisite for putting Phase 1 in front of users.
+
+### Phase 5 result: band shares are now identical across climates
+
+Verified with `scripts/evaluate.py --days 365`:
+
+```
+                 Poor   Decent   Good  Great   Epic    >=70
+TelAviv         29.9%   38.1%  20.0%   9.0%   3.0%    9.0%
+London          29.9%   38.1%  20.0%   9.0%   3.0%    9.0%
+SanFrancisco    29.9%   38.1%  20.0%   9.0%   3.0%    9.0%
+```
+
+Against the design targets of 30 / 38 / 20 / 9 / 3. Identical in three very
+different climates, which is the entire point: the same word now means the same
+rarity everywhere. The "Decent covers 75 %" guardrail failure is gone.
+
+Cold start is the one visible seam. Building a location's climatology takes
+~11 s, so it runs in the background while a global reference curve stands in.
+For Tel Aviv — the tightest, highest distribution of the three, and so the worst
+case — the same evening reads 41.9 "Decent" on the reference curve and 21.9
+"Poor" once local history lands. Both are defensible (raw 45.5 sits just under
+Tel Aviv's median of 47.4, in a distribution dense enough that two points is 30
+percentiles) but the shift is visible if you refresh. The API exposes
+`climatology_is_local` and the UI says so explicitly rather than hiding it. The
+curve is cached for 30 days and persists across restarts, so in practice a user
+meets this once.
 
 Still outstanding: `moisture` remains pinned at ~100 on dry days even after
 losing the rain penalty, because what is left of it is only surface humidity.

@@ -153,6 +153,24 @@ class PredictResponse(BaseModel):
         description="Raw adjustment applied by the ML model (positive = boosted, negative = reduced)",
     )
 
+    # Calibration: beauty_score_0_100 is a RANK against this location's own
+    # climatology, not the raw physics score. These expose what produced it.
+    raw_physics_score: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Uncalibrated physics score, before percentile mapping.",
+    )
+    climatology_percentile: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="Fraction of evenings at this location that score lower.",
+    )
+    climatology_is_local: bool = Field(
+        default=False,
+        description=(
+            "True when ranked against this location's own history; False when a "
+            "global reference curve stood in because the local one is still warming."
+        ),
+    )
+
     physics_component_breakdown: PhysicsBreakdown
     weather_summary: WeatherSummary
 

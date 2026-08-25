@@ -87,6 +87,14 @@ export interface PredictResponse {
   algorithm_version: string;
   ml_model_used: boolean;
   ml_adjustment: number | null;
+  /** Uncalibrated physics score, before percentile mapping. */
+  raw_physics_score: number | null;
+  /** Fraction of evenings at this location that score lower than tonight. */
+  climatology_percentile: number | null;
+  /** False while the local climatology is still warming — the score is ranked
+   *  against a global reference curve and will shift once local history lands. */
+  climatology_is_local: boolean;
+
   physics_component_breakdown: PhysicsBreakdown;
   weather_summary: WeatherSummary;
   location: { latitude: number; longitude: number };

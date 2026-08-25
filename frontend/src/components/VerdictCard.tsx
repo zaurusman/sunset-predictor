@@ -35,6 +35,15 @@ function headlineFor(prediction: PredictResponse, targetDate: string): string {
   return "Not tonight";
 }
 
+/** Phrase the percentile as a comparison, which is what the number actually means. */
+function rankPhrase(percentile: number): string {
+  const pct = Math.round(percentile * 100);
+  if (pct >= 97) return "top 3% of evenings here";
+  if (pct >= 88) return `better than ${pct}% of evenings here`;
+  if (pct <= 10) return `bottom ${Math.max(pct, 1)}% of evenings here`;
+  return `better than ${pct}% of evenings here`;
+}
+
 const RADIUS = 27;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
@@ -42,6 +51,12 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
   const isDark = useIsDark();
 
   const score = Math.round(prediction.beauty_score_0_100);
+  // The score is a rank against this location's own history, so say so — "62"
+  // means little on its own, "better than 78% of evenings here" is the actual claim.
+  const rank =
+    prediction.climatology_is_local && prediction.climatology_percentile !== null
+      ? prediction.climatology_percentile
+      : null;
   const colour = getScoreHexColor(score, isDark);
   const headline = headlineFor(prediction, targetDate);
   const countdown = isToday(targetDate) ? countdownTo(prediction.sunset_time) : null;
@@ -92,18 +107,35 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
         </div>
       </div>
 
-      <div className="flex items-center gap-2 flex-wrap">
-        <span
-          className={`px-2.5 py-0.5 rounded-full border text-xs font-semibold ${getCategoryBgColor(prediction.category)}`}
-        >
-          {prediction.category}
-        </span>
-        {why && (
-          <span className="flex-1 min-w-0 text-sm text-gray-700 dark:text-slate-300 leading-snug text-pretty">
-            {why}
+      {/* Category and rank share a row; the reason gets its own full-width line.
+          Keeping all three in one flex row starves the reason of horizontal
+          space and wraps it to one word per line at 375px. */}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span
+            className={`px-2.5 py-0.5 rounded-full border text-xs font-semibold ${getCategoryBgColor(prediction.category)}`}
+          >
+            {prediction.category}
           </span>
+          {rank !== null && (
+            <span className="text-xs text-gray-600 dark:text-slate-400">
+              {rankPhrase(rank)}
+            </span>
+          )}
+        </div>
+        {why && (
+          <p className="text-sm text-gray-700 dark:text-slate-300 leading-snug text-pretty">
+            {why}
+          </p>
         )}
       </div>
+
+      {!prediction.climatology_is_local && (
+        <p className="text-xs text-gray-500 dark:text-slate-400 leading-snug text-pretty">
+          Still learning this location&apos;s normal — the score is ranked against a
+          general baseline for now and will sharpen shortly.
+        </p>
+      )}
 
       <div className="h-px bg-gray-200 dark:bg-slate-700/60" />
 

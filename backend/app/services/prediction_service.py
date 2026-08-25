@@ -22,8 +22,9 @@ from app.schemas.prediction import (
 )
 from app.schemas.weather import WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
+from app.services.climatology_service import ClimatologyService
 from app.services.explanation_engine import ExplanationEngine
-from app.services.scoring_engine import ScoringEngine
+from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.weather_service import WeatherService
 from app.utils.math_utils import clamp
 from app.utils.time_utils import local_sunset_date, utcnow
@@ -46,6 +47,7 @@ class PredictionService:
         explanation_engine: ExplanationEngine,
         ml_model: MLModel,
         settings: Settings,
+        climatology: Optional["ClimatologyService"] = None,
     ) -> None:
         self._weather = weather_service
         self._astro = astro_service
@@ -53,6 +55,7 @@ class PredictionService:
         self._explanation = explanation_engine
         self._ml = ml_model
         self._settings = settings
+        self._climatology = climatology
 
     # ------------------------------------------------------------------
     # Single prediction
@@ -127,10 +130,11 @@ class PredictionService:
                 horizon_obstruction_deg=horizon_deg,
             )
 
-        final_score = self._ml.blend(window_result.final_score, ml_score)
+        raw_score = self._ml.blend(window_result.final_score, ml_score)
         if ml_score is not None:
-           ml_adjustment = round(final_score - window_result.final_score, 2)
+           ml_adjustment = round(raw_score - window_result.final_score, 2)
 
+        final_score, percentile, is_local = self._calibrate(raw_score, lat, lon)
         category = self._scoring.score_to_category(final_score)
 
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
@@ -172,7 +176,10 @@ class PredictionService:
             best_viewing_window_end=window_end,
             best_window_point=window_result.best_label,
             window_scores={k: round(v, 1) for k, v in window_result.window_scores.items()},
-            go_outside_recommendation=window_result.go_outside,
+            go_outside_recommendation=final_score >= GO_OUTSIDE_THRESHOLD,
+            raw_physics_score=round(raw_score, 1),
+            climatology_percentile=round(percentile, 4) if percentile is not None else None,
+            climatology_is_local=is_local,
             algorithm_version=self._settings.ALGORITHM_VERSION,
             ml_model_used=self._ml.is_loaded(),
             ml_adjustment=ml_adjustment,
@@ -180,6 +187,34 @@ class PredictionService:
             weather_summary=_build_weather_summary(primary_weather),
             location={"latitude": lat, "longitude": lon},
             requested_at=utcnow(),
+        )
+
+    # ------------------------------------------------------------------
+    # Calibration
+    # ------------------------------------------------------------------
+
+    def _calibrate(
+        self, raw_score: float, lat: float, lon: float
+    ) -> tuple[float, Optional[float], bool]:
+        """Map a raw physics score onto the displayed 0-100.
+
+        Returns ``(displayed, percentile, is_local)``. Falls through to the raw
+        score untouched when no climatology service is wired, so tests and any
+        caller constructing PredictionService directly keep working.
+
+        A cold location is warmed in the background and ranked against the
+        global reference curve meanwhile — this never blocks a prediction.
+        """
+        if self._climatology is None:
+            return raw_score, None, False
+
+        percentile, is_local = self._climatology.percentile_of(lat, lon, raw_score)
+        if not is_local:
+            self._climatology.warm_in_background(lat, lon)
+        return (
+            self._scoring.percentile_to_display_score(percentile),
+            percentile,
+            is_local,
         )
 
     # ------------------------------------------------------------------
@@ -313,7 +348,8 @@ class PredictionService:
                     horizon_obstruction_deg=2.0,
                 )
 
-            final_score = round(self._ml.blend(window_result.final_score, ml_score), 1)
+            raw_score = self._ml.blend(window_result.final_score, ml_score)
+            final_score = round(self._calibrate(raw_score, lat, lon)[0], 1)
             result_days.append(HeatmapDay(
                 date=d,
                 score=final_score,
@@ -364,7 +400,8 @@ class PredictionService:
                 horizon_obstruction_deg=horizon_deg,
             )
 
-        final_score = self._ml.blend(window_result.final_score, ml_score)
+        raw_score = self._ml.blend(window_result.final_score, ml_score)
+        final_score, percentile, _is_local = self._calibrate(raw_score, lat, lon)
         category = self._scoring.score_to_category(final_score)
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
         confidence = self._scoring.compute_confidence(
@@ -400,7 +437,9 @@ class PredictionService:
             best_viewing_window_end=window_end,
             best_window_point=window_result.best_label,
             window_scores={k: round(v, 1) for k, v in window_result.window_scores.items()},
-            go_outside_recommendation=window_result.go_outside,
+            go_outside_recommendation=final_score >= GO_OUTSIDE_THRESHOLD,
+            raw_physics_score=round(raw_score, 1),
+            climatology_percentile=round(percentile, 4) if percentile is not None else None,
             reasons=reasons,
             physics_component_breakdown=breakdown,
             ml_model_used=self._ml.is_loaded(),
