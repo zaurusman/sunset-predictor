@@ -47,6 +47,15 @@ export interface PhysicsBreakdown {
   component_weights: Record<string, number>;
   /** Afterglow potential; non-null only at window points after sunset. */
   afterglow_score: number | null;
+
+  // ── Gates: multiplicative, applied after the weighted average (1.0 = no effect) ──
+  /** Fraction of sunset light reaching the clouds overhead, sampled 60-400 km
+   *  upstream along the sunset azimuth. Null when corridor data was unavailable. */
+  light_corridor_factor: number | null;
+  /** Fraction of the score surviving active rain (1.0 = dry). */
+  precipitation_gate: number;
+  /** Fraction of the score surviving horizon obstruction (1.0 = open). */
+  horizon_gate: number;
 }
 
 /** The four sampled moments around sunset, in chronological order. */

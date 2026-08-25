@@ -41,6 +41,9 @@ backend/data/*
 # Node
 frontend/node_modules/
 frontend/.next/
+# Next.js sometimes writes a stray .next/ under backend/ when the dev server is
+# launched from the repo root. Ignore it anywhere rather than per-directory.
+.next/
 frontend/out/
 frontend/.turbo/
 

@@ -12,15 +12,33 @@ Two layers:
      +15m, +30m) and derives a daily score that reflects the best likely
      viewing moment, with bonuses for consistency and penalties for volatility.
 
-COMPONENTS (4 total, weights configurable)
-------------------------------------------
-1. Cloud Quality  (42 %) — cloud distribution at sunset
-2. Atmosphere     (28 %) — visibility, aerosol, humidity
-3. Moisture       (20 %) — rain, clearing trend, humidity
-4. Horizon        (10 %) — permanent obstruction (buildings, mountains)
+SCORED COMPONENTS (weighted average, weights configurable)
+----------------------------------------------------------
+1. Cloud Quality  (60 %) — cloud distribution, gated by upstream illumination
+2. Atmosphere     (25 %) — visibility, aerosol, humidity
+3. Moisture       (15 %) — humidity and post-rain clearing
+
+GATES (multiplicative, applied after the average)
+-------------------------------------------------
+- Light corridor   — is the upstream light path clear? (folded into cloud quality)
+- Precipitation    — active rain ends a sunset; it does not "reduce" it
+- Horizon          — permanent obstruction at the observer
+
+WHY GATES INSTEAD OF WEIGHTS
+----------------------------
+Measured over a year at three cities, horizon had a standard deviation of
+ZERO across days while holding 10 % of the weight, and precipitation was
+absent on 82-93 % of evenings while its component held 20 %. As weighted
+addends they did not discriminate between days — they simply added a large
+near-constant to every score, which is a major reason "Epic" was firing on
+10-15 % of evenings.
+
+Physically they are gates, not ingredients: no light path means no colour,
+however good the sky overhead is. Multiplying expresses that and stops them
+inflating the baseline. See docs/scoring-v2-plan.md (D1, D2).
 
 Each component returns a score in [0, 100].  The final beauty score is a
-weighted average, clamped to [0, 100].
+weighted average scaled by the gates, clamped to [0, 100].
 """
 from __future__ import annotations
 
@@ -37,12 +55,20 @@ from app.utils.math_utils import bell_curve, clamp, weighted_average
 # Default weights — override via ScoringEngine(weights={…})
 # ---------------------------------------------------------------------------
 
+# Horizon and precipitation are deliberately ABSENT — they are gates applied
+# multiplicatively after the average, not weighted addends. See the module
+# docstring and docs/scoring-v2-plan.md (D1).
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "cloud_quality": 0.42,
-    "atmosphere": 0.28,
-    "moisture": 0.20,
-    "horizon": 0.10,
+    "cloud_quality": 0.60,
+    "atmosphere": 0.25,
+    "moisture": 0.15,
 }
+
+# Floors on the two multiplicative gates. Neither can zero a score outright:
+# an obstructed horizon still shows you the upper sky, and even in rain there
+# is a little colour when the cloud breaks.
+HORIZON_FLOOR = 0.35
+PRECIP_FLOOR = 0.15
 
 # ---------------------------------------------------------------------------
 # Score → category thresholds
@@ -98,6 +124,9 @@ class ScoringResult:
     # Upstream illumination multiplier already applied to cloud_quality.
     # None when no corridor data was available.
     light_corridor: Optional[float] = None
+    # Multiplicative gates applied after the weighted average.
+    precipitation_gate: float = 1.0
+    horizon_gate: float = 1.0
 
     def to_physics_breakdown(self) -> PhysicsBreakdown:
         return PhysicsBreakdown(
@@ -111,6 +140,8 @@ class ScoringResult:
             light_corridor_factor=(
                 round(self.light_corridor, 3) if self.light_corridor is not None else None
             ),
+            precipitation_gate=round(self.precipitation_gate, 3),
+            horizon_gate=round(self.horizon_gate, 3),
         )
 
 
@@ -204,9 +235,14 @@ class ScoringEngine:
             "cloud_quality": cq,
             "atmosphere": atm,
             "moisture": mst,
-            "horizon": hor,
         }
-        physics_score = clamp(weighted_average(component_scores, self._weights))
+        base = clamp(weighted_average(component_scores, self._weights))
+
+        # Gates: applied after the average because they bound what is possible
+        # rather than contributing a share of it. See the module docstring.
+        precip_gate = self.precipitation_gate(weather.precipitation_mm)
+        hor_gate = self.horizon_gate(horizon_obstruction_deg)
+        physics_score = clamp(base * precip_gate * hor_gate)
 
         # Afterglow potential — computed for breakdown / explanation only.
         # The effect is already embedded in cq (cloud_quality_score with sun_elev);
@@ -221,7 +257,7 @@ class ScoringEngine:
 
         confidence = self.compute_confidence(
             weather=weather,
-            component_scores=component_scores,
+            component_scores={**component_scores, "horizon": hor},
             physics_score=physics_score,
         )
 
@@ -235,6 +271,8 @@ class ScoringEngine:
             weights=dict(self._weights),
             afterglow=ag,
             light_corridor=corridor,
+            precipitation_gate=precip_gate,
+            horizon_gate=hor_gate,
         )
 
     # ------------------------------------------------------------------
@@ -660,20 +698,21 @@ class ScoringEngine:
         vis_trend: Optional[float] = None,
     ) -> float:
         """
-        Score moisture and precipitation conditions.
+        Score moisture conditions — humidity and post-rain clearing.
 
-        Separate treatment for:
-        - Active precipitation now  → strong penalty
-        - Recent rain + current clearing → clearing bonus (post-rain glow)
+        NOTE: active precipitation is NOT scored here. It is a multiplicative
+        gate (see precipitation_gate) because rain ends a sunset rather than
+        reducing it by some number of points. *precip_mm* is still needed to
+        decide whether the clearing bonus applies, which it cannot while it is
+        still raining.
+
+        - Recent rain + currently dry → clearing bonus (post-rain glow)
         - Rising pressure / improving visibility / clearing clouds → bonus
-        - High humidity without rain → mild penalty only
+        - High humidity → mild penalty only
 
         Clearing bonus: up to +15 pts when rain stopped recently and
         atmospheric signals show improvement.
         """
-        # Active rain: 0 mm = 0 penalty; ~2 mm = ~90 penalty (near knockout)
-        precip_penalty = clamp(precip_mm * 45.0)
-
         # Clearing bonus — only applicable when it is NOT currently raining
         clearing_bonus = 0.0
         if precip_mm < 0.1:
@@ -694,7 +733,7 @@ class ScoringEngine:
         # Humidity: penalty only above 85 % (max −25 pts at 100 %)
         hum_penalty = max(0.0, (humidity_pct - 85.0) / 15.0 * 25.0)
 
-        return clamp(100.0 - precip_penalty - hum_penalty + clearing_bonus)
+        return clamp(100.0 - hum_penalty + clearing_bonus)
 
     # ------------------------------------------------------------------
     # Component 4: Horizon (weight 0.10)
@@ -702,16 +741,56 @@ class ScoringEngine:
 
     def horizon_score(self, obstruction_deg: float) -> float:
         """
-        Score the unobstructed horizon.
+        Score the unobstructed horizon, 0-100, for DISPLAY only.
+
+        This is no longer part of the weighted average — it is reported so the
+        user can see how much their own outlook costs them, and applied through
+        horizon_gate(). Measured across a year it had a standard deviation of
+        zero, because it is a property of where you stand, not of the evening.
+        As a weighted addend it therefore added a constant ~9 points to every
+        score without ever distinguishing one night from another.
 
         0 degrees = open ocean / flat field = 100.
-        5 degrees = gentle hills / low suburbs = ~70.
-        15+ degrees = dense urban / deep valley = ~15.
-
-        Uses a softened power curve (exponent 1.2, coefficient 3.8) so that
-        typical urban/suburban locations are not over-penalised.
+        5 degrees = gentle hills / low suburbs = ~88.
+        15+ degrees = dense urban / deep valley = ~49.
         """
-        return clamp(100.0 - (obstruction_deg ** 1.2) * 3.8)
+        return clamp(self.horizon_gate(obstruction_deg) * 100.0)
+
+    @staticmethod
+    def horizon_gate(obstruction_deg: float) -> float:
+        """Fraction of the display an obstructed horizon leaves visible.
+
+        A raised horizon hides the sun early and cuts off the brightest,
+        lowest part of the sky, so it scales the whole result rather than
+        contributing a share of it.
+
+        Deliberately gentler near zero than the old scoring curve: 2 degrees is
+        an essentially open horizon (trees across a field) and used to cost
+        nearly 9 points. It now costs under 4 %.
+
+            0°  → 1.00      5°  → 0.88      15° → 0.49
+            2°  → 0.96      10° → 0.70      25°+ → 0.35 (floor)
+        """
+        if obstruction_deg <= 0.0:
+            return 1.0
+        loss = (min(obstruction_deg, 25.0) / 25.0) ** 1.3
+        return max(HORIZON_FLOOR, 1.0 - loss)
+
+    @staticmethod
+    def precipitation_gate(precip_mm: float) -> float:
+        """Fraction of the display that survives active precipitation.
+
+        Rain does not subtract points from a sunset — it replaces it with grey.
+        Modelled as exponential decay so that drizzle barely registers (a
+        breaking shower at sunset can be spectacular) while steady rain
+        collapses the score.
+
+            0.0 mm → 1.00      1.0 mm → 0.55      3.0 mm → 0.17
+            0.2 mm → 0.89      2.0 mm → 0.30      5.0 mm+ → 0.15 (floor)
+        """
+        if precip_mm <= 0.0:
+            return 1.0
+        return max(PRECIP_FLOOR, math.exp(-0.6 * precip_mm))
 
     # ------------------------------------------------------------------
     # Category mapping

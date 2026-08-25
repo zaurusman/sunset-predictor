@@ -7,11 +7,11 @@ Written 2026-08-25.
 | Phase | State |
 |---|---|
 | 0 — Measuring stick | **Partly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with raw inputs; one-tap UI on the verdict card. Webcam labels and the offline replay harness not started. |
-| 1 — Neutralise dead weight | Not started |
+| 1 — Neutralise dead weight | **Done.** Horizon and precipitation are now multiplicative gates, not weighted components; weights are 0.60/0.25/0.15. |
 | 2 — Light corridor | **Done.** Wired into predict, forecast and heatmap. |
 | 3 — Aerosol + column moisture | Not started |
 | 4 — Earth-shadow afterglow timing | Not started |
-| 5 — Calibrate the scale | Not started |
+| 5 — Calibrate the scale | Not started — **now load-bearing**, see below. |
 | 6 — Make ML shelving explicit | **Done.** `ML_BLEND_ALPHA = 1.0`, load-time quality gate, artifact moved to `data/dead/`. |
 | 7 — Better inputs (ICON, ensemble confidence) | Not started |
 
@@ -33,9 +33,54 @@ The corridor is *selective*, not a blanket subtraction: p10 barely moves
 removing false positives at the top of the distribution, which is exactly the
 failure mode Part 2 identified.
 
-Still outstanding after Phase 2: Tel Aviv's degeneracy (p50 61.3, sd 8.5) is
-untouched, because that is the dead-weight problem in D1, not an illumination
-problem. Phases 1, 3 and 5 are what fix it.
+**Measured effect of Phases 1 + 2 together** — same climatology, original
+baseline vs. now:
+
+```
+                     mean    sd   p10   p50   p90   Epic%   >=70%
+TelAviv      before  64.2   8.6  61.1  61.4  81.1   11.0     15.9
+             now     49.5  12.1  43.1  47.0  68.5    4.7      9.9
+London       before  61.2  15.3  41.3  61.6  83.2   15.9     26.6
+             now     43.3  16.1  24.1  44.2  66.1    2.2      7.1
+SanFrancisco before  61.4  14.1  40.7  61.3  83.9   15.6     22.2
+             now     43.3  15.3  24.1  43.7  66.2    3.3      6.3
+```
+
+What improved:
+- **Tel Aviv's degeneracy is broken.** The p10–p50 gap was 0.3 points
+  (61.1 vs 61.4 — more than 40 % of the year returning one number); it is now
+  3.9 points, and sd rose from 8.6 to 12.1.
+- **Epic is rare again**: 11–16 % → 2.2–4.7 %.
+- **The bottom of the range is reachable**: London p10 fell 41.3 → 24.1, so
+  "Poor" is finally a category that occurs (0–1 % → 21–25 %).
+- `GO_OUTSIDE_THRESHOLD = 70` now fires on 6–10 % of evenings — a few nights a
+  month, which is what "worth changing your plans for" should mean. It became a
+  defensible number rather than a knob.
+
+### What Phase 1 exposed: the category cutoffs are now wrong
+
+Deflating the scale left the *labels* calibrated to the old inflated one. The
+mass simply moved from "Good" into "Decent":
+
+```
+TelAviv       Poor: 2.7%  Decent:79.7%  Good: 5.8%  Great: 7.1%  Epic: 4.7%
+London        Poor:25.2%  Decent:49.9%  Good:14.0%  Great: 8.8%  Epic: 2.2%
+SanFrancisco  Poor:20.8%  Decent:59.2%  Good: 8.8%  Great: 7.9%  Epic: 3.3%
+```
+
+All five bands are in use, which is a real improvement over `Good:80%,
+Poor:0%`. But 50–80 % of evenings now read "Decent", so the *ordering* got
+better while the *labelling* got worse.
+
+**Do not fix this by hand-tuning SCORE_THRESHOLDS.** Hand-tuned constants are
+how the engine got into this state. The fix is Phase 5 — percentile-map the raw
+score against multi-year climatology at the user's own location, so the bands
+mean the same thing in Tel Aviv and London. Phase 5 is therefore no longer
+optional polish; it is a prerequisite for putting Phase 1 in front of users.
+
+Still outstanding: `moisture` remains pinned at ~100 on dry days even after
+losing the rain penalty, because what is left of it is only surface humidity.
+Phase 3's column moisture is what gives that weight something real to measure.
 
 ---
 

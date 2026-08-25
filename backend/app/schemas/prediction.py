@@ -60,6 +60,16 @@ class PhysicsBreakdown(BaseModel):
     # Light corridor: fraction of sunset light reaching the clouds overhead,
     # measured along the sunset azimuth 100-400 km upstream. 1.0 = clear path.
     # None when corridor data was unavailable (the score is then unadjusted).
+    # Multiplicative gates applied after the weighted average. 1.0 = no effect.
+    precipitation_gate: float = Field(
+        default=1.0, ge=0, le=1,
+        description="Fraction of the score surviving active rain (1.0 = dry).",
+    )
+    horizon_gate: float = Field(
+        default=1.0, ge=0, le=1,
+        description="Fraction of the score surviving horizon obstruction (1.0 = open).",
+    )
+
     light_corridor_factor: Optional[float] = Field(
         default=None, ge=0, le=1,
         description=(

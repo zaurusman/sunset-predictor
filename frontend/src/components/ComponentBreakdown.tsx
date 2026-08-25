@@ -11,27 +11,60 @@ interface ComponentBreakdownProps {
 interface ComponentRow {
   key: keyof Pick<
     PhysicsBreakdown,
-    "cloud_quality_score" | "atmosphere_score" | "moisture_score" | "horizon_score"
+    "cloud_quality_score" | "atmosphere_score" | "moisture_score"
   >;
   label: string;
 }
 
+/**
+ * The three SCORED components. Horizon is no longer among them — it is a gate
+ * (below), because it is a property of where you stand rather than of tonight,
+ * and as a weighted component it only ever added a constant to every score.
+ */
 const COMPONENTS: ComponentRow[] = [
   { key: "cloud_quality_score", label: "Cloud quality" },
   { key: "atmosphere_score", label: "Atmosphere" },
   { key: "moisture_score", label: "Moisture" },
-  { key: "horizon_score", label: "Horizon" },
 ];
 
-/**
- * The four scored components.
- *
- * Each row is a single baseline-aligned line — label, weight, value — rather
- * than two competing columns, which used to collide at 375px once "(42%
- * weight)" wrapped underneath the label and ran into the description text.
- */
+/** A gate reduces the whole score rather than contributing a share of it. */
+interface Gate {
+  label: string;
+  value: number;
+  /** Explains what a reduced value means, shown when the gate is biting. */
+  reason: string;
+}
+
+/** Below this a gate is worth surfacing; above it, it isn't doing anything. */
+const GATE_VISIBLE_BELOW = 0.97;
+
+function gatesFrom(breakdown: PhysicsBreakdown): Gate[] {
+  const gates: Gate[] = [];
+
+  if (breakdown.light_corridor_factor !== null) {
+    gates.push({
+      label: "Light path",
+      value: breakdown.light_corridor_factor,
+      reason: "Cloud upstream is shading the sky here, whatever it looks like overhead",
+    });
+  }
+  gates.push({
+    label: "Rain",
+    value: breakdown.precipitation_gate,
+    reason: "Rain at sunset replaces the colour rather than dimming it",
+  });
+  gates.push({
+    label: "Horizon",
+    value: breakdown.horizon_gate,
+    reason: "Your horizon hides the lowest, brightest part of the sky",
+  });
+
+  return gates.filter((g) => g.value < GATE_VISIBLE_BELOW);
+}
+
 export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProps) {
   const isDark = useIsDark();
+  const gates = gatesFrom(breakdown);
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -65,6 +98,29 @@ export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProp
           </div>
         );
       })}
+
+      {gates.length > 0 && (
+        <div className="flex flex-col gap-2 pt-1 border-t border-gray-200 dark:border-slate-700/60">
+          <span className="text-gray-600 dark:text-slate-400 text-[11px] uppercase tracking-wider font-semibold">
+            Holding it back
+          </span>
+          {gates.map((g) => (
+            <div key={g.label} className="flex flex-col gap-0.5">
+              <div className="flex items-baseline gap-2">
+                <span className="text-sm font-medium text-gray-900 dark:text-slate-200">
+                  {g.label}
+                </span>
+                <span className="flex-1 text-xs text-gray-600 dark:text-slate-400 tabular-nums text-right">
+                  −{Math.round((1 - g.value) * 100)}%
+                </span>
+              </div>
+              <span className="text-xs text-gray-500 dark:text-slate-400 leading-snug text-pretty">
+                {g.reason}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from app.services import scoring_engine as engine_module
 from app.services.scoring_engine import ScoringEngine
 from app.schemas.weather import WeatherSnapshot
 
@@ -147,10 +148,43 @@ def test_cloud_quality_bell_curve_peak():
 # Moisture / precipitation tests
 # ---------------------------------------------------------------------------
 
-def test_precipitation_penalizes_moisture_score(scoring_engine, rainy_weather):
-    """Rain should produce a very low moisture score."""
+def test_precipitation_collapses_the_score(scoring_engine, rainy_weather):
+    """Rain must tank the final score.
+
+    The mechanism moved: precipitation used to be a penalty inside the moisture
+    component, and is now a multiplicative gate, because rain replaces a sunset
+    rather than deducting points from it. The requirement is unchanged — what is
+    asserted is the outcome, not the internal route to it.
+    """
     result = scoring_engine.score(rainy_weather, horizon_obstruction_deg=2.0)
-    assert result.moisture < 20, f"Expected moisture score < 20 with rain, got {result.moisture}"
+    assert result.precipitation_gate < 0.2, (
+        f"5 mm of rain should nearly close the gate, got {result.precipitation_gate:.2f}"
+    )
+    assert result.physics_score < 20, (
+        f"Expected the score to collapse in rain, got {result.physics_score:.1f}"
+    )
+
+
+def test_precipitation_gate_is_graduated_not_binary():
+    """Drizzle should barely register; steady rain should not.
+
+    A shower breaking at sunset is one of the better things that can happen, so
+    the gate decays smoothly rather than switching off at the first drop.
+    """
+    engine = ScoringEngine()
+    assert engine.precipitation_gate(0.0) == 1.0
+    assert engine.precipitation_gate(0.2) > 0.85, "drizzle should barely matter"
+    assert engine.precipitation_gate(1.0) < 0.6
+    assert engine.precipitation_gate(3.0) < 0.2
+    assert engine.precipitation_gate(50.0) >= 0.15, "gate must never reach zero"
+
+
+def test_precipitation_gate_is_monotone():
+    prev = 1.1
+    for mm in (0.0, 0.5, 1.0, 2.0, 5.0, 10.0):
+        g = engine_module.ScoringEngine().precipitation_gate(mm)
+        assert g <= prev, "more rain must never help"
+        prev = g
 
 
 def test_post_rain_clearing_bonus():
@@ -160,8 +194,9 @@ def test_post_rain_clearing_bonus():
     """
     engine = ScoringEngine()
 
-    # Currently raining — bad
-    score_active = engine.moisture_score(2.5, 70.0)
+    # Currently raining — the penalty now lives in the gate, not the component,
+    # so compare through it rather than through moisture_score alone.
+    score_active = engine.moisture_score(2.5, 70.0) * engine.precipitation_gate(2.5)
 
     # Rain stopped, recently cleared, pressure rising
     score_clearing = engine.moisture_score(
@@ -208,12 +243,34 @@ def test_missing_aerosol_does_not_tank_score():
 # ---------------------------------------------------------------------------
 
 def test_horizon_obstruction_penalty(scoring_engine, ideal_weather):
-    """Large horizon obstruction should significantly reduce horizon score."""
+    """A blocked horizon should materially reduce the score.
+
+    Horizon is now a gate rather than a weighted component: it has zero
+    day-to-day variance, so as an addend it only ever added a constant. The
+    curve was also softened near zero (see horizon_gate), which is why the
+    15-degree threshold here is 55 rather than the old 40.
+    """
     result_open = scoring_engine.score(ideal_weather, horizon_obstruction_deg=0.0)
     result_blocked = scoring_engine.score(ideal_weather, horizon_obstruction_deg=15.0)
-    assert result_blocked.horizon < 40, f"Expected horizon score < 40 at 15 deg, got {result_blocked.horizon}"
+    assert result_blocked.horizon < 55, f"Expected horizon score < 55 at 15 deg, got {result_blocked.horizon}"
     assert result_open.horizon > 90, f"Expected horizon score > 90 at 0 deg, got {result_open.horizon}"
     assert result_open.physics_score > result_blocked.physics_score
+
+
+def test_horizon_is_a_gate_not_a_weighted_component():
+    """The weights must not contain horizon — that was the inflation bug."""
+    assert "horizon" not in ScoringEngine()._weights
+
+
+def test_open_horizon_costs_almost_nothing():
+    """2 degrees is an open horizon and used to cost ~9 points as an addend."""
+    assert ScoringEngine().horizon_gate(0.0) == 1.0
+    assert ScoringEngine().horizon_gate(2.0) > 0.95
+
+
+def test_horizon_gate_has_a_floor():
+    """Even a wall leaves the upper sky visible."""
+    assert ScoringEngine().horizon_gate(90.0) >= 0.35
 
 
 def test_horizon_suburban_not_crushed():
@@ -224,6 +281,7 @@ def test_horizon_suburban_not_crushed():
     engine = ScoringEngine()
     score = engine.horizon_score(5.0)
     assert score >= 60.0, f"Suburban horizon (5 deg) should score >= 60, got {score}"
+    assert score <= 95.0, "…but it should still cost something"
 
 
 # ---------------------------------------------------------------------------
