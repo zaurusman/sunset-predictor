@@ -527,20 +527,61 @@ def test_afterglow_peaks_near_minus_3_degrees():
 
 def test_afterglow_requires_high_clouds():
     """
-    No afterglow boost when high cloud coverage is below the 15 % threshold.
-    The score at sun −3° should not be meaningfully higher than at sun +2°
-    — any delta is horizon-glow variation, not afterglow.
-    (Horizon glow fires at both elevations but with different intensity, so
-    exact equality is not expected; we only check there's no +boost.)
+    The CLOUD afterglow boost needs a canvas: limb light below the horizon has
+    to land on something. Below the 15 % high-cloud threshold there is nothing
+    to illuminate, so that boost must not fire.
+
+    Tested through afterglow_score rather than cloud_quality_score. This test
+    used to assert that a near-clear sky scores no higher at -3 deg than at
+    +2 deg, which is false and was the bug: a clear sky colours by the twilight
+    gradient, which peaks several degrees BELOW the horizon. Asserting it
+    through cloud_quality_score now conflates the two pathways.
     """
     engine = ScoringEngine()
-    # Near-clear sky: 5% high, 5% total — afterglow threshold not met
-    pre  = engine.cloud_quality_score(2.0, 3.0, 5.0, 8.0, sun_elevation_deg=+2.0)
-    post = engine.cloud_quality_score(2.0, 3.0, 5.0, 8.0, sun_elevation_deg=-3.0)
-    assert post <= pre + 2.0, (
-        f"No high clouds → no afterglow boost; score should not rise at -3°, "
-        f"got {post:.1f} vs {pre:.1f}"
+    assert engine.afterglow_score(-3.0, cloud_high=5.0, cloud_low=2.0, cloud_total=8.0) == 0.0
+    assert engine.afterglow_score(-3.0, cloud_high=45.0, cloud_low=2.0, cloud_total=50.0) > 40.0
+
+
+def test_clear_sky_improves_after_the_sun_goes_down():
+    """The evening that motivated the twilight pathway: cloudless Tel Aviv,
+    clean air, photographed ~20 minutes after sunset as a saturated orange-to-
+    indigo gradient. The old engine scored it 11/100 and said "clear conditions
+    produce less colour drama"."""
+    engine = ScoringEngine()
+    # The measured conditions that evening: atmosphere 93, moisture 68.
+    at_sunset = engine.cloud_quality_score(
+        0.0, 0.0, 0.0, 0.0, sun_elevation_deg=0.0, clarity=93.0, dryness=68.0
     )
+    after = engine.cloud_quality_score(
+        0.0, 0.0, 0.0, 0.0, sun_elevation_deg=-4.0, clarity=93.0, dryness=68.0
+    )
+    assert after > at_sunset, (
+        f"the gradient peaks below the horizon, not at it: {after:.1f} vs {at_sunset:.1f}"
+    )
+    assert after >= 45.0, f"a clean cloudless twilight must be a real score, got {after:.1f}"
+
+
+def test_clear_sky_discriminates_on_air_quality():
+    """In a climate where most evenings are cloudless, air quality is the only
+    thing that separates them. A flat response would rate them all alike, which
+    is the failure mode the first version of this pathway had — it pushed half
+    of Tel Aviv's year above a raw score of 80."""
+    engine = ScoringEngine()
+    pristine = engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=100.0, dryness=100.0)
+    ordinary = engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=85.0, dryness=60.0)
+    murky = engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=40.0, dryness=35.0)
+    assert pristine - ordinary >= 15.0, f"{pristine:.1f} vs {ordinary:.1f}"
+    assert ordinary - murky >= 20.0, f"{ordinary:.1f} vs {murky:.1f}"
+
+
+def test_clear_sky_cannot_manufacture_an_epic():
+    """A gradient is a lovely evening, not the year's best sky. Epic should stay
+    reserved for lit cloud."""
+    engine = ScoringEngine()
+    best_possible = engine.twilight_gradient_score(
+        -4.0, 0.0, 0.0, clarity=100.0, dryness=100.0
+    )
+    assert best_possible <= 80.0, f"clear-sky ceiling too high: {best_possible:.1f}"
 
 
 def test_afterglow_blocked_by_overcast():

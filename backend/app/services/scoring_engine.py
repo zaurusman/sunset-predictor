@@ -162,6 +162,64 @@ TCWV_ANCHORS: list[tuple[float, float]] = [
 ]
 
 # ---------------------------------------------------------------------------
+# Clear-sky twilight gradient
+# ---------------------------------------------------------------------------
+#
+# A cloudless sky is not a failed sunset. When the air is clean and dry, the
+# western sky after sunset becomes a saturated vertical gradient — deep orange
+# at the horizon through peach and salmon into blue and then indigo. That is
+# the Earth's own shadow rising in the east with the Belt of Venus above it,
+# and looking west it is the anti-twilight arch's counterpart: a long slant
+# path through clean lower atmosphere, reddened by Rayleigh scattering with
+# nothing to occlude it.
+#
+# This is a SEPARATE PATHWAY to colour, not a degraded version of the cloud
+# pathway, so cloud_quality_score takes the better of the two rather than
+# adding a small bonus to a penalised base.
+#
+# The old model had a "horizon glow" term worth at most +15 points that peaked
+# at solar elevation +0.5 degrees and switched off entirely below -4. That is
+# almost exactly wrong: the gradient is weak while the sun is still up and
+# strongest well after it has set. It scored a real Tel Aviv evening (photo
+# evidence, 2026-08-23) at 11/100 and explained it as "clear conditions produce
+# less colour drama".
+
+# Solar elevation at which the gradient is most saturated, and the spread
+# around it. Negative = below the horizon. The band roughly -1 to -8 degrees is
+# civil twilight, where the shadow edge is high enough to see but the sky has
+# not yet gone dark.
+TWILIGHT_PEAK_ELEV_DEG = -4.0
+TWILIGHT_SIGMA_DEG = 3.0
+
+# Best achievable clear-sky gradient, on the same 0-100 scale as the cloud
+# pathway. Deliberately below the cloud maximum: a perfect lit-cloud sky is a
+# rarer and more dramatic event than a clean twilight gradient, and the bands
+# are percentile-anchored, so this sets how often a clear evening outranks a
+# cloudy one rather than an absolute claim about beauty.
+#
+# First set to 95, which was too generous and measurably so: Tel Aviv's raw p50
+# jumped to 80 with p90 at 87, because a clear evening is the DEFAULT there and
+# every one of them became a top-decile evening. Percentile calibration hid it —
+# the displayed bands stayed perfectly shaped while the raw scores being ranked
+# were crowded into ten points, so the ordering inside them was noise.
+TWILIGHT_MAX = 78.0
+
+# The gradient is made of air, so its quality is entirely the air's quality:
+# clean (low aerosol) and dry (low water column). Blend and sharpen, because
+# on a clear evening these are the ONLY things that vary — a gentle response
+# would score every cloudless night the same and tell the user nothing.
+TWILIGHT_CLARITY_SHARE = 0.55
+TWILIGHT_SHARPNESS = 1.9
+
+# Local blocking cloud below this leaves the horizon band fully visible; above
+# TWILIGHT_BLOCKED_AT the gradient is hidden. Gentler than the cloud pathway's
+# low-cloud penalty because what this needs is a clear STRIP at the horizon,
+# and cloud in the grid cell is just as likely to be behind the observer. The
+# upstream corridor measures the direction that actually matters.
+TWILIGHT_OPEN_BELOW = 30.0
+TWILIGHT_BLOCKED_AT = 90.0
+
+# ---------------------------------------------------------------------------
 # Light-corridor constants
 # ---------------------------------------------------------------------------
 
@@ -200,6 +258,11 @@ class ScoringResult:
     # Multiplicative gates applied after the weighted average.
     precipitation_gate: float = 1.0
     horizon_gate: float = 1.0
+    # Clear-sky pathway score at this snapshot. Reported so the UI and the
+    # explanation engine can tell the user WHICH kind of sunset this is —
+    # "lit clouds" and "colour gradient" want different words and a different
+    # best-viewing time. Already folded into cloud_quality via max().
+    twilight_gradient: float = 0.0
 
     def to_physics_breakdown(self) -> PhysicsBreakdown:
         return PhysicsBreakdown(
@@ -215,6 +278,7 @@ class ScoringResult:
             ),
             precipitation_gate=round(self.precipitation_gate, 3),
             horizon_gate=round(self.horizon_gate, 3),
+            twilight_gradient_score=round(self.twilight_gradient, 1),
         )
 
 
@@ -270,15 +334,42 @@ class ScoringEngine:
         """
         sun_elev = weather.sun_elevation_deg
 
+        # Atmosphere is computed FIRST because the clear-sky pathway inside
+        # cloud_quality_score depends on it: with no cloud to catch the light,
+        # the gradient is made of nothing but air, so its saturation is a
+        # direct function of how clean that air is.
+        atm = self.atmosphere_score(
+            weather.visibility_m,
+            weather.aerosol_optical_depth,
+        )
+
+        mst = self.moisture_score(
+            weather.precipitation_mm,
+            weather.relative_humidity,
+            tcwv=weather.tcwv_kg_m2,
+            precip_last_3h=weather.precipitation_last_3h_mm,
+            pressure_trend=weather.pressure_trend_hpa_3h,
+            cloud_trend=weather.cloud_total_trend_3h,
+            vis_trend=weather.visibility_trend_3h_m,
+        )
+
         cq = self.cloud_quality_score(
             weather.cloud_low,
             weather.cloud_mid,
             weather.cloud_high,
             weather.cloud_total,
             sun_elevation_deg=sun_elev,
+            clarity=atm,
+            dryness=mst,
+        )
+        twilight = self.twilight_gradient_score(
+            sun_elev, weather.cloud_low, weather.cloud_mid, atm, mst
         )
 
         # Illumination gate: a beautiful canvas that no light reaches is grey.
+        # This applies to the clear-sky pathway just as much — the gradient is
+        # made by light travelling hundreds of km through the lower atmosphere,
+        # so cloud out along that path extinguishes it.
         corridor: Optional[float] = None
         if corridor_samples:
             corridor = self.light_corridor_factor(
@@ -289,19 +380,6 @@ class ScoringEngine:
             )
             cq = clamp(cq * corridor)
 
-        atm = self.atmosphere_score(
-            weather.visibility_m,
-            weather.aerosol_optical_depth,
-        )
-        mst = self.moisture_score(
-            weather.precipitation_mm,
-            weather.relative_humidity,
-            tcwv=weather.tcwv_kg_m2,
-            precip_last_3h=weather.precipitation_last_3h_mm,
-            pressure_trend=weather.pressure_trend_hpa_3h,
-            cloud_trend=weather.cloud_total_trend_3h,
-            vis_trend=weather.visibility_trend_3h_m,
-        )
         hor = self.horizon_score(horizon_obstruction_deg)
 
         component_scores = {
@@ -346,6 +424,7 @@ class ScoringEngine:
             light_corridor=corridor,
             precipitation_gate=precip_gate,
             horizon_gate=hor_gate,
+            twilight_gradient=twilight,
         )
 
     # ------------------------------------------------------------------
@@ -417,6 +496,60 @@ class ScoringEngine:
     # Component 1: Cloud Quality (weight 0.42)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def twilight_gradient_score(
+        sun_elevation_deg: float,
+        low_pct: float,
+        mid_pct: float,
+        clarity: float = 70.0,
+        dryness: float = 70.0,
+    ) -> float:
+        """Score the clear-sky twilight gradient, 0-100.
+
+        The cloudless pathway to colour: see the TWILIGHT_* constants for the
+        physics and for why this is a pathway rather than a penalty case.
+
+        Three things gate it:
+
+        *Timing.* Peaks at TWILIGHT_PEAK_ELEV_DEG below the horizon. While the
+        sun is still up the sky near it is too bright for the gradient to show;
+        once it is far enough down the shadow has climbed past the zenith and
+        the colour has drained.
+
+        *An open horizon strip.* Blocking cloud hides the band. This is gentler
+        than the cloud pathway's low-cloud penalty because cloud reported for
+        the grid cell is as likely to be behind the observer as in front, and
+        it is the corridor sampling upstream that measures the direction that
+        matters — the caller multiplies this by that factor afterwards.
+
+        *Air quality, sharply.* There is no cloud here to catch the light, so
+        everything visible is scattering by the air itself: haze turns the same
+        geometry into a flat brown murk, and a wet column does the same more
+        gently. *clarity* is the atmosphere component, *dryness* the moisture
+        component. The response is deliberately steep — in a climate where most
+        evenings are cloudless these two are the only signals that separate a
+        memorable gradient from an ordinary one, and a gentle curve would rate
+        every clear night alike.
+        """
+        elev_factor = math.exp(
+            -0.5 * ((sun_elevation_deg - TWILIGHT_PEAK_ELEV_DEG) / TWILIGHT_SIGMA_DEG) ** 2
+        )
+
+        blocking = low_pct + mid_pct * 0.6
+        if blocking <= TWILIGHT_OPEN_BELOW:
+            openness = 1.0
+        else:
+            span = TWILIGHT_BLOCKED_AT - TWILIGHT_OPEN_BELOW
+            openness = clamp(1.0 - (blocking - TWILIGHT_OPEN_BELOW) / span, lo=0.0, hi=1.0)
+
+        air = (
+            TWILIGHT_CLARITY_SHARE * clamp(clarity)
+            + (1.0 - TWILIGHT_CLARITY_SHARE) * clamp(dryness)
+        ) / 100.0
+        air_factor = air ** TWILIGHT_SHARPNESS
+
+        return clamp(elev_factor * openness * air_factor * TWILIGHT_MAX)
+
     def cloud_quality_score(
         self,
         low_pct: float,
@@ -424,6 +557,8 @@ class ScoringEngine:
         high_pct: float,
         total_pct: float,
         sun_elevation_deg: float = 0.0,
+        clarity: float = 70.0,
+        dryness: float = 70.0,
     ) -> float:
         """
         Score the cloud distribution for sunset colour potential.
@@ -545,17 +680,21 @@ class ScoringEngine:
             afterglow_boost = elev_factor * canvas_factor * low_factor * 28.0
             base = clamp(base + afterglow_boost)
 
-        # --- Horizon glow: Rayleigh orange for near-clear skies at low sun angles ---
-        # Only fires when total cloud < 20 % — if clouds are present they already
-        # score their own colour; this covers the clear-sky pathway.
-        # Bell curve peaks at ~0.5° (sun just kissing the horizon), sigma 2.5°.
-        if total_pct < 20.0 and -4.0 <= sun_elevation_deg <= 6.0:
-            elev_factor = math.exp(-0.5 * ((sun_elevation_deg - 0.5) / 2.5) ** 2)
-            clearness = clamp(1.0 - total_pct / 20.0)
-            horizon_glow = elev_factor * clearness * 15.0
-            base = clamp(base + horizon_glow)
-
-        return clamp(base)
+        # --- Two pathways, not one ---
+        # Everything above scores cloud as a canvas. A cloudless sky has no
+        # canvas but can still colour brilliantly, by a different mechanism
+        # (see twilight_gradient_score). They are alternatives, so take the
+        # better one: an evening is as good as its best route to colour.
+        #
+        # This replaced a +15 "horizon glow" bonus added on top of the
+        # canvas score. Adding was wrong twice over — it left the cloudless
+        # sky carrying the empty-canvas penalty it had just been credited for
+        # escaping, and it peaked at solar elevation +0.5 when the gradient is
+        # actually strongest several degrees BELOW the horizon.
+        twilight = self.twilight_gradient_score(
+            sun_elevation_deg, low_pct, mid_pct, clarity, dryness
+        )
+        return clamp(max(base, twilight))
 
     # ------------------------------------------------------------------
     # Light corridor — the upstream illumination path

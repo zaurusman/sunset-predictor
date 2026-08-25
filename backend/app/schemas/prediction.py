@@ -70,6 +70,15 @@ class PhysicsBreakdown(BaseModel):
         description="Fraction of the score surviving horizon obstruction (1.0 = open).",
     )
 
+    # Clear-sky pathway score: how strong the cloudless colour gradient is.
+    # High with a LOW cloud contribution means tonight is a gradient evening
+    # rather than a lit-cloud one — which the UI should say, because the two
+    # look different and peak at different times.
+    twilight_gradient_score: float = Field(
+        default=0.0, ge=0, le=100,
+        description="Clear-sky twilight gradient score (0-100), already folded into cloud_quality_score.",
+    )
+
     light_corridor_factor: Optional[float] = Field(
         default=None, ge=0, le=1,
         description=(

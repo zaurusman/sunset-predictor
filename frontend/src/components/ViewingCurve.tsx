@@ -10,6 +10,10 @@ interface ViewingCurveProps {
    *  actually a canvas for the light to land on. 15 % matches the threshold
    *  the scoring engine uses before it will award any afterglow at all. */
   cloudHighPct?: number;
+  /** Clear-sky gradient score. A cloudless evening still peaks after sunset —
+   *  but as a colour gradient, not as lit cloud, and the caption has to say
+   *  which, or it sends the user looking for the wrong thing. */
+  twilightGradient?: number;
   /** Physics score at each sampled moment, keyed by window point. */
   windowScores: Record<string, number>;
   /** The window point that scored highest. */
@@ -59,9 +63,11 @@ export default function ViewingCurve({
   bestPoint,
   sunsetTime,
   cloudHighPct,
+  twilightGradient,
 }: ViewingCurveProps) {
   const isDark = useIsDark();
   const hasAfterglowCanvas = (cloudHighPct ?? 0) >= 15;
+  const isGradientEvening = !hasAfterglowCanvas && (twilightGradient ?? 0) >= 55;
 
   const available = WINDOW_POINTS.filter((p) => typeof windowScores[p] === "number");
   const peak = available.includes(bestPoint as (typeof WINDOW_POINTS)[number])
@@ -176,7 +182,9 @@ export default function ViewingCurve({
             {peak !== "sunset" && peak.startsWith("+")
               ? hasAfterglowCanvas
                 ? " — after the sun is down, when the afterglow lights the high cloud."
-                : " — just after the sun is down."
+                : isGradientEvening
+                  ? " — after the sun is down, when the gradient is deepest."
+                  : " — just after the sun is down."
               : "."}
           </>
         ) : (

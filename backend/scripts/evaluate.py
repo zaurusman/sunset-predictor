@@ -66,6 +66,12 @@ CATEGORY_ORDER = ["Poor", "Decent", "Good", "Great", "Epic"]
 MAX_EPIC_SHARE = 8.0        # per cent of days
 MAX_SINGLE_BAND_SHARE = 65.0
 MIN_P10_P50_GAP = 3.0       # points; below this the score is degenerate
+# The same degeneracy check at the TOP of the raw scale. Percentile calibration
+# hides compression there — the displayed bands stay perfectly shaped while the
+# raw scores they rank are all crowded into a few points, so the ranking is
+# decided by noise. Added after the clear-sky pathway pushed Tel Aviv's raw p50
+# to 80 and its p90 to 87 with every guardrail still reporting green.
+MIN_P50_P90_GAP = 8.0
 
 
 async def collect(
@@ -99,19 +105,26 @@ async def collect(
         for d, snaps in windows:
             samples = corridor_map.get(d, [])
             scored: list[tuple[str, float]] = []
-            first: Optional[object] = None
+            results = []
             for snap in snaps:
                 r = engine.score(snap, horizon_deg, corridor_samples=samples)
                 scored.append((snap.timestamp_label or "sunset", r.physics_score))
-                if first is None:
-                    first = r
-            if not scored or first is None:
+                results.append(r)
+            if not scored:
                 continue
             finals.append(engine.score_window(scored).final_score)
+
+            # Report the components of the BEST window point, not the first one.
+            # These two diverge now that the clear-sky pathway peaks several
+            # degrees below the horizon: reporting the -15m snapshot showed a
+            # mean cloud_quality of 25 against a mean final score of 75, which
+            # made the component table look broken when it was just measuring
+            # the wrong moment.
+            best = max(results, key=lambda r: r.physics_score)
             for c in COMPONENTS:
-                per_component[c].append(getattr(first, c))
-            if first.light_corridor is not None:
-                corridor_values.append(first.light_corridor)
+                per_component[c].append(getattr(best, c))
+            if best.light_corridor is not None:
+                corridor_values.append(best.light_corridor)
 
     # Calibrated view: rank each evening against the year we just scored, which
     # is exactly what ClimatologyService does once a location is warm. Ranking
@@ -192,9 +205,19 @@ def report(result: dict) -> list[str]:
         print(f"  {c:14s} {st.mean(vals):6.1f} {sds[c]:6.1f}   {weights.get(c, 0):.2f}  "
               f"{share:12.1f}%   {pinned:8.1f}%")
         if weights.get(c, 0.0) >= 0.10 and share < 10.0:
+            # NOTE: this share counts a component's DIRECT weighted
+            # contribution only. atmosphere and moisture also feed the
+            # clear-sky twilight pathway inside cloud_quality, so their real
+            # influence is larger than the number here. Read a failure on
+            # those two as "worth checking", not as proof of dead weight —
+            # in a place with uniformly clean air (San Francisco: atmosphere
+            # mean 92, sd 7) a low share can simply mean the signal is real
+            # and near-constant.
+            indirect = " (also feeds the clear-sky pathway — see note in code)" \
+                if c in ("atmosphere", "moisture") else ""
             failures.append(
                 f"{name}: '{c}' holds {weights[c]:.0%} of the weight but only "
-                f"{share:.1f}% of the variance — dead weight"
+                f"{share:.1f}% of the variance — dead weight{indirect}"
             )
 
     # Guardrails
@@ -206,6 +229,11 @@ def report(result: dict) -> list[str]:
         failures.append(
             f"{name}: '{top_band}' covers {top_share * 100 / n:.1f}% of days "
             f"(max {MAX_SINGLE_BAND_SHARE}%) — the bands are miscalibrated"
+        )
+    if pct(90) - p50 < MIN_P50_P90_GAP:
+        failures.append(
+            f"{name}: raw p50 and p90 are {pct(90) - p50:.1f} points apart — the top "
+            f"half of the scale is compressed, so ranking within it is noise"
         )
     if p50 - p10 < MIN_P10_P50_GAP:
         failures.append(

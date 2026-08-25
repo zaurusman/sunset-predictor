@@ -59,6 +59,9 @@ export interface PhysicsBreakdown {
   precipitation_gate: number;
   /** Fraction of the score surviving horizon obstruction (1.0 = open). */
   horizon_gate: number;
+  /** Clear-sky gradient score (0-100), already folded into cloud_quality_score.
+   *  High while cloud is low means tonight colours as a gradient, not as lit cloud. */
+  twilight_gradient_score: number;
 }
 
 /** The four sampled moments around sunset, in chronological order. */

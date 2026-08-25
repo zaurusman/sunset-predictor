@@ -49,10 +49,24 @@ class ExplanationEngine:
         # -----------------------------------------------------------------
         if window_result is not None and len(window_result.window_scores) > 1:
             best = window_result.best_label
+            # "Afterglow" means lit cloud, so the test is whether there is any
+            # canvas at all — not how strong the gradient is. With no mid or
+            # high cloud the late peak can only be the gradient, whatever its
+            # score.
+            gradient_evening = weather.cloud_high < 15.0 and weather.cloud_mid < 15.0
             if best == "+15m":
-                candidates.append((75.0, "Best viewing is likely about 15 minutes after sunset — stay for the afterglow."))
+                candidates.append((75.0, (
+                    "Best viewing is likely about 15 minutes after sunset — the gradient "
+                    "deepens once the sun is down."
+                    if gradient_evening else
+                    "Best viewing is likely about 15 minutes after sunset — stay for the afterglow."
+                )))
             elif best == "+30m":
-                candidates.append((72.0, "Conditions may improve after sunset — the afterglow could be the highlight."))
+                candidates.append((72.0, (
+                    "The colour keeps building after sunset — the deepest tones come last."
+                    if gradient_evening else
+                    "Conditions may improve after sunset — the afterglow could be the highlight."
+                )))
             elif best == "-15m":
                 candidates.append((70.0, "The best colour may arrive just before the sun dips below the horizon."))
             # For "sunset" we skip the timing hint — it's the default expectation
@@ -149,9 +163,28 @@ class ExplanationEngine:
         elif weather.cloud_high >= 25 and weather.cloud_low < 25:
             candidates.append((cq, "Some high clouds should help scatter warm light at sunset."))
         elif weather.cloud_high < 10 and weather.cloud_mid < 10:
-            candidates.append(
-                (100 - cq, "Very few clouds in the sky — clear conditions produce less colour drama.")
-            )
+            # A cloudless sky is not automatically a poor one. When the air is
+            # clean it colours as a gradient instead of as lit cloud, so say
+            # which kind of evening this is rather than treating "no clouds" as
+            # a failure. Telling someone "less colour drama" about a sky that
+            # is about to turn orange-to-indigo is simply wrong.
+            twilight = breakdown.twilight_gradient_score
+            if twilight >= 55.0:
+                candidates.append((
+                    cq,
+                    "No clouds, but clean air — expect colour as a gradient, "
+                    "deep orange at the horizon fading up through pink into blue.",
+                ))
+            elif twilight >= 35.0:
+                candidates.append((
+                    cq,
+                    "A clear sky: the colour will be a soft gradient near the horizon "
+                    "rather than lit-up clouds.",
+                ))
+            else:
+                candidates.append(
+                    (100 - cq, "Very few clouds, and the air is too hazy for a clean gradient.")
+                )
 
         if weather.cloud_low >= 50:
             candidates.append(
