@@ -1,21 +1,26 @@
 name: Sunset notification dispatch
 
-# Runs the evening dispatch on the backend.
+# Runs the evening dispatch — but only during hours that actually need one.
 #
-# WHY AN EXTERNAL CRON: Render's free tier sleeps an idle service, so an
-# in-process scheduler would simply not fire — the very evenings nobody has
-# opened the app are the evenings the alert matters most. A GitHub Actions
-# cron both wakes the service and triggers the run, at no cost.
+# The gate matters more than the cron. Render's free tier spins down after 15
+# minutes idle, so every call to the backend costs ~15 instance-minutes
+# whether or not there was anything to send. This job therefore reads
+# .github/dispatch-schedule.json (committed by the planner workflow) and exits
+# WITHOUT touching the backend outside the scheduled hours. GitHub Actions
+# minutes are free on a public repo; Render instance-hours are not.
 #
-# WHY EVERY 20 MINUTES, ALL DAY: subscribers are anywhere on Earth, so sunset
-# happens at every hour of the UTC day. The backend scores each subscriber at
-# most once per local day, so extra ticks cost a store scan and nothing more.
-# Narrow this window if every subscriber turns out to share a timezone.
+# Hourly is safe because a subscriber's window is at least MIN_LEAD_MINUTES
+# (60) wide, so no window can open and close between two checks.
 
 on:
   schedule:
-    - cron: "*/20 * * * *"
-  workflow_dispatch: # lets you fire a run by hand to test
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Call the backend even outside the scheduled hours"
+        type: boolean
+        default: false
 
 concurrency:
   # Two overlapping runs would each wake the service and duplicate the scan.
@@ -27,12 +32,55 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Is this hour scheduled?
+        id: gate
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          FILE=.github/dispatch-schedule.json
+
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "Forced by workflow_dispatch."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ ! -f "$FILE" ]; then
+            # The planner has not run yet. Proceed rather than stay silent
+            # forever — a missing schedule must not mean missing alerts.
+            echo "::warning::No schedule file yet; running anyway."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The hour and the filename go in through the environment, never
+          # interpolated into the source: "09" pasted into a Python literal is
+          # a SyntaxError, and the gate would then silently skip 09:00 UTC
+          # forever with no failure to notice.
+          HOUR=$(date -u +%H)
+          if HOUR="$HOUR" FILE="$FILE" python3 -c "
+          import json, os, sys
+          hours = json.load(open(os.environ['FILE'])).get('cron_hours', [])
+          sys.exit(0 if int(os.environ['HOUR']) in hours else 1)
+          "; then
+            echo "Hour ${HOUR}:00 UTC is scheduled."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Hour ${HOUR}:00 UTC has no open alert window — leaving the backend asleep."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Call the dispatch endpoint
+        if: steps.gate.outputs.run == 'true'
         env:
           API_URL: ${{ secrets.BACKEND_URL }}
           DISPATCH_SECRET: ${{ secrets.NOTIFY_DISPATCH_SECRET }}
         run: |
-          if [ -z "$API_URL" ] || [ -z "$DISPATCH_SECRET" ]; then
+          set -euo pipefail
+          if [ -z "${API_URL:-}" ] || [ -z "${DISPATCH_SECRET:-}" ]; then
             echo "::error::BACKEND_URL and NOTIFY_DISPATCH_SECRET must be set as repository secrets."
             exit 1
           fi

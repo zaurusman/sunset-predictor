@@ -9,15 +9,39 @@ from fastapi import status as http_status
 from app.core.logging import get_logger
 from app.schemas.notification import (
     DispatchResult,
+    DispatchSchedule,
     NotificationConfig,
     SubscribeRequest,
     SubscriptionResponse,
     UnsubscribeRequest,
 )
+from app.services.dispatch_schedule import compute_schedule
 from app.utils.time_utils import utcnow
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/notifications", tags=["notifications"])
+
+
+def _require_dispatch_secret(request: Request, provided: str) -> None:
+    """Shared gate for the two scheduler-facing endpoints."""
+    settings = request.app.state.settings
+
+    if not settings.NOTIFY_DISPATCH_SECRET:
+        # Unauthenticated, these would let anyone drain the Open-Meteo quota,
+        # spam every subscriber, and read the subscriber count. Stay shut.
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Dispatch is not configured. Set NOTIFY_DISPATCH_SECRET.",
+        )
+
+    # compare_digest, not ==, so a wrong guess takes the same time as a right
+    # one and cannot be narrowed down character by character.
+    if not secrets.compare_digest(provided, settings.NOTIFY_DISPATCH_SECRET):
+        logger.warning("Rejected scheduler call with a bad secret")
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid dispatch secret.",
+        )
 
 
 @router.get(
@@ -126,6 +150,27 @@ async def get_status(endpoint: str, request: Request) -> SubscriptionResponse:
     })
 
 
+@router.get(
+    "/schedule",
+    response_model=DispatchSchedule,
+    summary="When dispatch needs to run (called by the planner)",
+)
+async def get_schedule(
+    request: Request,
+    x_dispatch_secret: str = Header(default=""),
+) -> DispatchSchedule:
+    """Compute the hours in which some subscriber's alert window is open.
+
+    Behind the same secret as dispatch: it reveals how many subscribers exist
+    and roughly where they are, which is nobody else's business.
+    """
+    _require_dispatch_secret(request, x_dispatch_secret)
+
+    store = request.app.state.subscription_store
+    astro = request.app.state.astro_service
+    return DispatchSchedule(**compute_schedule(store.all(), astro))
+
+
 @router.post(
     "/dispatch",
     response_model=DispatchResult,
@@ -140,24 +185,7 @@ async def dispatch(
     Safe to call as often as the scheduler likes: each subscriber is scored at
     most once per local day, so extra calls cost a store scan and nothing else.
     """
-    settings = request.app.state.settings
-
-    if not settings.NOTIFY_DISPATCH_SECRET:
-        # Without a secret this endpoint would let anyone drain the Open-Meteo
-        # quota and spam every subscriber, so it stays shut rather than open.
-        raise HTTPException(
-            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Dispatch is not configured. Set NOTIFY_DISPATCH_SECRET.",
-        )
-
-    # compare_digest, not ==, so a wrong guess takes the same time as a right
-    # one and cannot be narrowed down character by character.
-    if not secrets.compare_digest(x_dispatch_secret, settings.NOTIFY_DISPATCH_SECRET):
-        logger.warning("Rejected dispatch call with a bad secret")
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid dispatch secret.",
-        )
+    _require_dispatch_secret(request, x_dispatch_secret)
 
     dispatcher = request.app.state.notification_dispatcher
     return await dispatcher.run()

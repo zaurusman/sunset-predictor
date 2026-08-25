@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.schemas.notification import SubscribeRequest
+from app.services.dispatch_schedule import compute_schedule
 from app.services.notification_dispatcher import MAX_FAILURES, NotificationDispatcher
 from app.services.push_service import PushGoneError
 from app.services.subscription_store import SubscriptionStore, endpoint_key
@@ -79,14 +80,17 @@ def store(tmp_path) -> SubscriptionStore:
     return SubscriptionStore(path=str(tmp_path / "subscriptions.json"))
 
 
-@pytest.fixture
-def api_client(tmp_path, monkeypatch):
+def _client(tmp_path, monkeypatch, *, configured: bool):
     """A client that has actually run the lifespan, so app.state is populated.
 
     The shared `client` fixture constructs TestClient without entering it,
     which never triggers startup — these endpoints read services off
-    app.state, so they need the real thing. The subscription path is
-    redirected into tmp_path so a test run cannot touch a real store.
+    app.state, so they need the real thing.
+
+    Push config is set EXPLICITLY rather than inherited from the environment.
+    A developer with real keys in backend/.env would otherwise flip the
+    disabled-path tests from passing to failing, which is a property of their
+    machine and not of the code.
     """
     from fastapi.testclient import TestClient
 
@@ -96,8 +100,25 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr(
         app_settings, "SUBSCRIPTIONS_PATH", str(tmp_path / "subscriptions.json")
     )
+    monkeypatch.setattr(app_settings, "VAPID_PUBLIC_KEY", "test-public" if configured else "")
+    monkeypatch.setattr(app_settings, "VAPID_PRIVATE_KEY", "test-private" if configured else "")
+    monkeypatch.setattr(app_settings, "VAPID_SUBJECT", "mailto:test@example.com" if configured else "")
+    monkeypatch.setattr(app_settings, "NOTIFY_DISPATCH_SECRET", "test-secret" if configured else "")
+
     with TestClient(fastapi_app) as c:
         yield c
+
+
+@pytest.fixture
+def api_client(tmp_path, monkeypatch):
+    """Server with push deliberately NOT configured."""
+    yield from _client(tmp_path, monkeypatch, configured=False)
+
+
+@pytest.fixture
+def api_client_on(tmp_path, monkeypatch):
+    """Server with push configured."""
+    yield from _client(tmp_path, monkeypatch, configured=True)
 
 
 def make_record(**overrides) -> dict:
@@ -336,11 +357,36 @@ async def test_one_broken_subscription_does_not_stop_the_run(store):
 
 def test_config_reports_disabled_without_keys(api_client):
     body = api_client.get("/notifications/config").json()
-    # The test settings carry no VAPID keys, so the feature must announce
-    # itself as off rather than half-working.
+    # With no VAPID keys the feature must announce itself as off rather than
+    # half-working — that is what makes the frontend hide the toggle.
     assert body["enabled"] is False
     assert body["vapid_public_key"] == ""
     assert body["default_threshold"] == 70.0
+
+
+def test_config_hands_out_the_key_when_configured(api_client_on):
+    body = api_client_on.get("/notifications/config").json()
+    assert body["enabled"] is True
+    assert body["vapid_public_key"] == "test-public"
+
+
+def test_schedule_is_served_with_the_right_secret(api_client_on):
+    resp = api_client_on.get(
+        "/notifications/schedule", headers={"X-Dispatch-Secret": "test-secret"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Nobody is subscribed, so the scheduler should never wake the service.
+    assert body["subscriber_count"] == 0
+    assert body["cron_hours"] == []
+    assert body["cron_expression"] is None
+
+
+def test_schedule_rejects_a_bad_secret(api_client_on):
+    resp = api_client_on.get(
+        "/notifications/schedule", headers={"X-Dispatch-Secret": "wrong"}
+    )
+    assert resp.status_code == 401
 
 
 def test_subscribe_refused_when_push_is_not_configured(api_client):
@@ -374,6 +420,98 @@ def test_subscribe_rejects_an_out_of_range_threshold(api_client):
         },
     )
     assert resp.status_code == 422
+
+
+def test_schedule_requires_the_secret(api_client):
+    # It leaks the subscriber count and roughly where they are.
+    assert api_client.get("/notifications/schedule").status_code == 503
+
+
+def test_lead_below_the_hourly_floor_is_rejected():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        # 30 minutes could open and close between two hourly checks.
+        SubscribeRequest(
+            endpoint="https://push.example.com/x",
+            keys={"p256dh": "a", "auth": "b"},
+            latitude=LAT,
+            longitude=LON,
+            lead_minutes=30,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch schedule — what keeps the free tier free
+# ---------------------------------------------------------------------------
+
+
+def test_no_subscribers_means_never_waking_the_service():
+    schedule = compute_schedule([], FakeAstro(datetime(2026, 8, 25, 16, 30, tzinfo=UTC)))
+    assert schedule["cron_hours"] == []
+    assert schedule["cron_expression"] is None
+    assert schedule["next_window_opens"] is None
+
+
+def test_schedule_covers_every_hour_the_window_touches():
+    # Window 14:30 → 16:30 spans the 14:00, 15:00 and 16:00 checks. Marking
+    # only the opening hour would miss the checks that actually fire.
+    sunset = datetime(2026, 8, 25, 16, 30, tzinfo=UTC)
+    schedule = compute_schedule(
+        [make_record(lead_minutes=120)],
+        FakeAstro(sunset),
+        now=datetime(2026, 8, 25, 6, 0, tzinfo=UTC),
+    )
+    assert {14, 15, 16}.issubset(set(schedule["cron_hours"]))
+
+
+def test_schedule_is_far_smaller_than_polling_all_day():
+    sunset = datetime(2026, 8, 25, 16, 30, tzinfo=UTC)
+    schedule = compute_schedule(
+        [make_record(lead_minutes=120)],
+        FakeAstro(sunset),
+        now=datetime(2026, 8, 25, 6, 0, tzinfo=UTC),
+    )
+    # The whole point: a handful of wake-ups instead of 24 (or 72 at the old
+    # 20-minute cadence). Each avoided wake is ~15 Render instance-minutes.
+    assert len(schedule["cron_hours"]) <= 4
+
+
+def test_schedule_respects_the_hourly_floor():
+    # A record asking for a 15-minute lead predates the floor; the schedule
+    # must still reserve a full hour or the hourly check could miss it.
+    sunset = datetime(2026, 8, 25, 16, 30, tzinfo=UTC)
+    schedule = compute_schedule(
+        [make_record(lead_minutes=15)],
+        FakeAstro(sunset),
+        now=datetime(2026, 8, 25, 6, 0, tzinfo=UTC),
+    )
+    assert 15 in schedule["cron_hours"], "must cover the hour a 60-min window opens"
+
+
+def test_schedule_skips_a_malformed_record_without_failing():
+    broken = make_record()
+    del broken["latitude"]
+    sunset = datetime(2026, 8, 25, 16, 30, tzinfo=UTC)
+    schedule = compute_schedule(
+        [broken, make_record(endpoint="https://push.example.com/ok")],
+        FakeAstro(sunset),
+        now=datetime(2026, 8, 25, 6, 0, tzinfo=UTC),
+    )
+    assert schedule["subscriber_count"] == 2
+    assert schedule["cron_hours"], "the healthy subscriber still gets covered"
+
+
+def test_cron_expression_is_a_usable_crontab_line():
+    sunset = datetime(2026, 8, 25, 16, 30, tzinfo=UTC)
+    schedule = compute_schedule(
+        [make_record()], FakeAstro(sunset), now=datetime(2026, 8, 25, 6, 0, tzinfo=UTC)
+    )
+    expr = schedule["cron_expression"]
+    assert expr is not None
+    minute, hours, dom, month, dow = expr.split()
+    assert minute == "0" and dom == "*" and month == "*" and dow == "*"
+    assert all(0 <= int(h) <= 23 for h in hours.split(","))
 
 
 def test_subscribe_request_defaults_match_the_ui_bar():

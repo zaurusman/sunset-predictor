@@ -113,6 +113,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.prediction_service = prediction_service
     app.state.ml_model = ml_model
+    app.state.astro_service = astro_service
     app.state.push_service = push_service
     app.state.subscription_store = subscription_store
     app.state.notification_dispatcher = notification_dispatcher

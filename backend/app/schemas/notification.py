@@ -41,7 +41,10 @@ class SubscribeRequest(BaseModel):
     )
     lead_minutes: int = Field(
         default=120,
-        ge=15,
+        # The floor is what makes an hourly scheduler safe: a window narrower
+        # than 60 minutes could open and close between two checks and the
+        # alert would silently never fire. See dispatch_schedule.py.
+        ge=60,
         le=480,
         description="How long before sunset to send the alert.",
     )
@@ -73,6 +76,27 @@ class NotificationConfig(BaseModel):
     )
     default_threshold: float
     default_lead_minutes: int
+
+
+class DispatchSchedule(BaseModel):
+    """When dispatch actually needs to run, so a scheduler can skip the rest.
+
+    Consumed by the planner workflow, which commits it to the repo; the
+    dispatch workflow then reads it locally and only calls the backend during
+    an hour that appears here.
+    """
+
+    subscriber_count: int
+    cron_hours: list[int] = Field(
+        description="UTC hours (0–23) in which at least one alert window is open"
+    )
+    next_window_opens: Optional[datetime] = Field(
+        default=None, description="Next moment any subscriber's window opens"
+    )
+    computed_at: datetime
+    cron_expression: Optional[str] = Field(
+        default=None, description="The hours as a crontab line; null when nobody is subscribed"
+    )
 
 
 class DispatchResult(BaseModel):

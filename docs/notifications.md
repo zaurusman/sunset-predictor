@@ -6,23 +6,35 @@ their threshold.
 
 ## How it fits together
 
+Two workflows. The planner works out *when* alerts are needed; the dispatcher
+only wakes the backend during those hours.
+
 ```
-GitHub Actions cron  ──POST /notifications/dispatch──>  FastAPI backend
-   (every 20 min)         (X-Dispatch-Secret)                │
-                                                             │ for each subscriber
-                                                             │ inside their window,
-                                                             │ not yet checked today
-                                                             ▼
-                                                        score tonight
-                                                             │
-                                              score >= threshold?
-                                                             │ yes
-                                                             ▼
-                              browser push service (FCM / Mozilla / …)
-                                                             │
-                                                             ▼
-                                              frontend/public/sw.js
-                                                  showNotification()
+      ┌─ sunset-schedule.yml (daily, 03:00 UTC) ─────────────────────┐
+      │  GET /notifications/schedule  ──>  backend computes, from    │
+      │                                    each subscriber's sunset, │
+      │                                    which UTC hours matter    │
+      │  commits .github/dispatch-schedule.json                      │
+      └──────────────────────────────────────────────────────────────┘
+                                   │
+                                   │ read locally — no network
+                                   ▼
+      ┌─ sunset-notifications.yml (hourly) ──────────────────────────┐
+      │  is this hour in cron_hours?                                 │
+      │      no  ──> exit. The backend is never contacted.           │
+      │      yes ──> POST /notifications/dispatch                    │
+      └──────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+                      for each subscriber inside their window,
+                      not yet checked today: score tonight
+                                   │
+                        score >= threshold?  ── yes ──>
+                                   │
+                    browser push service (FCM / Mozilla / …)
+                                   │
+                                   ▼
+                    frontend/public/sw.js → showNotification()
 ```
 
 ### Why an external cron
@@ -30,13 +42,52 @@ GitHub Actions cron  ──POST /notifications/dispatch──>  FastAPI backend
 Render's free tier puts an idle service to sleep, so an in-process scheduler
 would not fire — and the evenings nobody has opened the app are exactly the
 evenings the alert matters. The GitHub Actions cron both wakes the service and
-triggers the run, at no cost.
+triggers the run. Actions minutes are free on a public repository.
 
-### Why every 20 minutes, all day
+### Why the schedule file exists
 
-Subscribers can be anywhere, so sunset happens at every hour of the UTC day.
-The backend stamps `last_checked_date` per subscriber, so each is scored **at
-most once per local day** — extra ticks cost a store scan and nothing more.
+This is the part that keeps the free tier free.
+
+A [Render free service spins down after 15 minutes of inactivity][render-free],
+and **spun-down services do not consume instance hours**. So every wake-up
+costs roughly 15 instance-minutes whether or not there was anything to send.
+
+Polling every 20 minutes is therefore far more expensive than it looks — the
+service is woken again just as it goes to sleep:
+
+| Approach | Wakes/day | Render hours/month | Share of the free 750 |
+| --- | --- | --- | --- |
+| Poll every 20 min | 72 | ~540 | **72%** |
+| Scheduled (3 continents) | 9 | ~68 | 9% |
+| Scheduled (one timezone) | 3 | ~23 | 3% |
+
+Spending 72% of the monthly allowance on polling — before a single real
+visitor arrives — is what the schedule file avoids. The dispatch job reads it
+from the checkout, so deciding *not* to run costs nothing at all.
+
+### Why hourly, and why leads must be ≥ 60 minutes
+
+A subscriber's window is `[sunset - lead, sunset]`, so it is `lead_minutes`
+wide. An hourly check cannot fall through a window at least 60 minutes wide —
+which is why `lead_minutes` has a floor of 60 (`MIN_LEAD_MINUTES` in
+`dispatch_schedule.py`). Lower it and alerts start silently not firing.
+
+The backend also stamps `last_checked_date` per subscriber, so each is scored
+**at most once per local day** regardless of how often dispatch is called.
+
+[render-free]: https://render.com/docs/free
+
+### Keeping the scheduled workflows alive
+
+GitHub [disables scheduled workflows in a public repository after 60 days with
+no repository activity][gh-disable]. The planner's commit counts as activity,
+but it only commits when the hour band actually moves — which for a
+single-timezone user base is a handful of times a year, as sunset drifts.
+
+For an actively developed project, ordinary commits cover this. If Afterglow
+goes quiet for two months, re-enable the workflows from the Actions tab.
+
+[gh-disable]: https://docs.github.com/actions/managing-workflow-runs/disabling-and-enabling-a-workflow
 
 ## Setup
 
@@ -118,7 +169,11 @@ retrying.
 | `POST` | `/notifications/subscribe` | Upsert by endpoint — one browser, one subscription. |
 | `POST` | `/notifications/unsubscribe` | 204 whether or not it existed. |
 | `GET` | `/notifications/status?endpoint=…` | 404 when the server has forgotten this browser. |
+| `GET` | `/notifications/schedule` | Requires `X-Dispatch-Secret`. The UTC hours that need a dispatch. |
 | `POST` | `/notifications/dispatch` | Requires `X-Dispatch-Secret`. Returns per-run counts. |
+
+`/schedule` sits behind the secret because it reveals how many subscribers
+exist and roughly where they are.
 
 ## Testing
 
