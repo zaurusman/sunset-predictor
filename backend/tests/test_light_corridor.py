@@ -237,3 +237,41 @@ def test_score_stays_in_range_under_full_blocking():
     result = engine.score(snap, 2.0, corridor_samples=corridor(low=100.0, mid=100.0))
     assert 0.0 <= result.physics_score <= 100.0
     assert 0.0 <= result.cloud_quality <= 100.0
+
+
+# ---------------------------------------------------------------------------
+# The horizon strip is not the local cell
+# ---------------------------------------------------------------------------
+
+
+def test_horizon_strip_reads_the_west_not_overhead():
+    """Measured case, Tel Aviv 2026-08-23 (user photo): the local cell reported
+    48 % low cloud while the sky 60 km west — which is what you are actually
+    looking at — was at 3 %. The photo shows a clean horizon over open sea."""
+    from app.services.scoring_engine import ScoringEngine
+
+    engine = ScoringEngine()
+    samples = [(60.0, 3.0, 0.0), (120.0, 38.0, 0.0), (180.0, 42.0, 0.0),
+               (240.0, 49.0, 0.0), (320.0, 48.0, 0.0), (400.0, 45.0, 0.0)]
+    strip = engine.horizon_strip_blocking(samples, local_low=48.0, local_mid=0.0)
+    assert strip < 48.0, "the near field is clearer than overhead; the strip must reflect that"
+    assert strip < 30.0, f"a clear near field should read as an open strip, got {strip:.1f}"
+
+
+def test_horizon_strip_falls_back_to_local_without_samples():
+    from app.services.scoring_engine import ScoringEngine
+
+    engine = ScoringEngine()
+    assert engine.horizon_strip_blocking(None, 48.0, 20.0) == 48.0 + 20.0 * 0.6
+    assert engine.horizon_strip_blocking([], 30.0, 0.0) == 30.0
+
+
+def test_horizon_strip_still_penalises_cloud_in_the_west():
+    """The point is direction, not leniency: a deck to the WEST must block the
+    band even when the sky overhead is clear."""
+    from app.services.scoring_engine import ScoringEngine
+
+    engine = ScoringEngine()
+    samples = [(60.0, 90.0, 0.0), (120.0, 85.0, 0.0), (180.0, 80.0, 0.0)]
+    strip = engine.horizon_strip_blocking(samples, local_low=0.0, local_mid=0.0)
+    assert strip > 55.0, f"cloud to the west must still hide the band, got {strip:.1f}"

@@ -235,6 +235,27 @@ TWILIGHT_MAX = 78.0
 TWILIGHT_CLARITY_SHARE = 0.55
 TWILIGHT_SHARPNESS = 1.9
 
+# The horizon strip you actually look at is NOT your own grid cell.
+#
+# Standing on a beach watching the sunset, the bright band is sky roughly
+# 30-150 km away — cloud directly overhead does almost nothing to it, and a
+# deck 60 km west hides it completely. Scoring "is the horizon open?" from the
+# observer's cell reads the sky above and behind the viewer instead.
+#
+# Caught on a real evening (Tel Aviv, 2026-08-23, photo): the local cell
+# reported 48 % low cloud while the sample 60 km west reported 3 %, and the
+# photo shows a clean horizon over open sea. The corridor sampling already
+# fetches those upstream readings, so this costs nothing.
+#
+# Weighted toward the nearest samples and blended with a minority share of the
+# local cell, because the gradient does extend up the sky, where overhead cloud
+# dims it. Distinct from the corridor, which measures the FAR field (~340 km)
+# and asks a different question: not "can you see the band" but "is the band
+# lit at all".
+NEAR_FIELD_MAX_KM = 200.0
+NEAR_FIELD_SIGMA_KM = 90.0
+NEAR_FIELD_LOCAL_SHARE = 0.25
+
 # Local blocking cloud below this leaves the horizon band fully visible; above
 # TWILIGHT_BLOCKED_AT the gradient is hidden. Gentler than the cloud pathway's
 # low-cloud penalty because what this needs is a clear STRIP at the horizon,
@@ -449,6 +470,7 @@ class ScoringEngine:
             clarity=atm,
             dryness=mst,
             corridor=corridor,
+            corridor_samples=corridor_samples,
             precip_mm=weather.precipitation_mm,
             precip_last_3h=weather.precipitation_last_3h_mm,
             pressure_trend=weather.pressure_trend_hpa_3h,
@@ -582,12 +604,45 @@ class ScoringEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def horizon_strip_blocking(
+        samples: Optional[list[tuple[float, float, float]]],
+        local_low: float,
+        local_mid: float,
+    ) -> float:
+        """How much cloud stands between the viewer and the sunset horizon.
+
+        See the NEAR_FIELD_* constants for why this is not simply the local
+        cell. Falls back to the local cell when no upstream samples exist, so
+        callers without corridor data behave exactly as before.
+        """
+        local_blocking = local_low + local_mid * 0.6
+        near = [(d, lo, mid) for d, lo, mid in (samples or []) if d <= NEAR_FIELD_MAX_KM]
+        if not near:
+            return local_blocking
+
+        total_w = 0.0
+        total_b = 0.0
+        for distance_km, low_pct, mid_pct in near:
+            w = math.exp(-0.5 * (distance_km / NEAR_FIELD_SIGMA_KM) ** 2)
+            total_w += w
+            total_b += w * (low_pct + mid_pct * 0.6)
+        if total_w == 0.0:
+            return local_blocking
+        strip = total_b / total_w
+
+        return (
+            NEAR_FIELD_LOCAL_SHARE * local_blocking
+            + (1.0 - NEAR_FIELD_LOCAL_SHARE) * strip
+        )
+
+    @staticmethod
     def twilight_gradient_score(
         sun_elevation_deg: float,
         low_pct: float,
         mid_pct: float,
         clarity: float = 70.0,
         dryness: float = 70.0,
+        strip_blocking: Optional[float] = None,
     ) -> float:
         """Score the clear-sky twilight gradient, 0-100.
 
@@ -601,11 +656,11 @@ class ScoringEngine:
         once it is far enough down the shadow has climbed past the zenith and
         the colour has drained.
 
-        *An open horizon strip.* Blocking cloud hides the band. This is gentler
-        than the cloud pathway's low-cloud penalty because cloud reported for
-        the grid cell is as likely to be behind the observer as in front, and
-        it is the corridor sampling upstream that measures the direction that
-        matters — the caller multiplies this by that factor afterwards.
+        *An open horizon strip.* Blocking cloud hides the band — but the strip
+        in question is sky 30-150 km toward the sunset, not the observer's own
+        cell, which is mostly sky above and behind them. *strip_blocking* comes
+        from horizon_strip_blocking(); when it is absent this falls back to the
+        local cell and behaves as it used to.
 
         *Air quality, sharply.* There is no cloud here to catch the light, so
         everything visible is scattering by the air itself: haze turns the same
@@ -620,7 +675,10 @@ class ScoringEngine:
             -0.5 * ((sun_elevation_deg - TWILIGHT_PEAK_ELEV_DEG) / TWILIGHT_SIGMA_DEG) ** 2
         )
 
-        blocking = low_pct + mid_pct * 0.6
+        blocking = (
+            strip_blocking if strip_blocking is not None
+            else low_pct + mid_pct * 0.6
+        )
         if blocking <= TWILIGHT_OPEN_BELOW:
             openness = 1.0
         else:
@@ -958,6 +1016,7 @@ class ScoringEngine:
         clarity: float = 70.0,
         dryness: float = 70.0,
         corridor: Optional[float] = None,
+        corridor_samples: Optional[list[tuple[float, float, float]]] = None,
         precip_mm: float = 0.0,
         precip_last_3h: Optional[float] = None,
         pressure_trend: Optional[float] = None,
@@ -968,12 +1027,16 @@ class ScoringEngine:
         See the PATHWAYS section at the top of this module for why this is a
         set rather than a formula.
         """
+        strip_blocking = (
+            self.horizon_strip_blocking(corridor_samples, low_pct, mid_pct)
+            if corridor_samples else None
+        )
         return {
             "lit_cloud": self.lit_cloud_score(
                 low_pct, mid_pct, high_pct, total_pct, sun_elevation_deg
             ),
             "twilight_gradient": self.twilight_gradient_score(
-                sun_elevation_deg, low_pct, mid_pct, clarity, dryness
+                sun_elevation_deg, low_pct, mid_pct, clarity, dryness, strip_blocking
             ),
             "crepuscular": self.crepuscular_score(
                 low_pct, mid_pct, high_pct, sun_elevation_deg, clarity
