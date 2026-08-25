@@ -9,12 +9,15 @@ interface LocationSearchProps {
   onLocationSelect: (location: LocationState) => void;
   currentLocation?: LocationState | null;
   disabled?: boolean;
+  /** Set false where the surrounding screen already offers "use my location". */
+  showGeolocate?: boolean;
 }
 
 export default function LocationSearch({
   onLocationSelect,
   currentLocation,
   disabled = false,
+  showGeolocate = true,
 }: LocationSearchProps) {
   const [query, setQuery] = useState(currentLocation?.name ?? "");
   const [results, setResults] = useState<GeocodingResult[]>([]);
@@ -111,31 +114,35 @@ export default function LocationSearch({
             onFocus={() => results.length > 0 && setShowDropdown(true)}
             placeholder="Search location…"
             disabled={disabled}
-            className="w-full bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-xl pl-9 pr-9 py-3 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-slate-500 focus:outline-none focus:border-orange-500/60 focus:ring-1 focus:ring-orange-500/20 transition-colors disabled:opacity-50"
+            className="w-full bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-xl pl-9 pr-11 py-3 text-base sm:text-sm text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-slate-500 focus:outline-none focus:border-orange-500/60 focus:ring-1 focus:ring-orange-500/20 transition-colors disabled:opacity-50"
           />
           {query && (
             <button
               onClick={clearInput}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-slate-500 hover:text-gray-600 dark:hover:text-slate-300"
+              aria-label="Clear search"
+              className="absolute right-0 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center text-gray-500 dark:text-slate-500 hover:text-gray-800 dark:hover:text-slate-300"
             >
-              <X size={14} />
+              <X size={15} />
             </button>
           )}
         </div>
 
-        {/* Geolocation button */}
-        <button
-          onClick={handleGeolocate}
-          disabled={geoLoading || disabled}
-          title="Use my location"
-          className="flex items-center justify-center w-12 h-12 rounded-xl bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 text-gray-400 dark:text-slate-400 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50"
-        >
-          {geoLoading ? (
-            <div className="w-4 h-4 border-2 border-gray-300 dark:border-slate-500 border-t-orange-400 rounded-full animate-spin" />
-          ) : (
-            <Navigation size={16} />
-          )}
-        </button>
+        {/* Geolocation button — hidden where the screen already offers one */}
+        {showGeolocate && (
+          <button
+            onClick={handleGeolocate}
+            disabled={geoLoading || disabled}
+            title="Use my location"
+            aria-label="Use my location"
+            className="flex items-center justify-center w-12 h-12 flex-shrink-0 rounded-xl bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:text-orange-600 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50"
+          >
+            {geoLoading ? (
+              <div className="w-4 h-4 border-2 border-gray-300 dark:border-slate-500 border-t-orange-500 rounded-full animate-spin" />
+            ) : (
+              <Navigation size={16} />
+            )}
+          </button>
+        )}
       </div>
 
       {/* Error message */}

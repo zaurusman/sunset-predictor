@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useTheme } from "next-themes";
 import type { DayForecast } from "@/lib/types";
 import { formatDateShort, formatTime, getScoreHexColor } from "@/lib/utils";
+import { useIsDark } from "@/lib/useIsDark";
 
 interface ForecastChartProps {
   days: DayForecast[];
@@ -60,8 +60,7 @@ export default function ForecastChart({
   onDayClick,
   selectedDate,
 }: ForecastChartProps) {
-  const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme === "dark";
+  const isDark = useIsDark();
   const [hoveredDate, setHoveredDate] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(DEFAULT_W);
@@ -80,8 +79,11 @@ export default function ForecastChart({
   const plotW = Math.max(1, width - PAD_LEFT - PAD_RIGHT);
 
   const gridColor = isDark ? "#1e293b" : "#e2e8f0";
+  // Both axes carry 9-10px text, so both need 4.5:1. The previous pair leaned
+  // one step too light on each side — #94a3b8 is 2.65:1 on white, and #64748b
+  // is 4.0:1 on slate-950. This pair clears the bar in both themes.
   const xAxisColor = isDark ? "#94a3b8" : "#64748b";
-  const yAxisColor = isDark ? "#64748b" : "#94a3b8";
+  const yAxisColor = xAxisColor;
   const hoverColor = isDark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.04)";
 
   const slotW = plotW / days.length;
@@ -180,7 +182,7 @@ export default function ForecastChart({
 
                 <path
                   d={barPath(barX, barY, barW, barH)}
-                  fill={getScoreHexColor(score)}
+                  fill={getScoreHexColor(score, isDark)}
                   opacity={dimmed ? 0.45 : 1}
                 />
 

@@ -1,284 +1,242 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import Image from "next/image";
-import Link from "next/link";
-import { CalendarDays, Camera, History, Info, Sunset } from "lucide-react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Camera } from "lucide-react";
 import { predict } from "@/lib/api";
 import type { LocationState, PredictResponse } from "@/lib/types";
+import {
+  loadCachedPrediction,
+  loadLocation,
+  loadPlaces,
+  rememberPlace,
+  saveCachedPrediction,
+  saveLocation,
+} from "@/lib/storage";
+import { freshnessLabel } from "@/lib/utils";
 
-
-import ScoreDial from "@/components/ScoreDial";
-import LocationSearch from "@/components/LocationSearch";
+import AppNav from "@/components/AppNav";
 import DatePicker from "@/components/DatePicker";
-import ReasonsList from "@/components/ReasonsList";
-import ComponentBreakdown from "@/components/ComponentBreakdown";
-import ViewingWindow from "@/components/ViewingWindow";
-import ModelInfoPanel from "@/components/ModelInfoPanel";
-import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
+import EvidenceDrawer from "@/components/EvidenceDrawer";
+import FirstRun from "@/components/FirstRun";
+import LoadingState from "@/components/LoadingState";
+import LocationSheet from "@/components/LocationSheet";
 import SubmitPhotoModal from "@/components/SubmitPhotoModal";
-import ThemeToggle from "@/components/ThemeToggle";
+import VerdictCard from "@/components/VerdictCard";
+import ViewingCurve from "@/components/ViewingCurve";
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
-export default function HomePage() {
-  const [location, setLocation] = useState<LocationState | null>(null);
-  const [selectedDate, setSelectedDate] = useState<string>(todayIso());
-  const [prediction, setPrediction] = useState<PredictResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [showDebug, setShowDebug] = useState(false);
-  const [showSubmitModal, setShowSubmitModal] = useState(false);
+function HomeContent() {
+  const params = useSearchParams();
 
-  const fetchPrediction = useCallback(async (loc: LocationState, date: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await predict({
-        latitude: loc.latitude,
-        longitude: loc.longitude,
-        target_date: date,
-      });
-      setPrediction(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch prediction.");
-    } finally {
-      setLoading(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [location, setLocation] = useState<LocationState | null>(null);
+  const [places, setPlaces] = useState<LocationState[]>([]);
+  const [selectedDate, setSelectedDate] = useState(todayIso());
+  const [prediction, setPrediction] = useState<PredictResponse | null>(null);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [photoOpen, setPhotoOpen] = useState(false);
+
+  /** Guards against a slow response for a place the user has already left. */
+  const requestRef = useRef(0);
+
+  const fetchPrediction = useCallback(
+    async (loc: LocationState, date: string) => {
+      const ticket = ++requestRef.current;
+      setRefreshing(true);
+      setError(null);
+
+      try {
+        const result = await predict({
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+          target_date: date,
+        });
+        if (ticket !== requestRef.current) return;
+
+        setPrediction(result);
+        setCachedAt(new Date().toISOString());
+        saveCachedPrediction(loc, date, result);
+      } catch (err) {
+        if (ticket !== requestRef.current) return;
+        setError(err instanceof Error ? err.message : "Couldn't reach the forecast.");
+      } finally {
+        if (ticket === requestRef.current) setRefreshing(false);
+      }
+    },
+    []
+  );
+
+  /** Show whatever we already know about this place and date, then refresh. */
+  const showThen = useCallback(
+    (loc: LocationState, date: string) => {
+      const cached = loadCachedPrediction(loc, date);
+      setPrediction(cached?.prediction ?? null);
+      setCachedAt(cached?.cachedAt ?? null);
+      void fetchPrediction(loc, date);
+    },
+    [fetchPrediction]
+  );
+
+  // Boot: prefer a place passed in the URL (from the other tabs), else the one
+  // we remembered. Nothing was persisted before, so every visit used to start
+  // from an empty screen and a fresh permission prompt.
+  useEffect(() => {
+    const lat = Number(params.get("lat"));
+    const lon = Number(params.get("lon"));
+    const name = params.get("name");
+
+    const fromUrl =
+      Number.isFinite(lat) && Number.isFinite(lon) && (lat !== 0 || lon !== 0)
+        ? {
+            latitude: lat,
+            longitude: lon,
+            name: name || `${lat.toFixed(3)}, ${lon.toFixed(3)}`,
+          }
+        : null;
+
+    const initial = fromUrl ?? loadLocation();
+
+    setPlaces(loadPlaces());
+    setHydrated(true);
+
+    if (initial) {
+      setLocation(initial);
+      if (fromUrl) saveLocation(fromUrl);
+      showThen(initial, todayIso());
     }
+    // Boot once; later changes flow through the handlers below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleLocationSelect = useCallback(
     (loc: LocationState) => {
       setLocation(loc);
-      fetchPrediction(loc, selectedDate);
+      saveLocation(loc);
+      setPlaces(rememberPlace(loc));
+      showThen(loc, selectedDate);
     },
-    [fetchPrediction, selectedDate]
+    [selectedDate, showThen]
   );
 
   const handleDateChange = useCallback(
     (date: string) => {
       setSelectedDate(date);
-      if (location) fetchPrediction(location, date);
+      if (location) showThen(location, date);
     },
-    [fetchPrediction, location]
+    [location, showThen]
   );
 
-  // Try browser geolocation on first load
-  useEffect(() => {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const loc: LocationState = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          name: `${pos.coords.latitude.toFixed(3)}, ${pos.coords.longitude.toFixed(3)}`,
-        };
-        setLocation(loc);
-        fetchPrediction(loc, todayIso());
-      },
-      () => {} // silently ignore — user can search manually
+  // Nothing is known until localStorage has been read; rendering the first-run
+  // screen before then would flash it at returning visitors on every load.
+  if (!hydrated) {
+    return <div className="min-h-screen" aria-hidden="true" />;
+  }
+
+  if (!location) {
+    return (
+      <>
+        <AppNav location={null} active="tonight" />
+        <FirstRun onLocationSelect={handleLocationSelect} />
+      </>
     );
-  }, [fetchPrediction]);
+  }
+
+  const showSkeleton = !prediction && refreshing;
 
   return (
-    <main className="min-h-screen bg-gray-50 dark:bg-slate-950 text-gray-900 dark:text-white px-4 py-8 max-w-2xl mx-auto">
-      {/* Header */}
-      <header className="mb-8 relative">
-        <div className="absolute right-0 top-0">
-          <ThemeToggle />
-        </div>
-        <div className="text-center">
-          <Image src="/logo.png" alt="Afterglow" width={360} height={60} className="mx-auto mb-1" priority />
-          <p className="text-gray-400 dark:text-slate-500 text-sm">
-            {selectedDate === todayIso()
-              ? "How beautiful will today\u2019s sunset be?"
-              : "How beautiful was that sunset?"}
-          </p>
-        </div>
-      </header>
+    <>
+      <AppNav
+        location={location}
+        active="tonight"
+        onChangeLocation={() => setSheetOpen(true)}
+      />
 
-      {/* Location search + date picker */}
-      <div className="flex flex-col items-center gap-3 mb-8">
-        <LocationSearch
-          onLocationSelect={handleLocationSelect}
-          currentLocation={location}
-          disabled={loading}
-        />
-        <DatePicker
-          value={selectedDate}
-          onChange={handleDateChange}
-          disabled={loading}
-        />
+      <div className="flex items-center gap-2 mb-4">
+        <div className="flex-1 min-w-0">
+          {cachedAt && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-slate-400">
+              {refreshing && (
+                <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+              )}
+              {refreshing ? "Updating…" : `Updated ${freshnessLabel(cachedAt)}`}
+            </span>
+          )}
+        </div>
+        <DatePicker value={selectedDate} onChange={handleDateChange} />
       </div>
 
-      {/* Future date disclaimer */}
-      {selectedDate > todayIso() && (
-        <div className="mb-6 flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-600 dark:text-indigo-300 text-sm">
-          <Info size={15} className="flex-shrink-0 mt-0.5" />
-          <span>
-            Weather forecasts are updated daily and cloud cover can shift significantly.
-            For the most accurate prediction, check again on the day itself.
-          </span>
-        </div>
-      )}
-
-      {/* Error */}
       {error && (
-        <div className="mb-6">
+        <div className="mb-5">
           <ErrorAlert
-            message={error}
-            onRetry={location ? () => fetchPrediction(location, selectedDate) : undefined}
+            message={
+              prediction
+                ? `Showing the last reading — ${error}`
+                : error
+            }
+            onRetry={() => fetchPrediction(location, selectedDate)}
           />
         </div>
       )}
 
-      {/* Loading */}
-      {loading && (
-        <LoadingState
-          message={
-            selectedDate === todayIso()
-              ? "Predicting tonight\u2019s sunset\u2026"
-              : `Looking up the sunset for ${new Date(selectedDate + "T12:00:00").toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" })}\u2026`
-          }
-        />
-      )}
+      {showSkeleton && <LoadingState message="Reading the sky…" />}
 
-      {/* Prediction result */}
-      {!loading && prediction && (
-        <div className="space-y-6 animate-fade-in">
-          {/* Location name + date */}
-          {location && (
-            <div className="text-center text-gray-500 dark:text-slate-400 text-sm">
-              {location.name}
-            </div>
-          )}
+      {prediction && (
+        <div className="flex flex-col gap-4 animate-fade-in">
+          <VerdictCard prediction={prediction} targetDate={selectedDate} />
 
-          {/* Score dial — centred hero element */}
-          <div className="flex justify-center">
-            <ScoreDial
-              score={prediction.beauty_score_0_100}
-              category={prediction.category}
-              confidence={prediction.confidence_0_100}
-              size={220}
-            />
-          </div>
-
-
-          {/* Viewing window */}
-          <ViewingWindow
+          <ViewingCurve
+            windowScores={prediction.window_scores}
+            bestPoint={prediction.best_window_point}
             sunsetTime={prediction.sunset_time}
-            windowStart={prediction.best_viewing_window_start}
-            windowEnd={prediction.best_viewing_window_end}
           />
 
-          {/* Reasons */}
-          <section>
-            <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-3">Why</h2>
-            <ReasonsList reasons={prediction.reasons} />
-          </section>
+          <EvidenceDrawer prediction={prediction} />
 
-          {/* Component breakdown */}
-          <section className="bg-gray-100/60 dark:bg-slate-900/60 rounded-2xl border border-gray-200/40 dark:border-slate-700/40 p-5">
-            <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-4">Score Breakdown</h2>
-            <ComponentBreakdown breakdown={prediction.physics_component_breakdown} />
-            {prediction.ml_adjustment !== null && (
-              <p className="text-gray-400 dark:text-slate-500 text-xs mt-3">
-                ML adjustment: {prediction.ml_adjustment > 0 ? "+" : ""}{prediction.ml_adjustment} pts
-              </p>
-            )}
-          </section>
-
-          {/* Weather summary */}
-          <section className="bg-gray-100/60 dark:bg-slate-900/60 rounded-2xl border border-gray-200/40 dark:border-slate-700/40 p-5">
-            <h2 className="text-gray-400 dark:text-slate-400 text-xs uppercase tracking-wider mb-4">Weather at Sunset</h2>
-            <div className="grid grid-cols-3 gap-3 text-sm">
-              <Stat label="Cloud (total)" value={`${Math.round(prediction.weather_summary.cloud_total_pct)}%`} />
-              <Stat label="Cloud (high)" value={`${Math.round(prediction.weather_summary.cloud_high_pct)}%`} />
-              <Stat label="Cloud (low)" value={`${Math.round(prediction.weather_summary.cloud_low_pct)}%`} />
-              <Stat label="Visibility" value={`${prediction.weather_summary.visibility_km} km`} />
-              <Stat label="Humidity" value={`${Math.round(prediction.weather_summary.humidity_pct)}%`} />
-              <Stat label="Rain" value={`${prediction.weather_summary.precipitation_mm} mm`} />
-              {prediction.weather_summary.aerosol_optical_depth !== null && (
-                <Stat
-                  label={`AOD${prediction.weather_summary.aerosol_is_estimated ? " (est.)" : ""}`}
-                  value={prediction.weather_summary.aerosol_optical_depth.toFixed(3)}
-                />
-              )}
-              <Stat label="Temp." value={`${prediction.weather_summary.temperature_c}°C`} />
-              <Stat label="Wind" value={`${prediction.weather_summary.wind_speed_kmh} km/h`} />
-            </div>
-          </section>
-
-          {/* Forecast link + share button */}
-          {location && (
-            <div className="flex flex-col gap-2">
-              <Link
-                href={`/forecast?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
-                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
-              >
-                <CalendarDays size={16} />
-                View 7-day forecast
-              </Link>
-              <Link
-                href={`/heatmap?lat=${location.latitude}&lon=${location.longitude}&name=${encodeURIComponent(location.name)}`}
-                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
-              >
-                <History size={16} />
-                Sunset history
-              </Link>
-              <button
-                onClick={() => setShowSubmitModal(true)}
-                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200/40 dark:border-slate-700/40 text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/30 transition-colors text-sm font-medium"
-              >
-                <Camera size={16} />
-                Share your sunset photo
-              </button>
-            </div>
-          )}
-
-          {/* Debug / info section */}
           <button
-            onClick={() => setShowDebug((v) => !v)}
-            className="flex items-center gap-1.5 text-gray-300 dark:text-slate-600 hover:text-gray-500 dark:hover:text-slate-400 text-xs transition-colors mx-auto"
+            onClick={() => setPhotoOpen(true)}
+            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/40 text-gray-700 dark:text-slate-300 hover:text-orange-700 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors text-sm font-medium"
           >
-            <Info size={12} />
-            {showDebug ? "Hide" : "Show"} model info
+            <Camera size={16} />
+            Share your sunset photo
           </button>
-          {showDebug && <ModelInfoPanel />}
         </div>
       )}
 
-      {/* Empty state — no location yet */}
-      {!loading && !prediction && !error && (
-        <div className="text-center py-20 text-gray-300 dark:text-slate-600">
-          <Sunset size={52} className="mx-auto mb-4 text-gray-300 dark:text-slate-700" />
-          <p className="text-lg font-medium text-gray-400 dark:text-slate-500">Search for a location to get started</p>
-          <p className="text-sm mt-2">or allow location access for your current area</p>
-        </div>
-      )}
+      <LocationSheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        current={location}
+        places={places}
+        onSelect={handleLocationSelect}
+      />
 
-      {/* Photo submission modal */}
-      {showSubmitModal && location && (
+      {photoOpen && (
         <SubmitPhotoModal
           latitude={location.latitude}
           longitude={location.longitude}
           locationName={location.name}
           defaultDate={selectedDate}
-          onClose={() => setShowSubmitModal(false)}
+          onClose={() => setPhotoOpen(false)}
         />
       )}
-    </main>
+    </>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+export default function HomePage() {
   return (
-    <div className="bg-gray-100/40 dark:bg-slate-800/40 rounded-lg p-2.5">
-      <div className="text-gray-400 dark:text-slate-500 text-xs mb-0.5">{label}</div>
-      <div className="text-gray-900 dark:text-white font-medium text-sm">{value}</div>
-    </div>
+    <main className="min-h-screen bg-gray-50 dark:bg-slate-950 text-gray-900 dark:text-white px-4 py-6 max-w-2xl mx-auto">
+      <Suspense fallback={<div className="min-h-screen" aria-hidden="true" />}>
+        <HomeContent />
+      </Suspense>
+    </main>
   );
 }

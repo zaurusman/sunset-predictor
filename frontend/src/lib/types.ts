@@ -45,7 +45,13 @@ export interface PhysicsBreakdown {
   horizon_score: number;
   weighted_physics_score: number;
   component_weights: Record<string, number>;
+  /** Afterglow potential; non-null only at window points after sunset. */
+  afterglow_score: number | null;
 }
+
+/** The four sampled moments around sunset, in chronological order. */
+export const WINDOW_POINTS = ["-15m", "sunset", "+15m", "+30m"] as const;
+export type WindowPoint = (typeof WINDOW_POINTS)[number];
 
 export interface PredictRequest {
   latitude: number;
@@ -63,6 +69,12 @@ export interface PredictResponse {
   sunset_time: string; // ISO datetime
   best_viewing_window_start: string;
   best_viewing_window_end: string;
+  /** Highest-scoring moment in the window: "-15m" | "sunset" | "+15m" | "+30m". */
+  best_window_point: string;
+  /** Physics score at each sampled moment, keyed by window point. */
+  window_scores: Record<string, number>;
+  /** True when conditions are worth going outside for. */
+  go_outside_recommendation: boolean;
   algorithm_version: string;
   ml_model_used: boolean;
   ml_adjustment: number | null;
@@ -89,6 +101,9 @@ export interface DayForecast {
   sunset_time: string;
   best_viewing_window_start: string;
   best_viewing_window_end: string;
+  best_window_point: string;
+  window_scores: Record<string, number>;
+  go_outside_recommendation: boolean;
   reasons: string[];
   physics_component_breakdown: PhysicsBreakdown;
   ml_model_used: boolean;
