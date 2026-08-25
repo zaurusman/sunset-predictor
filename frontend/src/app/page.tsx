@@ -24,6 +24,7 @@ import LoadingState from "@/components/LoadingState";
 import LocationSheet from "@/components/LocationSheet";
 import SubmitPhotoModal from "@/components/SubmitPhotoModal";
 import VerdictCard from "@/components/VerdictCard";
+import RateSunset from "@/components/RateSunset";
 import ViewingCurve from "@/components/ViewingCurve";
 
 function todayIso() {
@@ -191,6 +192,16 @@ function HomeContent() {
       {prediction && (
         <div className="flex flex-col gap-4 animate-fade-in">
           <VerdictCard prediction={prediction} targetDate={selectedDate} />
+
+          {/* Ratings are ground truth for the scoring engine, so they're only
+              offered once the evening has actually happened. */}
+          {selectedDate <= new Date().toISOString().slice(0, 10) && (
+            <RateSunset
+              location={location}
+              targetDate={selectedDate}
+              predictedScore={prediction.beauty_score_0_100}
+            />
+          )}
 
           <ViewingCurve
             windowScores={prediction.window_scores}

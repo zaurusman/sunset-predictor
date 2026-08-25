@@ -14,7 +14,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health, predict, forecast, heatmap, model_info, geocode, submit
+from app.api import health, predict, forecast, heatmap, model_info, geocode, submit, rate
 from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
 from app.models.ml_model import MLModel
@@ -22,6 +22,7 @@ from app.models.model_registry import ModelRegistry
 from app.services.astronomy_service import AstronomyService
 from app.services.explanation_engine import ExplanationEngine
 from app.services.prediction_service import PredictionService
+from app.services.rating_store import RatingStore
 from app.services.scoring_engine import ScoringEngine
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
@@ -60,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.CACHE_PERSIST_PATH or "disabled",
     )
     registry = ModelRegistry(settings=settings)
+    rating_store = RatingStore(path=settings.RATINGS_PATH)
 
     # Services
     astro_service = AstronomyService()
@@ -90,8 +92,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.prediction_service = prediction_service
     app.state.ml_model = ml_model
+    app.state.rating_store = rating_store
 
-    logger.info("All services initialised. ML model loaded: %s", ml_model.is_loaded())
+    logger.info(
+        "All services initialised. ML model loaded: %s. Ratings: %d stored at %s",
+        ml_model.is_loaded(), rating_store.count(), rating_store.path,
+    )
 
     yield  # ← application runs here
 
@@ -109,8 +115,8 @@ def create_app() -> FastAPI:
         title="Sunset Predictor",
         description=(
             "Predicts how beautiful a sunset will be for any location and date. "
-            "Uses a physics-informed scoring engine calibrated by an optional ML model "
-            "trained on Reddit sunset engagement data and historical weather."
+            "Scoring is physics-based. The optional ML calibration branch is disabled — "
+            "see data/dead/README.md."
         ),
         version=settings.ALGORITHM_VERSION,
         lifespan=lifespan,
@@ -133,6 +139,7 @@ def create_app() -> FastAPI:
     app.include_router(model_info.router)
     app.include_router(geocode.router)
     app.include_router(submit.router)
+    app.include_router(rate.router)
 
     return app
 

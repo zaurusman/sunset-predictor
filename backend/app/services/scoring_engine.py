@@ -30,6 +30,7 @@ from typing import Optional
 
 from app.schemas.prediction import PhysicsBreakdown
 from app.schemas.weather import WeatherSnapshot
+from app.utils.geo import horizon_tangent_distance_km
 from app.utils.math_utils import bell_curve, clamp, weighted_average
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,23 @@ SCORE_THRESHOLDS: list[tuple[float, str]] = [
 # going outside on a thoroughly ordinary sky.
 GO_OUTSIDE_THRESHOLD = 70.0
 
+# ---------------------------------------------------------------------------
+# Light-corridor constants
+# ---------------------------------------------------------------------------
+
+# Representative altitudes for the three cloud layers Open-Meteo reports.
+# WMO puts high cloud at 5–13 km, middle at 2–7 km, low below 2 km; these are
+# mid-band values used to derive each layer's illumination tangent distance.
+LAYER_HEIGHT_KM: dict[str, float] = {
+    "low": 1.0,    # → light grazes the surface ~113 km upstream
+    "mid": 4.0,    # → ~226 km
+    "high": 9.0,   # → ~339 km
+}
+
+# Floor on the corridor multiplier. A fully blocked corridor still leaves some
+# diffuse skylight, so it dims the colour score rather than zeroing it.
+CORRIDOR_FLOOR = 0.25
+
 
 @dataclass
 class ScoringResult:
@@ -77,6 +95,9 @@ class ScoringResult:
     # Non-zero only when sun < 0° and high clouds are present.
     # Stored here for transparency / explanation; already baked into cloud_quality.
     afterglow: float = 0.0
+    # Upstream illumination multiplier already applied to cloud_quality.
+    # None when no corridor data was available.
+    light_corridor: Optional[float] = None
 
     def to_physics_breakdown(self) -> PhysicsBreakdown:
         return PhysicsBreakdown(
@@ -87,6 +108,9 @@ class ScoringResult:
             weighted_physics_score=round(self.physics_score, 1),
             component_weights=self.weights,
             afterglow_score=round(self.afterglow, 1) if self.afterglow > 0 else None,
+            light_corridor_factor=(
+                round(self.light_corridor, 3) if self.light_corridor is not None else None
+            ),
         )
 
 
@@ -123,10 +147,19 @@ class ScoringEngine:
     # ------------------------------------------------------------------
 
     def score(
-        self, weather: WeatherSnapshot, horizon_obstruction_deg: float
+        self,
+        weather: WeatherSnapshot,
+        horizon_obstruction_deg: float,
+        corridor_samples: Optional[list[tuple[float, float, float]]] = None,
     ) -> ScoringResult:
         """
         Compute the full scoring breakdown for *weather* at *horizon_obstruction_deg*.
+
+        *corridor_samples* are ``(distance_km, cloud_low_pct, cloud_mid_pct)``
+        readings taken upstream along the sunset azimuth. When supplied, they
+        scale the colour score by how much light actually reaches the clouds
+        overhead (see light_corridor_factor). When omitted the score is
+        unadjusted, so callers without corridor data behave exactly as before.
 
         Returns a ScoringResult containing per-component scores, the weighted
         physics score, and a confidence estimate.
@@ -140,6 +173,18 @@ class ScoringEngine:
             weather.cloud_total,
             sun_elevation_deg=sun_elev,
         )
+
+        # Illumination gate: a beautiful canvas that no light reaches is grey.
+        corridor: Optional[float] = None
+        if corridor_samples:
+            corridor = self.light_corridor_factor(
+                corridor_samples,
+                cloud_low=weather.cloud_low,
+                cloud_mid=weather.cloud_mid,
+                cloud_high=weather.cloud_high,
+            )
+            cq = clamp(cq * corridor)
+
         atm = self.atmosphere_score(
             weather.visibility_m,
             weather.aerosol_optical_depth,
@@ -189,6 +234,7 @@ class ScoringEngine:
             confidence=confidence,
             weights=dict(self._weights),
             afterglow=ag,
+            light_corridor=corridor,
         )
 
     # ------------------------------------------------------------------
@@ -399,6 +445,110 @@ class ScoringEngine:
             base = clamp(base + horizon_glow)
 
         return clamp(base)
+
+    # ------------------------------------------------------------------
+    # Light corridor — the upstream illumination path
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def corridor_transmittance(
+        samples: list[tuple[float, float, float]], layer_height_km: float
+    ) -> float:
+        """Fraction of sunset light reaching a cloud layer at *layer_height_km*.
+
+        *samples* are ``(distance_km, cloud_low_pct, cloud_mid_pct)`` readings
+        taken along the sunset azimuth, upstream of the observer.
+
+        WHY THIS EXISTS
+        ---------------
+        Everything else in this engine looks only at the observer's own grid
+        cell, which cannot see the single most important thing about a sunset:
+        whether light can *reach* the clouds overhead. A solid deck 200 km
+        toward the sunset kills the display no matter how good your local sky
+        looks. Corfidi (NOAA SPC) describes the best sunsets as a mid/high deck
+        covering everything "except a narrow clear strip near the horizon" —
+        that strip is what this measures.
+
+        GEOMETRY
+        --------
+        Light illuminating a cloud at height h grazes the surface roughly
+        ``sqrt(2·R·h)`` away along the sun's azimuth (~113 km for 1 km cloud,
+        ~226 km for 4 km, ~339 km for 9 km). Nearer than that the ray is
+        already above the boundary layer; further out it hasn't descended into
+        it yet. So samples are weighted by a broad Gaussian centred on that
+        tangent distance — broad because forecast grids are coarse and the ray
+        traverses a range of distances, not a point.
+
+        Only low and mid cloud block: high cirrus diffuses light rather than
+        occluding it, which is why it is excluded from the blocking sum.
+
+        Returns 1.0 (fully transmitting) when there are no samples, so every
+        caller degrades gracefully to the previous behaviour.
+        """
+        if not samples:
+            return 1.0
+
+        tangent = horizon_tangent_distance_km(layer_height_km)
+        if tangent <= 0.0:
+            return 1.0
+        sigma = max(tangent * 0.45, 40.0)
+
+        total_w = 0.0
+        total_blocking = 0.0
+        for distance_km, low_pct, mid_pct in samples:
+            w = math.exp(-0.5 * ((distance_km - tangent) / sigma) ** 2)
+            # Mid cloud only partially occludes; high cloud not at all.
+            blocking = clamp(low_pct + mid_pct * 0.5) / 100.0
+            total_w += w
+            total_blocking += w * blocking
+
+        if total_w == 0.0:
+            return 1.0
+        return clamp(1.0 - total_blocking / total_w, lo=0.0, hi=1.0)
+
+    def light_corridor_factor(
+        self,
+        samples: list[tuple[float, float, float]],
+        cloud_low: float,
+        cloud_mid: float,
+        cloud_high: float,
+    ) -> float:
+        """Multiplier in [CORRIDOR_FLOOR, 1.0] applied to the colour score.
+
+        This is a *multiplier*, not another weighted component, because that is
+        the physics: colour = canvas × illumination. An unlit canvas is grey no
+        matter how well-shaped it is, so no amount of good local cloud should
+        be able to compensate for a blocked corridor.
+
+        Each layer is illuminated through its own tangent distance, so the
+        layers present overhead determine which part of the corridor matters.
+        A sky of pure cirrus cares about conditions ~340 km out; a low-cloud
+        sky cares about ~110 km out.
+
+        The floor keeps a blocked corridor from zeroing the score outright —
+        diffuse skylight still tints an overcast evening slightly.
+        """
+        if not samples:
+            return 1.0
+
+        layers = (
+            (cloud_low, LAYER_HEIGHT_KM["low"]),
+            (cloud_mid, LAYER_HEIGHT_KM["mid"]),
+            (cloud_high, LAYER_HEIGHT_KM["high"]),
+        )
+        total_cover = sum(cover for cover, _ in layers)
+
+        if total_cover < 5.0:
+            # Effectively clear overhead: the colour is horizon glow, which
+            # arrives along the longest slant path, so it is the far field that
+            # decides whether there is anything to see.
+            transmittance = self.corridor_transmittance(samples, LAYER_HEIGHT_KM["high"])
+        else:
+            transmittance = sum(
+                cover * self.corridor_transmittance(samples, h) for cover, h in layers
+            ) / total_cover
+
+        return CORRIDOR_FLOOR + (1.0 - CORRIDOR_FLOOR) * transmittance
 
     # ------------------------------------------------------------------
     # Afterglow potential (standalone, for breakdown and explanation)

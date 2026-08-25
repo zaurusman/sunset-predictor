@@ -19,8 +19,16 @@ env/
 .env.local
 .env.*.local
 
-# ML training data & model binaries (large files)
-backend/data/
+# ML training data & model binaries (large files).
+# Also covers backend/data/ratings.jsonl - human sunset ratings are the user's
+# own observations and are not committed.
+# Excluding the CONTENTS rather than the directory itself, because git cannot
+# re-include anything inside an excluded directory.
+backend/data/*
+# ...except the record of the shelved ML experiment, which is documentation,
+# not data. Without this, the "why we don't use ML" note is invisible in the
+# repo and the next person re-runs the same failed experiment.
+!backend/data/dead/
 # Uncomment the line below if you want to exclude the model from git.
 # If you want to deploy with the model, keep it commented out and commit the .joblib file.
 # For files >100MB, use git lfs: git lfs track "*.joblib"

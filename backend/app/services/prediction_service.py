@@ -96,10 +96,16 @@ class PredictionService:
             window_snaps = await self._weather.get_window_snapshots(
                 lat, lon, target_date, sunset_time
             )
+            # Upstream illumination path — one extra (cached) request. Shared by
+            # all four window points: the corridor 100-400 km away does not
+            # meaningfully change across a 45-minute window.
+            corridor = await self._weather.get_corridor_samples(
+                lat, lon, target_date, sunset_time
+            )
             scored: list[tuple[str, float]] = []
             snap_results: dict[str, tuple] = {}  # label → (ScoringResult, WeatherSnapshot)
             for snap in window_snaps:
-                r = self._scoring.score(snap, horizon_deg)
+                r = self._scoring.score(snap, horizon_deg, corridor_samples=corridor)
                 label = snap.timestamp_label or "sunset"
                 scored.append((label, r.physics_score))
                 snap_results[label] = (r, snap)
@@ -177,6 +183,41 @@ class PredictionService:
         )
 
     # ------------------------------------------------------------------
+    # Training-label capture
+    # ------------------------------------------------------------------
+
+    async def capture_rating_context(
+        self, lat: float, lon: float, target_date: date, horizon_deg: float
+    ) -> tuple[PredictResponse, list[WeatherSnapshot]]:
+        """Return the prediction for this evening plus the RAW window snapshots.
+
+        Used by POST /rate to store a human label together with the exact inputs
+        that produced the score. Storing raw snapshots — not just the score —
+        is what lets a future scoring change be replayed against old labels
+        offline, instead of needing a year of weather history refetched.
+
+        Both calls hit the same cached fetch, so this costs no extra API
+        requests beyond what predict() already did for the same evening.
+        """
+        prediction = await self.predict(
+            PredictRequest(
+                latitude=lat,
+                longitude=lon,
+                target_date=target_date,
+                horizon_obstruction_deg=horizon_deg,
+            )
+        )
+        sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
+        snapshots = await self._weather.get_window_snapshots(
+            lat, lon, target_date, sunset_time
+        )
+        return prediction, snapshots
+
+    def local_sunset_date_for(self, lat: float, lon: float) -> date:
+        """The date whose sunset is 'tonight' at this location."""
+        return local_sunset_date(lat, lon)
+
+    # ------------------------------------------------------------------
     # Multi-day forecast
     # ------------------------------------------------------------------
 
@@ -190,9 +231,17 @@ class PredictionService:
             lat, lon, days=request.days
         )
 
+        # One batched corridor request covers the whole forecast range.
+        corridor_map = await self._weather.get_corridor_samples_map(
+            lat, lon, [d for d, _ in daily_window_snaps]
+        )
+
         # Score each day concurrently using the same window algorithm as predict()
         tasks = [
-            self._score_day(lat, lon, d, window_snaps, horizon_deg)
+            self._score_day(
+                lat, lon, d, window_snaps, horizon_deg,
+                corridor_samples=corridor_map.get(d, []),
+            )
             for d, window_snaps in daily_window_snaps
         ]
         day_forecasts = await asyncio.gather(*tasks, return_exceptions=True)
@@ -230,13 +279,23 @@ class PredictionService:
 
         daily_windows = await self._weather.get_historical_range_windows(lat, lon, start_date, end_date)
 
+        # Corridor batched by month — keeps heatmap scores consistent with what
+        # predict() would return for the same day, which is the whole point of
+        # mirroring _score_day below.
+        corridor_map = await self._weather.get_corridor_samples_map(
+            lat, lon, [d for d, _ in daily_windows]
+        )
+
         result_days: list[HeatmapDay] = []
         for d, window_snaps in daily_windows:
             # Mirror _score_day exactly so heatmap scores match single-date predict scores
             scored: list[tuple[str, float]] = []
             snap_results: dict[str, tuple] = {}
+            day_corridor = corridor_map.get(d, [])
             for snap in window_snaps:
-                r = self._scoring.score(snap, horizon_obstruction_deg=2.0)
+                r = self._scoring.score(
+                    snap, horizon_obstruction_deg=2.0, corridor_samples=day_corridor
+                )
                 label = snap.timestamp_label or "sunset"
                 scored.append((label, r.physics_score))
                 snap_results[label] = (r, snap)
@@ -278,6 +337,7 @@ class PredictionService:
         target_date: date,
         window_snaps: list[WeatherSnapshot],
         horizon_deg: float,
+        corridor_samples: Optional[list[tuple[float, float, float]]] = None,
     ) -> DayForecast:
         sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
         window_start, window_end = self._astro.get_best_viewing_window(sunset_time)
@@ -286,7 +346,7 @@ class PredictionService:
         scored: list[tuple[str, float]] = []
         snap_results: dict[str, tuple] = {}
         for snap in window_snaps:
-            r = self._scoring.score(snap, horizon_deg)
+            r = self._scoring.score(snap, horizon_deg, corridor_samples=corridor_samples)
             label = snap.timestamp_label or "sunset"
             scored.append((label, r.physics_score))
             snap_results[label] = (r, snap)

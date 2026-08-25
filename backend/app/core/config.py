@@ -31,8 +31,26 @@ class Settings(BaseSettings):
     MODEL_METADATA_PATH: str = "trained_models/model_metadata.json"
 
     # Blending weight: final = alpha * physics + (1 - alpha) * ml_prediction
-    # 1.0 = pure physics, 0.0 = pure ML
-    ML_BLEND_ALPHA: float = 0.4
+    # 1.0 = pure physics, 0.0 = pure ML.
+    #
+    # Deliberately 1.0 — the ML branch is OFF. The one model ever trained scored
+    # spearman_r = -0.0266 (p = 0.55), i.e. no signal, because its labels were
+    # Reddit upvotes joined to weather at five fixed cities regardless of where
+    # the photo was taken. It was shelved for that reason. At the previous 0.4 a
+    # model would have taken 60 % of the final score, so an accidental .joblib
+    # landing in trained_models/ was one file away from silently degrading every
+    # prediction. See docs/scoring-v2-plan.md (D7) and ML_MIN_SPEARMAN below.
+    ML_BLEND_ALPHA: float = 1.0
+
+    # A model must beat this rank correlation, recorded in its own metadata,
+    # before MLModel.load() will accept it. Guards against re-loading a model
+    # that measured no better than noise.
+    ML_MIN_SPEARMAN: float = 0.15
+
+    # Where human sunset ratings (ML training labels) are appended as JSONL.
+    # NOTE: Render's free tier filesystem is EPHEMERAL — point this at a mounted
+    # persistent disk before relying on it in production.
+    RATINGS_PATH: str = "data/ratings.jsonl"
 
     # Default horizon obstruction in degrees (0 = open ocean/flat horizon)
     DEFAULT_HORIZON_OBSTRUCTION_DEG: float = 2.0

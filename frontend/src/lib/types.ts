@@ -168,3 +168,34 @@ export interface LocationState {
   longitude: number;
   name: string;
 }
+
+// ── Sunset ratings (ML training labels) ──────────────────────────────────────
+
+export interface RatingRequest {
+  latitude: number;
+  longitude: number;
+  /** 1 = nothing, 2 = dull, 3 = pleasant, 4 = very good, 5 = exceptional. */
+  rating: number;
+  target_date?: string; // "YYYY-MM-DD"; defaults to the local sunset date
+  location_name?: string;
+  notes?: string;
+}
+
+export interface RatingResponse {
+  success: boolean;
+  message: string;
+  rated_date: string;
+  predicted_score: number | null;
+  total_ratings: number;
+}
+
+export interface RatingStats {
+  total_ratings: number;
+  distinct_locations: number;
+  distinct_dates: number;
+  rating_histogram: Record<string, number>;
+  mean_rating: number | null;
+  spearman_vs_model: number | null;
+  spearman_sample_size: number;
+  note: string;
+}

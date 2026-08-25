@@ -13,6 +13,9 @@ import type {
   HealthResponse,
   PredictRequest,
   PredictResponse,
+  RatingRequest,
+  RatingResponse,
+  RatingStats,
   SubmitPhotoResponse,
 } from "./types";
 
@@ -141,4 +144,25 @@ export async function geocode(query: string): Promise<GeocodingResult[]> {
   } catch {
     return [];
   }
+}
+
+// ── Ratings ──────────────────────────────────────────────────────────────────
+
+/**
+ * Record how a sunset actually looked.
+ *
+ * These are the training labels the scoring engine is measured against — see
+ * docs/scoring-v2-plan.md. Rating the DULL evenings matters as much as the good
+ * ones: a model with no negative examples cannot learn to say "not tonight".
+ */
+export async function rateSunset(body: RatingRequest): Promise<RatingResponse> {
+  return request<RatingResponse>(`${API_BASE}/rate`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Aggregate stats over collected ratings, including rank correlation vs. the model. */
+export async function getRatingStats(): Promise<RatingStats> {
+  return request<RatingStats>(`${API_BASE}/ratings/stats`);
 }

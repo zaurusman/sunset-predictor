@@ -13,6 +13,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.schemas.weather import WeatherOverride, WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
+from app.utils.geo import destination_point
 from app.utils.cache import TTLCache
 
 logger = get_logger(__name__)
@@ -52,6 +53,16 @@ FORECAST_HOURLY_VARS = ",".join([
 ])
 
 AIR_QUALITY_HOURLY_VARS = "aerosol_optical_depth,dust"
+
+# Light-corridor sampling: only the blocking layers are needed upstream, so the
+# request stays small even across six coordinates.
+CORRIDOR_HOURLY_VARS = "cloud_cover_low,cloud_cover_mid"
+
+# Distances (km) along the sunset azimuth at which the corridor is sampled.
+# Chosen to bracket the illumination tangent distances of the three cloud
+# layers — ~113 km (low), ~226 km (mid), ~339 km (high) — with points either
+# side of each so the Gaussian weighting in the scoring engine has support.
+CORRIDOR_DISTANCES_KM: list[float] = [60.0, 120.0, 180.0, 240.0, 320.0, 400.0]
 
 ARCHIVE_HOURLY_VARS = ",".join([
     "cloud_cover",
@@ -313,6 +324,252 @@ class WeatherService:
         self._cache.set(cache_key, results)
         return results
 
+    # ------------------------------------------------------------------
+    # Light corridor — upstream sampling along the sunset azimuth
+    # ------------------------------------------------------------------
+
+    async def get_corridor_samples(
+        self,
+        lat: float,
+        lon: float,
+        target_date: date,
+        sunset_time: datetime,
+    ) -> list[tuple[float, float, float]]:
+        """Cloud cover upstream of the observer, toward the setting sun.
+
+        Returns ``(distance_km, cloud_low_pct, cloud_mid_pct)`` for each sample
+        point along the sunset azimuth. Empty list on any failure — the scoring
+        engine treats that as "no corridor information" and leaves the score
+        unadjusted, so a corridor outage degrades to the previous behaviour
+        rather than breaking predictions.
+
+        COST
+        ----
+        This is ONE HTTP request regardless of sample count: Open-Meteo accepts
+        comma-separated coordinate lists (up to 1000 points). Results are cached
+        on the same rounded-coordinate grid as every other fetch, so nearby
+        users share it. Given the rate-limit sensitivity of this app, that
+        one-request property is the reason the design is viable at all.
+
+        The remote atmosphere is sampled at the OBSERVER's sunset instant, not
+        at the remote location's own sunset — light arrives effectively
+        instantly, so what matters is the state of the corridor at the moment
+        the observer is looking.
+        """
+        cache_key = TTLCache.make_key(
+            "corridor", *self._ckey_coords(lat, lon), str(target_date)
+        )
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            azimuth = self._astro.get_sunset_azimuth(lat, lon, target_date)
+            points = [
+                (d, *destination_point(lat, lon, azimuth, d))
+                for d in CORRIDOR_DISTANCES_KM
+            ]
+
+            today = datetime.now(UTC).date()
+            days_ago = (today - target_date).days
+            lats = ",".join(f"{p[1]:.4f}" for p in points)
+            lons = ",".join(f"{p[2]:.4f}" for p in points)
+
+            if target_date < today and days_ago > 7:
+                raw = await self._fetch_archive_raw_multi(lats, lons, target_date)
+            else:
+                past_days = days_ago + 1 if target_date < today else 0
+                days_ahead = max((target_date - today).days + 2, 2)
+                raw = await self._fetch_forecast_raw_multi(
+                    lats, lons, days=days_ahead, past_days=past_days
+                )
+
+            samples: list[tuple[float, float, float]] = []
+            # A multi-coordinate response is a LIST of per-location objects, in
+            # request order; a single-coordinate response is a bare object.
+            entries = raw if isinstance(raw, list) else [raw]
+            for (distance_km, _plat, _plon), entry in zip(points, entries):
+                cloud = self._extract_corridor_cloud(entry, sunset_time)
+                if cloud is not None:
+                    samples.append((distance_km, cloud[0], cloud[1]))
+
+            if not samples:
+                logger.debug("Corridor fetch returned no usable samples for %s", target_date)
+                return []
+
+            self._cache.set(cache_key, samples)
+            return samples
+
+        except Exception as exc:
+            # Never let the corridor break a prediction — it is an enhancement
+            # to the score, not a prerequisite for producing one.
+            logger.warning(
+                "Light-corridor sampling failed for lat=%.3f lon=%.3f date=%s: %s "
+                "— scoring without it.",
+                lat, lon, target_date, exc,
+            )
+            return []
+
+    async def get_corridor_samples_map(
+        self, lat: float, lon: float, dates: list[date]
+    ) -> dict[date, list[tuple[float, float, float]]]:
+        """Corridor samples for many dates, batched by calendar month.
+
+        The sunset azimuth swings through ~60° over a year outside the tropics,
+        so the corridor for January points somewhere quite different from July's
+        and a single set of coordinates cannot serve a whole range. Grouping by
+        month keeps the azimuth error under a couple of degrees — far below the
+        angular width the Gaussian distance weighting already tolerates — while
+        collapsing the request count from one-per-day to one-per-month.
+
+        A 7-day forecast is therefore one request; a 12-month heatmap is twelve,
+        each cached for a day. Any month that fails is simply absent from the
+        result, and those days score without corridor adjustment.
+        """
+        if not dates:
+            return {}
+
+        by_month: dict[tuple[int, int], list[date]] = {}
+        for d in dates:
+            by_month.setdefault((d.year, d.month), []).append(d)
+
+        out: dict[date, list[tuple[float, float, float]]] = {}
+        for (year, month), group in sorted(by_month.items()):
+            group.sort()
+            cache_key = TTLCache.make_key(
+                "corridor_month", *self._ckey_coords(lat, lon), year, month,
+                str(group[0]), str(group[-1]),
+            )
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                out.update(cached)
+                continue
+
+            try:
+                month_map = await self._fetch_corridor_month(lat, lon, group)
+            except Exception as exc:
+                logger.warning(
+                    "Corridor batch failed for %04d-%02d at lat=%.3f lon=%.3f: %s "
+                    "— those days score without it.",
+                    year, month, lat, lon, exc,
+                )
+                continue
+
+            # Archive months are immutable; give them a long TTL.
+            is_past = group[-1] < datetime.now(UTC).date() - timedelta(days=8)
+            self._cache.set(cache_key, month_map, ttl_override=86400 if is_past else None)
+            out.update(month_map)
+
+        return out
+
+    async def _fetch_corridor_month(
+        self, lat: float, lon: float, group: list[date]
+    ) -> dict[date, list[tuple[float, float, float]]]:
+        """One corridor request covering every date in *group* (same month)."""
+        # Azimuth taken at the middle of the group so the error is symmetric
+        # across it, rather than accumulating toward one end.
+        mid = group[len(group) // 2]
+        azimuth = self._astro.get_sunset_azimuth(lat, lon, mid)
+        points = [
+            (d_km, *destination_point(lat, lon, azimuth, d_km))
+            for d_km in CORRIDOR_DISTANCES_KM
+        ]
+        lats = ",".join(f"{p[1]:.4f}" for p in points)
+        lons = ",".join(f"{p[2]:.4f}" for p in points)
+
+        today = datetime.now(UTC).date()
+        start, end = group[0], group[-1]
+
+        if end < today - timedelta(days=7):
+            raw = await self._fetch_archive_range_raw_multi(lats, lons, start, end)
+        else:
+            past_days = max((today - start).days + 1, 0)
+            days_ahead = max((end - today).days + 2, 2)
+            raw = await self._fetch_forecast_raw_multi(
+                lats, lons, days=days_ahead, past_days=min(past_days, 92)
+            )
+
+        entries = raw if isinstance(raw, list) else [raw]
+        for entry in entries:
+            _prepopulate_parsed_times(entry)
+
+        result: dict[date, list[tuple[float, float, float]]] = {}
+        for d in group:
+            sunset_time = self._astro.get_sunset_time(lat, lon, d)
+            samples: list[tuple[float, float, float]] = []
+            for (distance_km, _plat, _plon), entry in zip(points, entries):
+                cloud = self._extract_corridor_cloud(entry, sunset_time)
+                if cloud is not None:
+                    samples.append((distance_km, cloud[0], cloud[1]))
+            if samples:
+                result[d] = samples
+        return result
+
+    async def _fetch_archive_range_raw_multi(
+        self, lats: str, lons: str, start_date: date, end_date: date
+    ) -> Any:
+        url = f"{self._settings.OPEN_METEO_ARCHIVE_URL}/archive"
+        params = {
+            "latitude": lats,
+            "longitude": lons,
+            "hourly": CORRIDOR_HOURLY_VARS,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "timezone": "UTC",
+        }
+        return await self._get_json(url, params)
+
+    @staticmethod
+    def _extract_corridor_cloud(
+        entry: dict[str, Any], sunset_time: datetime
+    ) -> Optional[tuple[float, float]]:
+        """Pull (cloud_low, cloud_mid) at the sunset hour from one corridor point."""
+        hourly = entry.get("hourly", {})
+        time_strs: list[str] = hourly.get("time", [])
+        if not time_strs:
+            return None
+        times = hourly.get("_times_parsed") or [
+            datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs
+        ]
+        idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+
+        def get(key: str) -> float:
+            vals = hourly.get(key, [])
+            if idx < len(vals) and vals[idx] is not None:
+                return float(vals[idx])
+            return 0.0
+
+        return get("cloud_cover_low"), get("cloud_cover_mid")
+
+    async def _fetch_forecast_raw_multi(
+        self, lats: str, lons: str, days: int, past_days: int = 0
+    ) -> Any:
+        url = f"{self._settings.OPEN_METEO_BASE_URL}/forecast"
+        params: dict = {
+            "latitude": lats,
+            "longitude": lons,
+            "hourly": CORRIDOR_HOURLY_VARS,
+            "forecast_days": days,
+            "timezone": "UTC",
+        }
+        if past_days > 0:
+            params["past_days"] = past_days
+        return await self._get_json(url, params)
+
+    async def _fetch_archive_raw_multi(
+        self, lats: str, lons: str, target_date: date
+    ) -> Any:
+        url = f"{self._settings.OPEN_METEO_ARCHIVE_URL}/archive"
+        params = {
+            "latitude": lats,
+            "longitude": lons,
+            "hourly": CORRIDOR_HOURLY_VARS,
+            "start_date": str(target_date),
+            "end_date": str(target_date),
+            "timezone": "UTC",
+        }
+        return await self._get_json(url, params)
+
     async def get_historical_snapshot(
         self, lat: float, lon: float, target_date: date
     ) -> WeatherSnapshot:
@@ -493,7 +750,7 @@ class WeatherService:
             logger.debug("Air quality API unavailable: %s — using proxy", exc)
             return None
 
-    async def _get_json(self, url: str, params: dict) -> dict[str, Any]:
+    async def _get_json(self, url: str, params: dict) -> Any:
         """Execute a GET request and return parsed JSON.
 
         Retries on transient failures — Open-Meteo rate-limits (HTTP 429),

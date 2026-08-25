@@ -57,6 +57,17 @@ class PhysicsBreakdown(BaseModel):
     weighted_physics_score: float = Field(ge=0, le=100)
     component_weights: dict[str, float]
 
+    # Light corridor: fraction of sunset light reaching the clouds overhead,
+    # measured along the sunset azimuth 100-400 km upstream. 1.0 = clear path.
+    # None when corridor data was unavailable (the score is then unadjusted).
+    light_corridor_factor: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description=(
+            "Illumination multiplier applied to cloud_quality_score. Below ~0.7 "
+            "means upstream cloud is shading the display regardless of the local sky."
+        ),
+    )
+
     # Afterglow potential (0–100). Non-zero only when sun is below the horizon
     # and conditions support afterglow (high clouds present, not overcast).
     # This is an explanatory field — the effect is already baked into

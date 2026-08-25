@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Optional, Sequence
 
 
 def clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -65,6 +65,49 @@ def weighted_average(
     if total_weight == 0:
         return 0.0
     return total_value / total_weight
+
+
+def _average_ranks(values: Sequence[float]) -> list[float]:
+    """Rank *values* ascending, assigning tied values their average rank."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        # Advance over the run of equal values
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def spearman(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
+    """Spearman rank correlation of *xs* and *ys*, or None if undefined.
+
+    Implemented directly (rather than via scipy) to keep a heavyweight import
+    out of the request path — this runs behind an API endpoint.
+
+    Returns None when there are fewer than 3 pairs, or when either series is
+    constant (no variance to correlate).
+    """
+    if len(xs) != len(ys):
+        raise ValueError("spearman requires equal-length sequences")
+    n = len(xs)
+    if n < 3:
+        return None
+
+    rx, ry = _average_ranks(xs), _average_ranks(ys)
+    mx, my = sum(rx) / n, sum(ry) / n
+
+    cov = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    vx = math.sqrt(sum((a - mx) ** 2 for a in rx))
+    vy = math.sqrt(sum((b - my) ** 2 for b in ry))
+    if vx == 0.0 or vy == 0.0:
+        return None
+    return cov / (vx * vy)
 
 
 def normalize_to_100(values: Sequence[float]) -> list[float]:
