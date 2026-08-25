@@ -79,6 +79,37 @@ class Settings(BaseSettings):
     RESEND_FROM_EMAIL: str = "Afterglow <onboarding@resend.dev>"  # verified sender
     DEVELOPER_EMAIL: str = ""      # where submissions are sent
 
+    # ── Web Push notifications ────────────────────────────────────────────────
+    # VAPID keypair identifying this server to browser push services. Generate
+    # with `python scripts/generate_vapid_keys.py`. Leave VAPID_PRIVATE_KEY
+    # empty to disable notifications entirely — /notifications/config then
+    # reports disabled and the frontend hides the toggle.
+    #
+    # The PRIVATE key is a credential: keep it in the environment, never in the
+    # repo. The public key is served to browsers by design.
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    # Contact for the push service to reach if this server misbehaves. Must be
+    # a mailto: or https: URL — push services reject a bare address.
+    VAPID_SUBJECT: str = ""
+
+    # Shared secret required by POST /notifications/dispatch. Empty disables the
+    # endpoint: unauthenticated, it would let anyone exhaust the Open-Meteo
+    # quota and push to every subscriber.
+    NOTIFY_DISPATCH_SECRET: str = ""
+
+    # Where push subscriptions are stored as JSON.
+    # NOTE: Render's free tier filesystem is EPHEMERAL — every redeploy and
+    # idle-sleep restart wipes this file and silently unsubscribes everyone.
+    # Point it at a mounted persistent disk before relying on it.
+    SUBSCRIPTIONS_PATH: str = "data/subscriptions.json"
+
+    # Defaults offered to a new subscriber. The threshold matches the UI's
+    # "worth heading out" bar (GO_OUTSIDE_THRESHOLD) so the alert and the app
+    # never disagree about what is worth leaving the house for.
+    NOTIFY_DEFAULT_THRESHOLD: float = 70.0
+    NOTIFY_DEFAULT_LEAD_MINUTES: int = 120
+
 
 # Module-level singleton — import this everywhere
 settings = Settings()

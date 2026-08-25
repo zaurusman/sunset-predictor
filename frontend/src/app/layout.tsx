@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import ThemeProvider from "@/components/ThemeProvider";
 
@@ -6,6 +6,25 @@ export const metadata: Metadata = {
   title: "Afterglow",
   description: "How beautiful will tonight's sunset be? Get a score, reasons, and the best time to watch.",
   keywords: ["sunset", "weather", "forecast", "beauty score"],
+  // The manifest is what makes Afterglow installable — and on iOS, installing
+  // to the Home Screen is the ONLY way Safari allows push notifications at all.
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    title: "Afterglow",
+    statusBarStyle: "default",
+  },
+  icons: {
+    icon: "/favicon.png",
+    apple: "/icon-192.png",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#f97316",
+  // Most people check this on a phone; let the layout use the full screen and
+  // sit correctly against the home indicator.
+  viewportFit: "cover",
 };
 
 export default function RootLayout({

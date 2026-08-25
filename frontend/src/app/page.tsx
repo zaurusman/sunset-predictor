@@ -22,6 +22,7 @@ import EvidenceDrawer from "@/components/EvidenceDrawer";
 import FirstRun from "@/components/FirstRun";
 import LoadingState from "@/components/LoadingState";
 import LocationSheet from "@/components/LocationSheet";
+import NotifyCard from "@/components/NotifyCard";
 import SubmitPhotoModal from "@/components/SubmitPhotoModal";
 import VerdictCard from "@/components/VerdictCard";
 import ViewingCurve from "@/components/ViewingCurve";
@@ -199,6 +200,11 @@ function HomeContent() {
           />
 
           <EvidenceDrawer prediction={prediction} />
+
+          {/* Only offered once there is a reading on screen — asking to
+              interrupt someone's evenings before showing them anything is
+              the pattern that trains people to hit "block". */}
+          <NotifyCard location={location} />
 
           <button
             onClick={() => setPhotoOpen(true)}

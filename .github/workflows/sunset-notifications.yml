@@ -1,0 +1,61 @@
+name: Sunset notification dispatch
+
+# Runs the evening dispatch on the backend.
+#
+# WHY AN EXTERNAL CRON: Render's free tier sleeps an idle service, so an
+# in-process scheduler would simply not fire — the very evenings nobody has
+# opened the app are the evenings the alert matters most. A GitHub Actions
+# cron both wakes the service and triggers the run, at no cost.
+#
+# WHY EVERY 20 MINUTES, ALL DAY: subscribers are anywhere on Earth, so sunset
+# happens at every hour of the UTC day. The backend scores each subscriber at
+# most once per local day, so extra ticks cost a store scan and nothing more.
+# Narrow this window if every subscriber turns out to share a timezone.
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch: # lets you fire a run by hand to test
+
+concurrency:
+  # Two overlapping runs would each wake the service and duplicate the scan.
+  group: sunset-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Call the dispatch endpoint
+        env:
+          API_URL: ${{ secrets.BACKEND_URL }}
+          DISPATCH_SECRET: ${{ secrets.NOTIFY_DISPATCH_SECRET }}
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$DISPATCH_SECRET" ]; then
+            echo "::error::BACKEND_URL and NOTIFY_DISPATCH_SECRET must be set as repository secrets."
+            exit 1
+          fi
+
+          # A sleeping Render service can take ~60s to wake, so allow a long
+          # first connection and retry rather than failing the whole evening.
+          response=$(curl --silent --show-error \
+            --location \
+            --request POST "$API_URL/notifications/dispatch" \
+            --header "X-Dispatch-Secret: $DISPATCH_SECRET" \
+            --max-time 180 \
+            --retry 3 \
+            --retry-delay 20 \
+            --retry-all-errors \
+            --write-out "\n%{http_code}")
+
+          body=$(echo "$response" | sed '$d')
+          code=$(echo "$response" | tail -n1)
+
+          echo "HTTP $code"
+          echo "$body"
+
+          if [ "$code" != "200" ]; then
+            echo "::error::Dispatch failed with HTTP $code"
+            exit 1
+          fi
