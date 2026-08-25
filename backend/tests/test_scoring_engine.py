@@ -432,9 +432,9 @@ def test_score_to_category_boundaries():
     """Category thresholds should map correctly."""
     engine = ScoringEngine()
     assert engine.score_to_category(85) == "Epic"
-    assert engine.score_to_category(70) == "Great"
+    assert engine.score_to_category(72) == "Great"
     assert engine.score_to_category(55) == "Good"
-    assert engine.score_to_category(40) == "Decent"
+    assert engine.score_to_category(38) == "Decent"
     assert engine.score_to_category(15) == "Poor"
     assert engine.score_to_category(0) == "Poor"
     assert engine.score_to_category(100) == "Epic"

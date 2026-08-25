@@ -128,7 +128,8 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
 )
 async def rating_stats(request: Request) -> RatingStats:
     store = request.app.state.rating_store
-    records = list(store.iter_records())
+    # Deduplicated: a changed mind is one observation, not two.
+    records = store.latest_per_evening()
 
     if not records:
         return RatingStats(

@@ -94,6 +94,29 @@ class RatingStore:
     def _count_unlocked(self) -> int:
         return sum(1 for _ in self.iter_records())
 
+    def latest_per_evening(self) -> list[dict[str, Any]]:
+        """One record per (date, location) — the last rating given.
+
+        The store is append-only, so a user who taps "dull", reconsiders and
+        taps "pleasant" leaves TWO records behind. find() already resolves that
+        with last-write-wins, but anything reading the file in bulk — the stats
+        endpoint, the accuracy check in scripts/evaluate.py — was counting both
+        and treating a changed mind as two independent observations.
+
+        With a handful of labels that is not a rounding error: it inflates the
+        count that gates the correlation, and it double-weights exactly the
+        evenings someone was uncertain about.
+        """
+        latest: dict[tuple[str, float, float], dict[str, Any]] = {}
+        for rec in self.iter_records():
+            key = (
+                str(rec.get("target_date")),
+                round(float(rec.get("latitude", 0.0)), 2),
+                round(float(rec.get("longitude", 0.0)), 2),
+            )
+            latest[key] = rec  # later lines win
+        return list(latest.values())
+
     def find(
         self, latitude: float, longitude: float, target_date: str, tolerance_deg: float = 0.05
     ) -> Optional[dict[str, Any]]:

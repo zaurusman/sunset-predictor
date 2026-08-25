@@ -7,7 +7,7 @@ to produce a complete PredictResponse or ForecastResponse.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from app.core.config import Settings
@@ -196,26 +196,41 @@ class PredictionService:
     def _calibrate(
         self, raw_score: float, lat: float, lon: float
     ) -> tuple[float, Optional[float], bool]:
-        """Map a raw physics score onto the displayed 0-100.
+        """Return ``(displayed, percentile, is_local)``.
 
-        Returns ``(displayed, percentile, is_local)``. Falls through to the raw
-        score untouched when no climatology service is wired, so tests and any
-        caller constructing PredictionService directly keep working.
+        THE DISPLAYED SCORE IS ABSOLUTE — it is the raw physics score, and it
+        answers "how good will the sky look tonight?".
 
-        A cold location is warmed in the background and ranked against the
-        global reference curve meanwhile — this never blocks a prediction.
+        It used to be the percentile itself, which answered a different
+        question ("how does tonight rank here?") and had a property that only
+        became obvious when the physics improved: percentile calibration is
+        SELF-NORMALISING. Fixing the horizon-strip bug lifted one Tel Aviv
+        evening's raw score from 48.9 to 57.4, and its displayed score moved
+        from 30.9 to 30.6 — because the same fix lifted every other clear
+        evening in the same climatology, so the rank did not move. A score that
+        cannot improve when the model improves is measuring the wrong thing.
+
+        The percentile is still computed and still returned: it is shown as
+        context ("better than 31 % of evenings here"), which is where the
+        cross-location comparison genuinely belongs. See
+        ClimatologyService.percentile_of — that rank is seasonal.
+
+        A cold location is warmed in the background; this never blocks.
         """
         if self._climatology is None:
             return raw_score, None, False
 
-        percentile, is_local = self._climatology.percentile_of(lat, lon, raw_score)
+        percentile, is_local = self._climatology.percentile_of(
+            lat, lon, raw_score, on_date=self._today_for(lat, lon)
+        )
         if not is_local:
             self._climatology.warm_in_background(lat, lon)
-        return (
-            self._scoring.percentile_to_display_score(percentile),
-            percentile,
-            is_local,
-        )
+        return raw_score, percentile, is_local
+
+    @staticmethod
+    def _today_for(lat: float, lon: float) -> date:
+        """Date used to pick the seasonal comparison window."""
+        return datetime.now(timezone.utc).date()
 
     # ------------------------------------------------------------------
     # Training-label capture

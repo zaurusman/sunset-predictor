@@ -61,3 +61,8 @@ frontend/.turbo/
 
 # Docker
 *.tar
+
+# Human sunset ratings — real labels, not code. Kept out of git so a test run,
+# a UI verification pass or a demo cannot commit fabricated observations into
+# the one dataset that measures whether the model is actually right.
+data/ratings.jsonl

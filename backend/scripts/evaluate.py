@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import Settings
 from app.services.astronomy_service import AstronomyService
-from app.services.scoring_engine import ScoringEngine
+from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.climatology_service import _rank_in_sorted
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
@@ -185,9 +185,14 @@ def report(result: dict) -> list[str]:
             out[c] = out.get(c, 0) + 1
         return out
 
+    # The raw score IS the displayed score now, so these are the bands users
+    # see. Unlike the percentile view they are ALLOWED to differ between
+    # cities — that is what makes the number absolute.
     raw_cats = bands(finals)
-    print("  bands (raw):        "
+    print("  bands (displayed):  "
           + "  ".join(f"{c}:{raw_cats.get(c, 0) * 100 / n:5.1f}%" for c in CATEGORY_ORDER))
+    print(f"  go-outside (>= {int(GO_OUTSIDE_THRESHOLD)}): "
+          f"{sum(1 for v in finals if v >= GO_OUTSIDE_THRESHOLD) * 100 / n:.1f}% of evenings")
 
     cal = result.get("calibrated") or []
     cats = raw_cats
@@ -195,11 +200,11 @@ def report(result: dict) -> list[str]:
         cats = bands(cal)
         ordered_cal = sorted(cal)
         pc = lambda q: ordered_cal[int(q / 100 * (n - 1))]
-        print("  bands (calibrated): "
+        print("  bands (rank-scale): "
               + "  ".join(f"{c}:{cats.get(c, 0) * 100 / n:5.1f}%" for c in CATEGORY_ORDER))
         print(f"  calibrated: mean={st.mean(cal):5.1f}  sd={st.stdev(cal):5.1f}  "
               f"p10={pc(10):5.1f}  p50={pc(50):5.1f}  p90={pc(90):5.1f}")
-        print(f"  go-outside (>= 70): {sum(1 for v in cal if v >= 70) * 100 / n:.1f}% of evenings")
+
 
     if result["corridor"]:
         cv = result["corridor"]
@@ -251,6 +256,8 @@ def report(result: dict) -> list[str]:
             )
 
     # Guardrails
+    # Guardrails are checked on the DISPLAYED (absolute) bands.
+    cats = raw_cats
     epic = cats.get("Epic", 0) * 100 / n
     if epic > MAX_EPIC_SHARE:
         failures.append(f"{name}: 'Epic' fires on {epic:.1f}% of days (max {MAX_EPIC_SHARE}%)")
@@ -283,8 +290,10 @@ def report_labels(path: str) -> None:
         print(f"\nNo label file at {path} — skipping accuracy check.")
         return
 
-    human: list[float] = []
-    model: list[float] = []
+    # One label per (date, location): the store is append-only, so a rating
+    # that was changed leaves both versions behind and would otherwise be
+    # counted twice. Last write wins, matching RatingStore.find().
+    latest: dict[tuple, dict] = {}
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -293,6 +302,15 @@ def report_labels(path: str) -> None:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        latest[(
+            str(rec.get("target_date")),
+            round(float(rec.get("latitude", 0.0)), 2),
+            round(float(rec.get("longitude", 0.0)), 2),
+        )] = rec
+
+    human: list[float] = []
+    model: list[float] = []
+    for rec in latest.values():
         r, s = rec.get("rating"), rec.get("predicted_score")
         if isinstance(r, int) and isinstance(s, (int, float)):
             human.append(float(r))

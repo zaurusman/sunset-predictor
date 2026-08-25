@@ -99,11 +99,22 @@ PRECIP_FLOOR = 0.15
 # Score → category thresholds
 # ---------------------------------------------------------------------------
 
+# ABSOLUTE thresholds on the raw physics score, which is what the app displays.
+#
+# Set from the pooled raw distribution across Tel Aviv, London and San
+# Francisco (365 days each, scripts/evaluate.py) so that the bands mean the
+# same THING everywhere — but deliberately NOT the same frequency everywhere.
+# A location with genuinely better sunset conditions should earn more good
+# evenings; that is the point of an absolute scale, and the per-location
+# frequency is reported separately as a rank ("better than 31 % of evenings
+# here").
+#
+# Re-derive these whenever the raw scale moves, alongside REFERENCE_QUANTILES.
 SCORE_THRESHOLDS: list[tuple[float, str]] = [
-    (80, "Epic"),
-    (65, "Great"),
-    (50, "Good"),
-    (30, "Decent"),
+    (85, "Epic"),
+    (72, "Great"),
+    (55, "Good"),
+    (38, "Decent"),
     (0, "Poor"),
 ]
 
@@ -141,11 +152,11 @@ CALIBRATION_ANCHORS: list[tuple[float, float]] = [
     (1.00, 100.0),
 ]
 
-# Score at which we recommend going outside.
-# This is the bar for "worth changing your plans for", not "better than
-# average" — most evenings land in the 40s and 50s, so a 45 recommended
-# going outside on a thoroughly ordinary sky.
-GO_OUTSIDE_THRESHOLD = 70.0
+# Score at which we recommend going outside — on the ABSOLUTE scale, so this
+# fires more often in a place with better skies. That is intended: if Tel Aviv
+# genuinely has a lovely sunset most summer evenings, an honest app says so
+# rather than rationing the recommendation to a fixed share of nights.
+GO_OUTSIDE_THRESHOLD = 75.0
 
 # ---------------------------------------------------------------------------
 # Atmosphere response curves
@@ -1497,7 +1508,12 @@ class ScoringEngine:
 
     @staticmethod
     def percentile_to_display_score(percentile: float) -> float:
-        """Map a climatological percentile in [0, 1] onto the displayed 0-100.
+        """Map a climatological percentile in [0, 1] onto a 0-100 rank score.
+
+        NO LONGER THE DISPLAY PATH. The app shows the absolute physics score;
+        this remains for analysis (scripts/evaluate.py uses it to show what a
+        purely rank-based scale would look like) and because the anchors below
+        still document the intended shape of a rarity scale.
 
         Piecewise-linear through CALIBRATION_ANCHORS, so each band ends up with
         a fixed share of evenings regardless of climate. Monotone by

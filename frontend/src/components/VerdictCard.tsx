@@ -36,12 +36,19 @@ function headlineFor(prediction: PredictResponse, targetDate: string): string {
 }
 
 /** Phrase the percentile as a comparison, which is what the number actually means. */
-function rankPhrase(percentile: number): string {
+/**
+ * Context line under the score.
+ *
+ * The score itself is absolute — "how good will the sky look". This says how
+ * unusual that is HERE, and specifically here at this time of year: the rank
+ * is taken against a seasonal window, so a pleasant August evening reads as
+ * good for August rather than being buried under the winter's frontal skies.
+ */
+function rankPhrase(percentile: number, month: string): string {
   const pct = Math.round(percentile * 100);
-  if (pct >= 97) return "top 3% of evenings here";
-  if (pct >= 88) return `better than ${pct}% of evenings here`;
-  if (pct <= 10) return `bottom ${Math.max(pct, 1)}% of evenings here`;
-  return `better than ${pct}% of evenings here`;
+  if (pct >= 97) return `among the best ${month} evenings here`;
+  if (pct <= 10) return `quiet for ${month} here`;
+  return `better than ${pct}% of ${month} evenings here`;
 }
 
 const RADIUS = 27;
@@ -50,9 +57,14 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 export default function VerdictCard({ prediction, targetDate }: VerdictCardProps) {
   const isDark = useIsDark();
 
+  const monthName = new Date(prediction.sunset_time).toLocaleDateString(undefined, {
+    month: "long",
+  });
+
   const score = Math.round(prediction.beauty_score_0_100);
-  // The score is a rank against this location's own history, so say so — "62"
-  // means little on its own, "better than 78% of evenings here" is the actual claim.
+  // The score is absolute; the rank is context. It is deliberately secondary —
+  // a rank cannot improve when the model improves, which is why it is no
+  // longer the headline number.
   const rank =
     prediction.climatology_is_local && prediction.climatology_percentile !== null
       ? prediction.climatology_percentile
@@ -119,7 +131,7 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
           </span>
           {rank !== null && (
             <span className="text-xs text-gray-600 dark:text-slate-400">
-              {rankPhrase(rank)}
+              {rankPhrase(rank, monthName)}
             </span>
           )}
         </div>
@@ -132,8 +144,8 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
 
       {!prediction.climatology_is_local && (
         <p className="text-xs text-gray-500 dark:text-slate-400 leading-snug text-pretty">
-          Still learning this location&apos;s normal — the score is ranked against a
-          general baseline for now and will sharpen shortly.
+          Still learning what is normal here — the comparison below the score uses a
+          general baseline for now. The score itself is unaffected.
         </p>
       )}
 
