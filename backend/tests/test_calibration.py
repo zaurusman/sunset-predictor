@@ -59,9 +59,13 @@ def test_reference_curve_ranks_sensibly():
     """The global fallback must place typical scores in plausible places."""
     assert _rank_in_quantiles(REFERENCE_QUANTILES, 0.0) == 0.0
     assert _rank_in_quantiles(REFERENCE_QUANTILES, 100.0) == 1.0
-    mid = _rank_in_quantiles(REFERENCE_QUANTILES, 47.0)
-    assert 0.4 < mid < 0.8, f"a median-ish raw score should rank mid-table, got {mid}"
-    assert _rank_in_quantiles(REFERENCE_QUANTILES, 85.0) > 0.9
+    # Probe the curve's own median rather than a hard-coded score: the raw
+    # scale moves whenever a component curve changes, and a literal here would
+    # quietly become a test of last quarter's scoring engine.
+    median_raw = REFERENCE_QUANTILES[len(REFERENCE_QUANTILES) // 2]
+    mid = _rank_in_quantiles(REFERENCE_QUANTILES, median_raw)
+    assert 0.4 < mid < 0.6, f"the curve's own median should rank mid-table, got {mid}"
+    assert _rank_in_quantiles(REFERENCE_QUANTILES, REFERENCE_QUANTILES[-2]) > 0.9
 
 
 def test_reference_curve_is_sorted():
@@ -196,3 +200,23 @@ def test_warm_in_background_is_a_noop_without_an_event_loop():
     svc = _service()
     svc.warm_in_background(32.08, 34.78)   # no running loop
     assert svc.is_warm(32.08, 34.78) is False
+
+
+def test_cache_key_is_scoped_to_the_scale_version():
+    """A curve built by an older scoring engine must not be served to a newer
+    one. Curves persist to disk for 30 days, so without this a scoring change
+    silently ranks new scores against an old distribution."""
+    from app.services import climatology_service as cs
+
+    svc = _service()
+    svc._cache.set(svc._key(32.08, 34.78), sorted(float(i) for i in range(100)))
+    assert svc.percentile_of(32.08, 34.78, 50.0)[1] is True
+
+    original = cs.SCALE_VERSION
+    try:
+        cs.SCALE_VERSION = original + 1
+        assert svc.percentile_of(32.08, 34.78, 50.0)[1] is False, (
+            "a scale bump must orphan curves built by the previous engine"
+        )
+    finally:
+        cs.SCALE_VERSION = original

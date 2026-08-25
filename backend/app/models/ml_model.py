@@ -223,7 +223,7 @@ class MLModel:
             weather.cloud_mid,
             weather.cloud_high,
             weather.cloud_total,
-            math.log(weather.visibility_m + 1.0),
+            math.log((weather.visibility_m or 15_000.0) + 1.0),
             weather.relative_humidity,
             weather.dewpoint_c,
             math.log1p(weather.precipitation_mm),

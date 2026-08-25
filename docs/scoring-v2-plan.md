@@ -9,7 +9,7 @@ Written 2026-08-25.
 | 0 — Measuring stick | **Mostly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with their raw inputs; one-tap UI on the verdict card. `scripts/evaluate.py` is the committed harness — distribution stats, guardrails, and label correlation. Webcam labels not started. |
 | 1 — Neutralise dead weight | **Done.** Horizon and precipitation are now multiplicative gates, not weighted components; weights are 0.60/0.25/0.15. |
 | 2 — Light corridor | **Done.** Wired into predict, forecast and heatmap. |
-| 3 — Aerosol + column moisture | Not started |
+| 3 — Aerosol + column moisture | **Done.** Aerosol response is monotone decreasing (Corfidi); moisture scores the water column (TCWV); archive visibility is no longer invented; measured AOD now covers historical days too. Moisture's variance share went 2.8-5.0 % → 16.3-18.2 %. |
 | 4 — Earth-shadow afterglow timing | Not started |
 | 5 — Calibrate the scale | **Done.** Displayed score is a percentile against local climatology; band shares are fixed by construction. |
 | 6 — Make ML shelving explicit | **Done.** `ML_BLEND_ALPHA = 1.0`, load-time quality gate, artifact moved to `data/dead/`. |
@@ -412,6 +412,40 @@ The one change that adds a mechanism the model currently cannot see at all.
   Consider `direct_normal_irradiance` at the sunset hour as a direct measure
   of slant-path extinction — it's available on both endpoints and is close to
   a physical read on "is light getting through".
+
+**Outcome, measured.** `scripts/evaluate.py --days 365`, three cities:
+
+| | moisture variance share (before → after) | atmosphere sd |
+|---|---|---|
+| Tel Aviv | 2.8 % → 17.6 % | 13.9 |
+| London | 4.0 % → 16.3 % | 11.4 |
+| San Francisco | 5.0 % → 18.2 % | 7.2 |
+
+All distribution guardrails now pass. Three things came out of the work that
+were not in the plan:
+
+- **Pressure-level humidity is unusable.** The archive returns null for every
+  `relative_humidity_*hPa` level (checked across 72 consecutive hours, with and
+  without `models=era5`). Scoring it on the forecast path would make live
+  predictions incomparable with the climatology they are ranked against, so
+  TCWV — available on both endpoints — carries the component alone.
+- **Historical days were being scored with a different atmosphere term.** The
+  archive path passed no air-quality data, so every historical day fell through
+  to the humidity proxy while live forecasts used measured AOD. The air-quality
+  endpoint serves a year of history in ONE request; it is now wired into the
+  range path and both single-date archive paths.
+- **Cached climatologies outlive a scoring change.** Curves persist to disk for
+  30 days, so after this phase moved the median from ~47 to ~53, warm locations
+  were still ranking new scores against the old distribution — silently, since
+  the number stays plausible. The cache key now carries `SCALE_VERSION`, and
+  `REFERENCE_QUANTILES` has a regenerate-me note for the same reason.
+
+**Open question this surfaced.** Calibration ranks an evening against the whole
+year, so a seasonal low reads as a run of "Poor" days — late-August Tel Aviv is
+currently seven straight. That is physically right (Mediterranean summer is
+hazy and cloudless; the drama is in winter fronts) but may be the wrong product
+answer. Ranking within a seasonal window instead would say "good for August".
+Not changed here — it is a judgement call, not a bug.
 
 ### Phase 4 — Real geometry for afterglow timing
 

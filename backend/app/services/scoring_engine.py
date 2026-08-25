@@ -15,8 +15,9 @@ Two layers:
 SCORED COMPONENTS (weighted average, weights configurable)
 ----------------------------------------------------------
 1. Cloud Quality  (60 %) — cloud distribution, gated by upstream illumination
-2. Atmosphere     (25 %) — visibility, aerosol, humidity
-3. Moisture       (15 %) — humidity and post-rain clearing
+2. Atmosphere     (25 %) — how clean the air is: aerosol, plus visibility
+                           where the source reports it
+3. Moisture       (15 %) — the atmospheric water column, plus post-rain clearing
 
 GATES (multiplicative, applied after the average)
 -------------------------------------------------
@@ -87,10 +88,11 @@ SCORE_THRESHOLDS: list[tuple[float, str]] = [
 # ---------------------------------------------------------------------------
 #
 # The displayed 0-100 is a RANK against the location's own history, not the raw
-# physics score. Raw scores are not comparable between places: a median evening
-# is ~47 in Tel Aviv and ~42 in San Francisco, and the bottom decile is 42.5 vs
-# 23.4 in London. Fixed cutoffs on that scale meant "Epic" fired on 10-15 % of
-# evenings in one city while "Decent" covered 75 % in another.
+# physics score. Raw scores are not comparable between places: the bottom decile
+# is 42.9 in Tel Aviv against 29.6 in London, because Tel Aviv barely gets the
+# blocked-corridor evenings London does. Fixed cutoffs on that scale meant
+# "Epic" fired on 10-15 % of evenings in one city while "Decent" covered 75 %
+# in another.
 #
 # Anchoring the bands to percentiles fixes the share of evenings in each band BY
 # CONSTRUCTION, in every climate. The shares below are a product judgement about
@@ -120,6 +122,44 @@ CALIBRATION_ANCHORS: list[tuple[float, float]] = [
 # average" — most evenings land in the 40s and 50s, so a 45 recommended
 # going outside on a thoroughly ordinary sky.
 GO_OUTSIDE_THRESHOLD = 70.0
+
+# ---------------------------------------------------------------------------
+# Atmosphere response curves
+# ---------------------------------------------------------------------------
+
+# Aerosol optical depth (550 nm) → clarity score. Monotone DECREASING: clean
+# air is the ingredient, haze is the spoiler. See ScoringEngine.aerosol_clarity
+# for why this is not a bell curve.
+#
+#   ≤0.05  pristine — post-frontal, maritime, high desert
+#    0.15  typical continental background
+#    0.30  visible haze
+#    0.50  poor air-quality day
+#    0.80  heavy smoke / dust event
+AEROSOL_ANCHORS: list[tuple[float, float]] = [
+    (0.00, 100.0),
+    (0.05, 100.0),
+    (0.15,  88.0),
+    (0.30,  68.0),
+    (0.50,  42.0),
+    (0.80,  15.0),
+    (1.50,   5.0),
+]
+
+# Total column water vapour (kg/m² ≈ mm precipitable water) → dryness score.
+# Reference points: 5-10 mm is a dry continental winter airmass, 15-25 mm is
+# an ordinary temperate evening, 40+ mm is tropical or a summer Mediterranean
+# heat load.
+TCWV_ANCHORS: list[tuple[float, float]] = [
+    ( 0.0, 100.0),
+    ( 8.0, 100.0),
+    (15.0,  85.0),
+    (22.0,  68.0),
+    (30.0,  48.0),
+    (40.0,  25.0),
+    (55.0,   8.0),
+    (80.0,   0.0),
+]
 
 # ---------------------------------------------------------------------------
 # Light-corridor constants
@@ -252,11 +292,11 @@ class ScoringEngine:
         atm = self.atmosphere_score(
             weather.visibility_m,
             weather.aerosol_optical_depth,
-            weather.relative_humidity,
         )
         mst = self.moisture_score(
             weather.precipitation_mm,
             weather.relative_humidity,
+            tcwv=weather.tcwv_kg_m2,
             precip_last_3h=weather.precipitation_last_3h_mm,
             pressure_trend=weather.pressure_trend_hpa_3h,
             cloud_trend=weather.cloud_total_trend_3h,
@@ -680,50 +720,99 @@ class ScoringEngine:
     # Component 2: Atmosphere / Clarity (weight 0.28)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def aerosol_clarity(aerosol_od: float) -> float:
+        """Score air cleanliness from aerosol optical depth, 0-100.
+
+        MONOTONE DECREASING, deliberately. This replaces a bell curve that
+        peaked at AOD 0.18 and scored pristine air (AOD 0.03) at only ~56 —
+        i.e. it treated a smog layer as the ideal and clean desert air as
+        mediocre.
+
+        That was backwards. Corfidi (NOAA/SPC, "A Guide to Forecasting Colorful
+        Sunrises and Sunsets") is explicit that tropospheric aerosols SUBDUE
+        sunset colour: they scatter and absorb across the visible band, which
+        washes the reds toward a flat milky orange. Clean air is the main
+        ingredient — the vivid skies are the ones after a front has scrubbed
+        the boundary layer, not the hazy ones.
+
+        Please do not "fix" this back into a bell curve. The intuition that a
+        little haze helps comes from confusing aerosol with high cirrus, which
+        is a cloud effect and is already scored in cloud_quality.
+        """
+        return _interpolate(AEROSOL_ANCHORS, aerosol_od)
+
     def atmosphere_score(
         self,
-        visibility_m: float,
+        visibility_m: Optional[float],
         aerosol_od: Optional[float],
-        humidity_pct: float,
     ) -> float:
         """
-        Score atmospheric clarity for sunset colour intensity.
+        Score atmospheric clarity — how cleanly light reaches you.
 
-        - High visibility = clean air = vivid colours
-        - Moderate aerosol (AOD 0.1–0.3) scatters blue light and intensifies
-          warm tones — the "pink hour" effect.  Too much (AOD > 0.6) creates
-          milky haze that dulls colours.
-        - Missing AOD falls back to a visibility-derived proxy with a gentler
-          floor (40 pts) — missing data should not tank the score.
-        - High humidity is a mild penalty only (above 75 %, max −18 pts).
+        Aerosol leads (see aerosol_clarity); visibility, when the source
+        reports it, is a second look at the same physical quantity and gets
+        the smaller share.
+
+        *visibility_m* of None means the source did not report it — true of
+        every ERA5 archive hour. It is then simply left out, rather than
+        defaulting to 15 km as before: a constant contributes nothing but a
+        fixed offset, and it made the climatology's atmosphere term a function
+        of humidity alone.
+
+        Surface humidity is NOT penalised here any more. Moisture is scored
+        once, as a water column, in moisture_score — counting it in both places
+        double-charged humid evenings.
         """
-        # Visibility: 25 km = excellent; linear below that
-        vis_score = clamp(visibility_m / 25_000.0 * 100.0)
+        aer_score = (
+            self.aerosol_clarity(aerosol_od) if aerosol_od is not None else None
+        )
+        vis_score = (
+            clamp(visibility_m / 25_000.0 * 100.0) if visibility_m is not None else None
+        )
 
-        if aerosol_od is not None:
-            # Peak at AOD ≈ 0.18 (light haze for warm tones)
-            aer_score = bell_curve(aerosol_od, peak=0.18, sigma=0.15) * 100.0
-        else:
-            # Estimated AOD: no artificial floor — tie it directly to visibility
-            # so that the default 15 km archive baseline produces a neutral score,
-            # not a phantom-high one.  Previously max(40, vis*0.80) could give ~77
-            # even with mediocre visibility; now it scales proportionally.
-            aer_score = vis_score * 0.75
-
-        # Humidity: mild penalty above 75 % (max −18 pts at 100 %)
-        hum_penalty = max(0.0, (humidity_pct - 75.0) / 25.0 * 18.0)
-
-        combined = vis_score * 0.50 + aer_score * 0.50 - hum_penalty
-        return clamp(combined)
+        if aer_score is not None and vis_score is not None:
+            return clamp(aer_score * 0.65 + vis_score * 0.35)
+        if aer_score is not None:
+            return clamp(aer_score)
+        if vis_score is not None:
+            return clamp(vis_score)
+        # Neither reported: a neutral score, so an evening is neither rewarded
+        # nor punished for a gap in the data.
+        return 60.0
 
     # ------------------------------------------------------------------
     # Component 3: Moisture / Precipitation (weight 0.20)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def column_dryness(tcwv_kg_m2: float) -> float:
+        """Score the whole-atmosphere water load, 0-100. Drier is better.
+
+        TCWV (kg/m², equivalently mm of precipitable water) is the total water
+        vapour in the column above you. It is what actually mutes sunset
+        colour: vapour both scatters and feeds the sub-visible haze that turns
+        red into milky orange, along the entire slant path the light takes.
+
+        Surface relative humidity — what this component used to score — is a
+        measurement of the bottom two metres and says very little about that
+        path. It is also bounded and heavily diurnal, so on dry evenings it sat
+        pinned at 100 and contributed no information: measured over a year at
+        three cities, moisture held 15 % of the weight while accounting for
+        2.8-5.0 % of the variance in the final score.
+
+        Anchors are absolute (8 mm is dry anywhere, 45 mm is tropical), which
+        is safe now that the displayed score is a percentile against local
+        climatology — an always-humid location is ranked against its own
+        history, not against a desert.
+        """
+        return _interpolate(TCWV_ANCHORS, tcwv_kg_m2)
+
     def moisture_score(
         self,
         precip_mm: float,
         humidity_pct: float,
+        tcwv: Optional[float] = None,
         *,
         precip_last_3h: Optional[float] = None,
         pressure_trend: Optional[float] = None,
@@ -731,7 +820,14 @@ class ScoringEngine:
         vis_trend: Optional[float] = None,
     ) -> float:
         """
-        Score moisture conditions — humidity and post-rain clearing.
+        Score moisture — the atmospheric water column, and post-rain clearing.
+
+        The base is column_dryness(*tcwv*). Surface humidity survives only as a
+        small correction (max −10 above 85 %), because a saturated boundary
+        layer does put haze in the lowest, brightest part of the view even when
+        the column above is dry. When *tcwv* is unavailable — manual overrides,
+        or any source that stops returning it — the old surface-RH curve stands
+        in, so a missing field degrades the component rather than breaking it.
 
         NOTE: active precipitation is NOT scored here. It is a multiplicative
         gate (see precipitation_gate) because rain ends a sunset rather than
@@ -739,9 +835,10 @@ class ScoringEngine:
         decide whether the clearing bonus applies, which it cannot while it is
         still raining.
 
+        - Dry column → high base score
         - Recent rain + currently dry → clearing bonus (post-rain glow)
         - Rising pressure / improving visibility / clearing clouds → bonus
-        - High humidity → mild penalty only
+        - Saturated surface air → mild penalty
 
         Clearing bonus: up to +15 pts when rain stopped recently and
         atmospheric signals show improvement.
@@ -763,10 +860,16 @@ class ScoringEngine:
                 clearing_bonus += 3.0
             clearing_bonus = min(clearing_bonus, 15.0)
 
-        # Humidity: penalty only above 85 % (max −25 pts at 100 %)
-        hum_penalty = max(0.0, (humidity_pct - 85.0) / 15.0 * 25.0)
+        if tcwv is not None:
+            base = self.column_dryness(tcwv)
+            # Small correction only — the column already carries the moisture.
+            hum_penalty = max(0.0, (humidity_pct - 85.0) / 15.0 * 10.0)
+        else:
+            # Fallback: the pre-column behaviour, penalty only above 85 %.
+            base = 100.0
+            hum_penalty = max(0.0, (humidity_pct - 85.0) / 15.0 * 25.0)
 
-        return clamp(100.0 - hum_penalty + clearing_bonus)
+        return clamp(base - hum_penalty + clearing_bonus)
 
     # ------------------------------------------------------------------
     # Component 4: Horizon (weight 0.10)
@@ -837,16 +940,7 @@ class ScoringEngine:
         a fixed share of evenings regardless of climate. Monotone by
         construction: a better evening never displays a lower number.
         """
-        p = clamp(percentile, lo=0.0, hi=1.0)
-        anchors = CALIBRATION_ANCHORS
-        for i in range(len(anchors) - 1):
-            p_lo, s_lo = anchors[i]
-            p_hi, s_hi = anchors[i + 1]
-            if p_lo <= p <= p_hi:
-                span = p_hi - p_lo
-                frac = 0.0 if span == 0 else (p - p_lo) / span
-                return clamp(s_lo + frac * (s_hi - s_lo))
-        return 100.0
+        return _interpolate(CALIBRATION_ANCHORS, clamp(percentile, lo=0.0, hi=1.0))
 
     @staticmethod
     def score_to_category(score: float) -> str:
@@ -944,3 +1038,33 @@ class ScoringEngine:
             return MAX_BONUS * (1.0 - lead_time_hours / 24.0)
         days_beyond = (lead_time_hours - 24.0) / 24.0
         return -PER_DAY_PENALTY * days_beyond
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _interpolate(anchors: list[tuple[float, float]], x: float) -> float:
+    """Piecewise-linear lookup through (x, y) *anchors*, which must be sorted by x.
+
+    Values outside the table clamp to the nearest endpoint. Used for every
+    response curve in this module so the shape of a curve is a readable table
+    rather than a fitted constant — the aerosol bell curve survived as long as
+    it did partly because `bell_curve(aod, peak=0.18, sigma=0.15)` does not
+    look wrong until you evaluate it.
+    """
+    if not anchors:
+        return 0.0
+    if x <= anchors[0][0]:
+        return anchors[0][1]
+    if x >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(len(anchors) - 1):
+        x_lo, y_lo = anchors[i]
+        x_hi, y_hi = anchors[i + 1]
+        if x_lo <= x <= x_hi:
+            span = x_hi - x_lo
+            frac = 0.0 if span == 0 else (x - x_lo) / span
+            return y_lo + frac * (y_hi - y_lo)
+    return anchors[-1][1]

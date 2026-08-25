@@ -25,10 +25,13 @@ export interface WeatherSummary {
   cloud_mid_pct: number;
   cloud_high_pct: number;
   cloud_total_pct: number;
-  visibility_km: number;
+  /** null when the data source does not report visibility (all archive days). */
+  visibility_km: number | null;
   precipitation_mm: number;
   aerosol_optical_depth: number | null;
   aerosol_is_estimated: boolean;
+  /** Total column water vapour, mm of precipitable water. */
+  tcwv_kg_m2: number | null;
   temperature_c: number;
   humidity_pct: number;
   wind_speed_kmh: number;

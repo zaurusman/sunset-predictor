@@ -456,7 +456,10 @@ def _build_weather_summary(weather: WeatherSnapshot) -> WeatherSummary:
         cloud_mid_pct=round(weather.cloud_mid, 1),
         cloud_high_pct=round(weather.cloud_high, 1),
         cloud_total_pct=round(weather.cloud_total, 1),
-        visibility_km=round(weather.visibility_m / 1000.0, 1),
+        visibility_km=(
+            round(weather.visibility_m / 1000.0, 1)
+            if weather.visibility_m is not None else None
+        ),
         precipitation_mm=round(weather.precipitation_mm, 2),
         aerosol_optical_depth=(
             round(weather.aerosol_optical_depth, 3)
@@ -464,6 +467,7 @@ def _build_weather_summary(weather: WeatherSnapshot) -> WeatherSummary:
             else None
         ),
         aerosol_is_estimated=weather.aerosol_is_estimated,
+        tcwv_kg_m2=weather.tcwv_kg_m2,
         temperature_c=round(weather.temperature_c, 1),
         humidity_pct=round(weather.relative_humidity, 1),
         wind_speed_kmh=round(weather.wind_speed_kmh, 1),

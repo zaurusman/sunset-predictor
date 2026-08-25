@@ -90,8 +90,18 @@ export default function EvidenceDrawer({ prediction }: EvidenceDrawerProps) {
               <Stat label="Cloud" value={`${Math.round(w.cloud_total_pct)}%`} />
               <Stat label="High cloud" value={`${Math.round(w.cloud_high_pct)}%`} />
               <Stat label="Low cloud" value={`${Math.round(w.cloud_low_pct)}%`} />
-              <Stat label="Visibility" value={`${Math.round(w.visibility_km)} km`} />
+              {/* Archive dates carry no visibility — showing a made-up number
+                  there would be worse than showing nothing. */}
+              {w.visibility_km !== null && (
+                <Stat label="Visibility" value={`${Math.round(w.visibility_km)} km`} />
+              )}
               <Stat label="Humidity" value={`${Math.round(w.humidity_pct)}%`} />
+              {/* The water column is what the moisture component scores, so it
+                  belongs in the evidence — surface humidity alone doesn't
+                  explain a low moisture bar. */}
+              {w.tcwv_kg_m2 !== null && (
+                <Stat label="Air moisture" value={`${Math.round(w.tcwv_kg_m2)} mm`} />
+              )}
               <Stat label="Rain" value={`${w.precipitation_mm} mm`} />
               {haze && (
                 <Stat

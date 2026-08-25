@@ -180,33 +180,36 @@ class ExplanationEngine:
         # Atmosphere reasons
         # -----------------------------------------------------------------
         atm = breakdown.atmosphere_score
-        vis_km = weather.visibility_m / 1000.0
+        vis_km = (
+            weather.visibility_m / 1000.0 if weather.visibility_m is not None else None
+        )
+        aod = weather.aerosol_optical_depth
 
         if atm >= 70:
-            if vis_km >= 15:
+            if vis_km is not None and vis_km >= 15:
                 candidates.append((atm, "Clear air and good visibility will help colours pop."))
             else:
-                candidates.append((atm, "Atmospheric conditions look favourable for strong colour."))
+                candidates.append((atm, "The air is clean, which is what makes colours vivid."))
         elif atm >= 45:
-            if weather.aerosol_optical_depth is not None and weather.aerosol_optical_depth > 0.1:
-                candidates.append(
-                    (atm, "A touch of haze may produce warm golden tones — moderate aerosol helps.")
-                )
-            else:
-                candidates.append((atm, "Atmospheric clarity is decent — expect reasonable colour."))
+            candidates.append((atm, "Atmospheric clarity is decent — expect reasonable colour."))
         else:
-            if vis_km < 8:
+            # Haze mutes colour, it does not warm it — see aerosol_clarity().
+            if vis_km is not None and vis_km < 8:
                 candidates.append(
                     (100 - atm, f"Reduced visibility ({vis_km:.0f} km) may mute sunset colours.")
                 )
+            elif aod is not None and aod >= 0.3:
+                candidates.append(
+                    (100 - atm, "Haze in the air will wash the reds toward a flat orange.")
+                )
             else:
                 candidates.append(
-                    (100 - atm, "Hazy or humid air may wash out the colours.")
+                    (100 - atm, "Hazy air may wash out the colours.")
                 )
 
         if weather.aerosol_is_estimated:
             candidates.append(
-                (5.0, "Aerosol data was estimated from visibility — confidence is slightly lower.")
+                (5.0, "Aerosol data was estimated rather than measured — confidence is slightly lower.")
             )
 
         # -----------------------------------------------------------------
@@ -248,6 +251,19 @@ class ExplanationEngine:
             candidates.append(
                 (50.0, "Clouds have been clearing over the past few hours — good sign.")
             )
+
+        # The moisture component is driven by the water COLUMN, so it can be
+        # low on an evening whose surface humidity looks unremarkable. Without
+        # a reason of its own that reads as an unexplained score.
+        if weather.tcwv_kg_m2 is not None and weather.precipitation_mm < 0.1:
+            if weather.tcwv_kg_m2 >= 32.0:
+                candidates.append(
+                    (100 - mst, "A heavy load of moisture through the whole air column will mute the colours.")
+                )
+            elif weather.tcwv_kg_m2 <= 10.0:
+                candidates.append(
+                    (mst, "The air column is unusually dry, which lets colours stay saturated.")
+                )
 
         if weather.relative_humidity >= 85 and weather.precipitation_mm < 0.1:
             candidates.append(

@@ -224,18 +224,68 @@ def test_post_rain_clearing_bonus():
 
 def test_missing_aerosol_does_not_tank_score():
     """
-    Missing aerosol data should not cause a severe penalty.
-    With good visibility the atmosphere score should still be reasonable.
+    A missing field should degrade the component, never punish the evening.
+    With visibility reported, atmosphere still has a real signal to score.
     """
     engine = ScoringEngine()
-    score_with_aod = engine.atmosphere_score(20_000.0, 0.18, 50.0)
-    score_no_aod = engine.atmosphere_score(20_000.0, None, 50.0)
-    # No-AOD fallback should be within 20 pts of real AOD score
+    score_with_aod = engine.atmosphere_score(20_000.0, 0.15)
+    score_no_aod = engine.atmosphere_score(20_000.0, None)
     assert score_no_aod >= score_with_aod - 20.0, (
         f"Missing AOD score ({score_no_aod:.1f}) dropped too far below real AOD ({score_with_aod:.1f})"
     )
-    # Should still clear a reasonable floor
     assert score_no_aod >= 45.0, f"Missing AOD score too low: {score_no_aod:.1f}"
+
+
+# ---------------------------------------------------------------------------
+# Moisture as a water column (Phase 3)
+#
+# Motivation, measured: with moisture scored from surface RH alone it held
+# 15 % of the weight while accounting for 2.8-5.0 % of the variance in the
+# final score across three cities. It sat pinned at 100 on every dry evening.
+# ---------------------------------------------------------------------------
+
+def test_column_dryness_is_monotone_decreasing():
+    engine = ScoringEngine()
+    prev = 101.0
+    for tcwv in range(0, 81):
+        s = engine.column_dryness(float(tcwv))
+        assert s <= prev + 1e-9, f"dryness rose at TCWV {tcwv}"
+        prev = s
+
+
+def test_column_dryness_spans_the_range():
+    """A signal that cannot separate a dry airmass from a tropical one would
+    reproduce exactly the dead weight this replaced."""
+    engine = ScoringEngine()
+    assert engine.column_dryness(6.0) >= 95.0     # dry continental winter
+    assert 55.0 <= engine.column_dryness(25.0) <= 75.0   # ordinary temperate
+    assert engine.column_dryness(45.0) <= 25.0    # tropical / heat load
+
+
+def test_moisture_now_discriminates_between_dry_evenings():
+    """Both of these evenings have unremarkable surface humidity and would have
+    scored an identical 100 before. They are not the same evening."""
+    engine = ScoringEngine()
+    dry = engine.moisture_score(0.0, 55.0, tcwv=9.0)
+    humid = engine.moisture_score(0.0, 55.0, tcwv=38.0)
+    assert dry - humid >= 40.0, f"dry={dry:.1f} humid={humid:.1f}"
+
+
+def test_moisture_falls_back_when_column_is_missing():
+    """Manual overrides carry no TCWV; the component must degrade to the old
+    surface-RH behaviour rather than collapsing to zero."""
+    engine = ScoringEngine()
+    assert engine.moisture_score(0.0, 55.0) == 100.0
+    assert engine.moisture_score(0.0, 95.0) < 100.0
+
+
+def test_surface_humidity_still_corrects_a_dry_column():
+    """A saturated boundary layer puts haze in the brightest part of the view
+    even when the column above is dry — but only as a small correction."""
+    engine = ScoringEngine()
+    dry_surface = engine.moisture_score(0.0, 50.0, tcwv=10.0)
+    wet_surface = engine.moisture_score(0.0, 100.0, tcwv=10.0)
+    assert 5.0 <= dry_surface - wet_surface <= 12.0
 
 
 # ---------------------------------------------------------------------------

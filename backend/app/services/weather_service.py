@@ -50,6 +50,7 @@ FORECAST_HOURLY_VARS = ",".join([
     "wind_speed_10m",
     "surface_pressure",
     "weather_code",
+    "total_column_integrated_water_vapour",
 ])
 
 AIR_QUALITY_HOURLY_VARS = "aerosol_optical_depth,dust"
@@ -76,6 +77,10 @@ ARCHIVE_HOURLY_VARS = ",".join([
     "precipitation",
     "wind_speed_10m",
     "surface_pressure",
+    # ERA5 returns null for `visibility` and for every relative_humidity_*hPa
+    # level, but does provide the water column — which is why the moisture
+    # component scores TCWV. Verified against 72 consecutive archive hours.
+    "total_column_integrated_water_vapour",
 ])
 
 
@@ -268,7 +273,9 @@ class WeatherService:
                 aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
             else:
                 weather_data = await self._fetch_archive_raw(lat, lon, target_date)
-                aq_data = None
+                aq_data = await self._fetch_air_quality_range_raw(
+                    lat, lon, target_date, target_date
+                )
         else:
             days_ahead = (target_date - today).days + 1
             weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
@@ -604,11 +611,16 @@ class WeatherService:
         # dates with days_ago > 7 are safely in the archive; ≤7 use forecast+past_days
         archive_boundary = today - timedelta(days=8)
 
-        # One bulk archive fetch for the old portion
+        # One bulk archive fetch for the old portion, plus one bulk aerosol
+        # fetch covering the same span — measured AOD for historical days, so
+        # the climatology is built with the same atmosphere term as a live
+        # prediction rather than with the humidity proxy.
         archive_data: Optional[dict] = None
+        archive_aq: Optional[dict] = None
         if start_date <= archive_boundary:
             archive_end = min(end_date, archive_boundary)
             archive_data = await self._fetch_archive_range_raw(lat, lon, start_date, archive_end)
+            archive_aq = await self._fetch_air_quality_range_raw(lat, lon, start_date, archive_end)
 
         # One forecast fetch covers all of the recent 7 days
         recent_weather: Optional[dict] = None
@@ -619,7 +631,7 @@ class WeatherService:
 
         # Pre-parse timestamps once so the per-day loop doesn't re-parse the
         # same 8760-entry list on every _extract_snapshot_for_hour / _extract_trends call.
-        for _d in [archive_data, recent_weather, recent_aq]:
+        for _d in [archive_data, archive_aq, recent_weather, recent_aq]:
             if _d is not None:
                 _prepopulate_parsed_times(_d)
 
@@ -631,7 +643,7 @@ class WeatherService:
                 if days_ago <= 7:
                     weather_data, aq_data = recent_weather, recent_aq
                 else:
-                    weather_data, aq_data = archive_data, None
+                    weather_data, aq_data = archive_data, archive_aq
 
                 if weather_data is None:
                     logger.warning("No weather data source available for %s, skipping", current)
@@ -680,7 +692,11 @@ class WeatherService:
         self, lat: float, lon: float, target_date: date, sunset_time: datetime
     ) -> WeatherSnapshot:
         weather_data = await self._fetch_archive_raw(lat, lon, target_date)
-        return self._extract_snapshot_for_hour(weather_data, None, lat, lon, sunset_time)
+        # Measured aerosol, same as every other path — otherwise a past date is
+        # scored with the humidity proxy while the climatology it is ranked
+        # against used real AOD.
+        aq_data = await self._fetch_air_quality_range_raw(lat, lon, target_date, target_date)
+        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time)
 
     async def _fetch_forecast_raw(
         self, lat: float, lon: float, days: int = 7, past_days: int = 0
@@ -748,6 +764,33 @@ class WeatherService:
             return await self._get_json(url, params)
         except Exception as exc:
             logger.debug("Air quality API unavailable: %s — using proxy", exc)
+            return None
+
+    async def _fetch_air_quality_range_raw(
+        self, lat: float, lon: float, start_date: date, end_date: date
+    ) -> Optional[dict[str, Any]]:
+        """Fetch aerosol optical depth for a date range. Returns None on failure.
+
+        The air-quality endpoint serves history from the same CAMS reanalysis
+        that powers the forecast, so a whole year comes back in ONE request.
+        That matters: without it, historical days fell through to the humidity
+        proxy while live forecasts got measured AOD, and the climatology a
+        prediction is ranked against was therefore built with a different
+        atmosphere term than the prediction itself.
+        """
+        url = f"{self._settings.OPEN_METEO_AIR_QUALITY_URL}/air-quality"
+        params: dict = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": AIR_QUALITY_HOURLY_VARS,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "timezone": "UTC",
+        }
+        try:
+            return await self._get_json(url, params)
+        except Exception as exc:
+            logger.debug("Air quality range unavailable: %s — using proxy", exc)
             return None
 
     async def _get_json(self, url: str, params: dict) -> Any:
@@ -856,14 +899,24 @@ class WeatherService:
                 return float(values[idx])
             return default
 
+        def get_opt(key: str) -> Optional[float]:
+            """Like get(), but reports "not provided" rather than inventing one."""
+            values = hourly.get(key, [])
+            if idx < len(values) and values[idx] is not None:
+                return float(values[idx])
+            return None
+
         cloud_low = get("cloud_cover_low", 0.0)
         cloud_mid = get("cloud_cover_mid", 0.0)
         cloud_high = get("cloud_cover_high", 0.0)
         cloud_total = get("cloud_cover", max(cloud_low, cloud_mid, cloud_high))
-        # Archive API often omits visibility; 15 km is a neutral "hazy-but-clear"
-        # baseline.  24 km (the previous default) was a pristine clear-sky value
-        # that systematically over-rewarded every archive day.
-        visibility_m = get("visibility", 15000.0)
+        # The ERA5 archive returns null for visibility on every hour, so
+        # historical days have none. Report that honestly as None instead of
+        # substituting a constant: a constant is not a neutral choice, it is a
+        # fixed offset added to every archive day's atmosphere score, and it
+        # left the climatology's atmosphere term varying with humidity alone.
+        visibility_m = get_opt("visibility")
+        tcwv = get_opt("total_column_integrated_water_vapour")
         humidity = get("relative_humidity_2m", 50.0)
         dewpoint = get("dew_point_2m", 10.0)
         temperature = get("temperature_2m", 15.0)
@@ -891,12 +944,21 @@ class WeatherService:
                     aerosol_od = float(aod_vals[aq_idx])
 
         if aerosol_od is None:
-            # Proxy estimation from visibility and humidity.
-            # NOTE: This is a rough approximation. A clear atmosphere (high visibility,
-            # low humidity) suggests low AOD; hazy conditions suggest higher AOD.
-            # Values are calibrated against typical real-world AOD ranges (0.05–0.6).
-            vis_km = visibility_m / 1000.0
-            aerosol_od = max(0.05, min(0.8, (1.0 - vis_km / 40.0) * 0.4 + humidity / 100.0 * 0.15))
+            # Proxy, used only when the air-quality API is unreachable — it now
+            # covers the archive range too, so this is a genuine fallback
+            # rather than the normal path for historical days.
+            #
+            # Built from whatever moisture signal exists: hygroscopic aerosol
+            # grows in humid air, so a wet column is a weak indicator of higher
+            # optical depth. Visibility is used when the source reports it.
+            # This is a rough approximation and is flagged as estimated so the
+            # confidence score and the explanation can say so.
+            estimate = 0.08 + humidity / 100.0 * 0.15
+            if tcwv is not None:
+                estimate += min(tcwv, 50.0) / 50.0 * 0.20
+            if visibility_m is not None:
+                estimate += max(0.0, 1.0 - visibility_m / 40_000.0) * 0.25
+            aerosol_od = max(0.05, min(0.8, estimate))
             aerosol_is_estimated = True
 
         # Solar elevation at the ACTUAL requested time (sunset_time), not at the
@@ -919,6 +981,7 @@ class WeatherService:
             precipitation_mm=precipitation,
             wind_speed_kmh=wind_speed,
             pressure_hpa=pressure,
+            tcwv_kg_m2=tcwv,
             aerosol_optical_depth=aerosol_od,
             sun_elevation_deg=sun_elev,
             data_source="archive" if "archive" in str(weather_data.get("generationtime_ms", "")) else "forecast",
@@ -995,13 +1058,24 @@ class WeatherService:
         precip_sum = sum(get("precipitation", i) for i in range(past_idx, sunset_idx))
         pressure_trend = get("surface_pressure", sunset_idx) - get("surface_pressure", past_idx)
         cloud_trend = get("cloud_cover", sunset_idx) - get("cloud_cover", past_idx)
-        vis_trend = get("visibility", sunset_idx) - get("visibility", past_idx)
+
+        # Visibility is absent from the archive entirely; a trend of 0.0 there
+        # would read as "steady" when the truth is "unknown", and the clearing
+        # bonus keys off exactly that distinction.
+        vis_values = hourly.get("visibility", [])
+        have_vis = (
+            sunset_idx < len(vis_values) and vis_values[sunset_idx] is not None
+            and past_idx < len(vis_values) and vis_values[past_idx] is not None
+        )
+        vis_trend = (
+            float(vis_values[sunset_idx]) - float(vis_values[past_idx]) if have_vis else None
+        )
 
         return {
             "precipitation_last_3h_mm": round(precip_sum, 2),
             "pressure_trend_hpa_3h": round(pressure_trend, 1),
             "cloud_total_trend_3h": round(cloud_trend, 1),
-            "visibility_trend_3h_m": round(vis_trend, 0),
+            "visibility_trend_3h_m": round(vis_trend, 0) if vis_trend is not None else None,
         }
 
     # ------------------------------------------------------------------

@@ -100,10 +100,14 @@ class WeatherSummary(BaseModel):
     cloud_mid_pct: float
     cloud_high_pct: float
     cloud_total_pct: float
-    visibility_km: float
+    # None when the data source does not report visibility (all archive days).
+    visibility_km: Optional[float]
     precipitation_mm: float
     aerosol_optical_depth: Optional[float]
     aerosol_is_estimated: bool
+    # Total column water vapour (mm of precipitable water) — what the moisture
+    # component actually scores. None when the source does not report it.
+    tcwv_kg_m2: Optional[float] = None
     temperature_c: float
     humidity_pct: float
     wind_speed_kmh: float

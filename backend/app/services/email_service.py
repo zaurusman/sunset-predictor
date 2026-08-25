@@ -157,7 +157,7 @@ Cloud total:   {ws.cloud_total_pct:.0f}%
 Cloud high:    {ws.cloud_high_pct:.0f}%
 Cloud mid:     {ws.cloud_mid_pct:.0f}%
 Cloud low:     {ws.cloud_low_pct:.0f}%
-Visibility:    {ws.visibility_km:.1f} km
+Visibility:    {f"{ws.visibility_km:.1f} km" if ws.visibility_km is not None else "not reported"}
 Humidity:      {ws.humidity_pct:.0f}%
 Precipitation: {ws.precipitation_mm:.1f} mm
 Temperature:   {ws.temperature_c:.1f}°C
