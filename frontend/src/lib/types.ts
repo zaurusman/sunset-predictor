@@ -62,6 +62,10 @@ export interface PhysicsBreakdown {
   /** Clear-sky gradient score (0-100), already folded into cloud_quality_score.
    *  High while cloud is low means tonight colours as a gradient, not as lit cloud. */
   twilight_gradient_score: number;
+  /** Every independent route to a beautiful sunset, scored on its own terms. */
+  pathway_scores: Record<string, number>;
+  /** Which route is carrying tonight — decides what to look for, and when. */
+  dominant_pathway: string | null;
 }
 
 /** The four sampled moments around sunset, in chronological order. */

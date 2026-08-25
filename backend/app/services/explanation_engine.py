@@ -154,6 +154,48 @@ class ExplanationEngine:
                 ))
 
         # -----------------------------------------------------------------
+        # Which KIND of sunset this is
+        #
+        # Placed above the component reasons because it frames everything
+        # after it. The score alone does not tell someone what to go outside
+        # and look for, and the pathways look nothing like each other: beams
+        # through broken cloud, a gradient with no cloud at all, and a bright
+        # band under a grey lid are three different evenings.
+        # -----------------------------------------------------------------
+        dominant = breakdown.dominant_pathway
+        paths = breakdown.pathway_scores or {}
+        dominant_score = paths.get(dominant, 0.0) if dominant else 0.0
+
+        if dominant == "breaking_storm" and dominant_score >= 30.0:
+            candidates.append((
+                dominant_score + 5.0,
+                "The rain is clearing right around sunset — light hitting the underside "
+                "of a departing storm is as good as skies get.",
+            ))
+        elif dominant == "horizon_band" and dominant_score >= 25.0:
+            candidates.append((
+                dominant_score + 5.0,
+                "Heavy cloud overhead, but it is open to the west — expect a bright band "
+                "of colour low down, under the deck.",
+            ))
+        elif dominant == "crepuscular" and dominant_score >= 30.0:
+            candidates.append((
+                dominant_score + 5.0,
+                "Broken cloud with the sun still up — watch for shafts of light rather "
+                "than colour.",
+            ))
+
+        # A second mechanism running is worth saying: it is what separates a
+        # merely good evening from a memorable one.
+        active = sorted((v for v in paths.values() if v >= 30.0), reverse=True)
+        if len(active) >= 2 and active[1] >= 0.6 * active[0]:
+            candidates.append((
+                40.0,
+                "More than one thing is going on in the sky tonight, which usually means "
+                "the view keeps changing — it is worth staying out for a while.",
+            ))
+
+        # -----------------------------------------------------------------
         # Cloud Quality reasons
         # -----------------------------------------------------------------
         cq = breakdown.cloud_quality_score

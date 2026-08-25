@@ -208,7 +208,7 @@ function HomeContent() {
             bestPoint={prediction.best_window_point}
             sunsetTime={prediction.sunset_time}
             cloudHighPct={prediction.weather_summary.cloud_high_pct}
-            twilightGradient={prediction.physics_component_breakdown.twilight_gradient_score}
+            dominantPathway={prediction.physics_component_breakdown.dominant_pathway}
           />
 
           <EvidenceDrawer prediction={prediction} />

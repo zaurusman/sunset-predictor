@@ -38,6 +38,22 @@ interface Gate {
 /** Below this a gate is worth surfacing; above it, it isn't doing anything. */
 const GATE_VISIBLE_BELOW = 0.97;
 
+/**
+ * Human-readable name per pathway. Mirrors PATHWAY_LABELS in the scoring
+ * engine — a sunset can be beautiful in several unrelated ways, and the score
+ * alone does not tell you which one tonight is.
+ */
+const PATHWAY_LABELS: Record<string, string> = {
+  lit_cloud: "Lit clouds",
+  twilight_gradient: "Clear-sky gradient",
+  crepuscular: "Sun rays",
+  breaking_storm: "Breaking storm",
+  horizon_band: "Band under the cloud",
+};
+
+/** Below this a pathway isn't really happening; listing it would be noise. */
+const PATHWAY_VISIBLE_ABOVE = 12;
+
 function gatesFrom(breakdown: PhysicsBreakdown): Gate[] {
   const gates: Gate[] = [];
 
@@ -65,6 +81,10 @@ function gatesFrom(breakdown: PhysicsBreakdown): Gate[] {
 export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProps) {
   const isDark = useIsDark();
   const gates = gatesFrom(breakdown);
+
+  const pathways = Object.entries(breakdown.pathway_scores ?? {})
+    .filter(([, v]) => v >= PATHWAY_VISIBLE_ABOVE)
+    .sort((a, b) => b[1] - a[1]);
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -98,6 +118,33 @@ export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProp
           </div>
         );
       })}
+
+      {pathways.length > 0 && (
+        <div className="flex flex-col gap-2 pt-1 border-t border-gray-200 dark:border-slate-700/60">
+          <span className="text-gray-600 dark:text-slate-400 text-[11px] uppercase tracking-wider font-semibold">
+            Ways tonight could be beautiful
+          </span>
+          {pathways.map(([key, value]) => {
+            const isDominant = key === breakdown.dominant_pathway;
+            return (
+              <div key={key} className="flex items-baseline gap-2">
+                <span
+                  className={
+                    isDominant
+                      ? "text-sm font-semibold text-gray-900 dark:text-slate-100"
+                      : "text-sm text-gray-600 dark:text-slate-400"
+                  }
+                >
+                  {PATHWAY_LABELS[key] ?? key}
+                </span>
+                <span className="flex-1 text-xs text-gray-600 dark:text-slate-400 tabular-nums text-right">
+                  {Math.round(value)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {gates.length > 0 && (
         <div className="flex flex-col gap-2 pt-1 border-t border-gray-200 dark:border-slate-700/60">

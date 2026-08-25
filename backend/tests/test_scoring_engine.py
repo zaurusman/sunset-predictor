@@ -592,7 +592,11 @@ def test_afterglow_blocked_by_overcast():
     engine = ScoringEngine()
     pre  = engine.cloud_quality_score(70.0, 30.0, 60.0, 90.0, sun_elevation_deg=+2.0)
     post = engine.cloud_quality_score(70.0, 30.0, 60.0, 90.0, sun_elevation_deg=-3.0)
-    assert post == pre, (
+    # Not exact equality: with the sun still up, an overcast sky can score a
+    # little on the crepuscular pathway, which is a different mechanism and is
+    # allowed to vary with elevation. What must not happen is a RISE after
+    # sunset, which is what an afterglow boost would look like.
+    assert post <= pre, (
         f"Overcast → no afterglow boost, but got {post:.1f} vs {pre:.1f}"
     )
 

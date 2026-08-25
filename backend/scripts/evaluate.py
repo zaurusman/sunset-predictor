@@ -101,6 +101,8 @@ async def collect(
         finals: list[float] = []
         per_component: dict[str, list[float]] = {c: [] for c in COMPONENTS}
         corridor_values: list[float] = []
+        pathway_wins: dict[str, int] = {}
+        pathway_best: dict[str, float] = {}
 
         for d, snaps in windows:
             samples = corridor_map.get(d, [])
@@ -121,6 +123,15 @@ async def collect(
             # made the component table look broken when it was just measuring
             # the wrong moment.
             best = max(results, key=lambda r: r.physics_score)
+            # Which route to beauty carried the evening. If one pathway wins
+            # nearly always, the model has collapsed back to a single recipe
+            # however many functions it contains; if one never wins, it is
+            # dead code pretending to be coverage.
+            winner = engine.dominant_pathway(best.pathways)
+            if winner:
+                pathway_wins[winner] = pathway_wins.get(winner, 0) + 1
+            for k, v in (best.pathways or {}).items():
+                pathway_best[k] = max(pathway_best.get(k, 0.0), v)
             for c in COMPONENTS:
                 per_component[c].append(getattr(best, c))
             if best.light_corridor is not None:
@@ -140,6 +151,8 @@ async def collect(
         "calibrated": calibrated,
         "components": per_component,
         "corridor": corridor_values,
+        "pathway_wins": pathway_wins,
+        "pathway_best": pathway_best,
         "weights": engine._weights,
     }
 
@@ -192,6 +205,23 @@ def report(result: dict) -> list[str]:
         cv = result["corridor"]
         print(f"  light corridor: mean={st.mean(cv):.2f}  min={min(cv):.2f}  "
               f"days below 0.6: {sum(1 for v in cv if v < 0.6) * 100 / len(cv):.0f}%")
+
+    wins = result.get("pathway_wins") or {}
+    if wins:
+        print("\n  pathway            wins   best seen")
+        total_wins = sum(wins.values()) or 1
+        for k in sorted(
+            set(wins) | set(result.get("pathway_best") or {}),
+            key=lambda k: -wins.get(k, 0),
+        ):
+            share = wins.get(k, 0) * 100 / total_wins
+            print(f"  {k:18s} {share:5.1f}%   {(result['pathway_best'] or {}).get(k, 0.0):6.1f}")
+        top = max(wins.values()) * 100 / total_wins
+        if top > 92.0:
+            failures.append(
+                f"{name}: one pathway wins {top:.0f}% of evenings — the model has "
+                f"collapsed back to a single recipe"
+            )
 
     # Per-component variance share — the diagnostic that found the dead weight.
     print("\n  component        mean     sd   weight   variance share   pinned@100")

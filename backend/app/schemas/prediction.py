@@ -79,6 +79,18 @@ class PhysicsBreakdown(BaseModel):
         description="Clear-sky twilight gradient score (0-100), already folded into cloud_quality_score.",
     )
 
+    # Every independent route to a beautiful sunset, scored on its own terms,
+    # plus whichever one is carrying tonight. The UI needs the winner as much
+    # as it needs the number: it decides what to look for and when.
+    pathway_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-pathway colour scores (0-100): lit_cloud, twilight_gradient, crepuscular, breaking_storm, horizon_band.",
+    )
+    dominant_pathway: Optional[str] = Field(
+        default=None,
+        description="Key of the highest-scoring pathway, or None when no pathway is active.",
+    )
+
     light_corridor_factor: Optional[float] = Field(
         default=None, ge=0, le=1,
         description=(
