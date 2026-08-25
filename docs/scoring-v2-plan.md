@@ -6,14 +6,15 @@ Written 2026-08-25.
 
 | Phase | State |
 |---|---|
-| 0 — Measuring stick | **Mostly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with their raw inputs; one-tap UI on the verdict card. `scripts/evaluate.py` is the committed harness — distribution stats, guardrails, and label correlation. Webcam labels not started. |
+| 0 — Measuring stick | **Mostly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with their raw inputs; one-tap UI on the verdict card, usable for any date up to a year back. `scripts/evaluate.py` is the committed harness — distribution stats, guardrails, and label correlation. Webcam labels not started. **One real label exists**, so accuracy remains unmeasured. |
 | 1 — Neutralise dead weight | **Done.** Horizon and precipitation are now multiplicative gates, not weighted components; weights are 0.60/0.25/0.15. |
 | 2 — Light corridor | **Done.** Wired into predict, forecast and heatmap. |
 | 3 — Aerosol + column moisture | **Done.** Aerosol response is monotone decreasing (Corfidi); moisture scores the water column (TCWV); archive visibility is no longer invented; measured AOD now covers historical days too. Moisture's variance share went 2.8-5.0 % → 16.3-18.2 %. |
-| 4 — Earth-shadow afterglow timing | Not started |
-| 5 — Calibrate the scale | **Done.** Displayed score is a percentile against local climatology; band shares are fixed by construction. |
+| 3.5 — Beauty is plural | **Done.** Unplanned; added after user feedback. Colour is scored as five independent pathways combined by soft-max, not one weighted recipe. See Part 4. |
+| 4 — Earth-shadow afterglow timing | **Partly.** The clear-sky pathway peaks on real solar-depression geometry. Per-layer shadow-height illumination — the part that deletes tuned constants — is still the −3°/σ2° bell. |
+| 5 — Calibrate the scale | **Done, then partly reversed.** Percentile display shipped, was measured, and was replaced: the score is now the raw physics score, with the seasonal percentile shown beneath it as context. See "Why percentile display was reversed". |
 | 6 — Make ML shelving explicit | **Done.** `ML_BLEND_ALPHA = 1.0`, load-time quality gate, artifact moved to `data/dead/`. |
-| 7 — Better inputs (ICON, ensemble confidence) | Not started |
+| 7 — Better inputs (ICON, ensemble confidence) | Not started — and the next phase to do, because it is the only one left that human labels cannot adjudicate. |
 
 **Measured effect of Phase 2** — same one-year climatology as Part 2 below,
 scored with and without the corridor:
@@ -80,6 +81,10 @@ optional polish; it is a prerequisite for putting Phase 1 in front of users.
 
 ### Phase 5 result: band shares are now identical across climates
 
+> **Superseded.** This section records what percentile display achieved and is
+> kept because the measurement is real. The display was later changed to an
+> absolute score for the reason given in the section after it.
+
 Verified with `scripts/evaluate.py --days 365`:
 
 ```
@@ -110,7 +115,63 @@ Phase 3's column moisture is what gives that weight something real to measure.
 
 ---
 
+### Why percentile display was reversed
+
+Percentile display has a failure mode that only shows once the physics starts
+improving: **it is self-normalising.** A fix that makes the engine more right
+about a *kind* of evening lifts every evening of that kind, so the rank of any
+one of them barely moves.
+
+Measured, on a real evening the user had rated by eye at roughly 75/100. The
+horizon-strip fix (near-field blocking, commit `14a00eb`) raised its raw score
+from 48.9 to 57.4 — a substantial, correct improvement. Its displayed score went
+**30.9 → 30.6**. The improvement was invisible because it applied to every other
+clear Tel Aviv evening too.
+
+That is fatal for a model still being tuned: the number a user rates against
+cannot be one that hides the effect of tuning. It also makes the score answer
+the wrong question. A user glancing at the app wants "how good will the sky be",
+not "how does tonight compare with the other 364 evenings here".
+
+So:
+
+- **The displayed score is the raw physics score.** `SCORE_THRESHOLDS` are
+  absolute again — 85 / 72 / 55 / 38 — derived from the pooled raw distribution
+  across the three cities, not hand-picked, and deliberately *not* equal-frequency.
+  `GO_OUTSIDE_THRESHOLD = 75.0`.
+- **The percentile survives as context**, shown beneath the number, and is now
+  **seasonal**: ranked against evenings within ±45 days of the same day of year
+  (`SEASON_WINDOW_DAYS`, wrapping at New Year, falling back to the full curve
+  below `MIN_SEASONAL_SAMPLES`). This resolves the open question Phase 5 left —
+  the app can now say "better than 51 % of August evenings here" instead of
+  reading "Poor" for seven straight late-August days.
+
+Band shares are consequently no longer identical across climates, **which is the
+point**:
+
+```
+                 Poor    Good    Epic   go-outside
+TelAviv          4.9%   53.2%    1.6%      14.0%
+London          25.5%   31.0%    2.5%      20.3%
+SanFrancisco    21.6%   31.0%    6.6%      23.3%
+```
+
+Tel Aviv genuinely almost never has a bad evening and rarely a spectacular one;
+London and San Francisco have both. Forcing those three climates to the same
+histogram was an artefact of the display, not a property of their skies.
+
+**Consequence for the remaining phases:** Phases 4 and 7 sharpen the raw score.
+Under percentile display their effect would have been largely absorbed. It will
+now show.
+
+---
+
 ## Part 1 — What the model does today
+
+> **As of 2026-08-25, before any of this plan landed.** Parts 1 and 2 are the
+> frozen baseline the diagnosis was made against; they are deliberately not
+> updated as phases complete. For the current engine, read the module docstring
+> in `scoring_engine.py` and Part 4 below.
 
 `ScoringEngine` (`backend/app/services/scoring_engine.py`) scores four
 snapshots around sunset (−15m, sunset, +15m, +30m) and aggregates them.
@@ -440,14 +501,19 @@ were not in the plan:
   the number stays plausible. The cache key now carries `SCALE_VERSION`, and
   `REFERENCE_QUANTILES` has a regenerate-me note for the same reason.
 
-**Open question this surfaced.** Calibration ranks an evening against the whole
-year, so a seasonal low reads as a run of "Poor" days — late-August Tel Aviv is
-currently seven straight. That is physically right (Mediterranean summer is
-hazy and cloudless; the drama is in winter fronts) but may be the wrong product
-answer. Ranking within a seasonal window instead would say "good for August".
-Not changed here — it is a judgement call, not a bug.
+**Open question this surfaced — since resolved.** Calibration ranked an evening
+against the whole year, so a seasonal low read as a run of "Poor" days —
+late-August Tel Aviv was seven straight. That is physically right (Mediterranean
+summer is hazy and cloudless; the drama is in winter fronts) but was the wrong
+product answer. Ranking now happens within a ±45-day seasonal window, and the
+rank is context rather than the headline number. See "Why percentile display was
+reversed".
 
 ### Phase 4 — Real geometry for afterglow timing
+
+**Partly done.** The clear-sky pathway (Part 4) already peaks on real solar
+depression rather than a fitted curve. What remains is the per-layer part below,
+which is the half that deletes tuned constants.
 
 - Replace the −3°/σ2° bell with the Earth-shadow screening height
   `h = (R+Hs)/cos(d) − R`, `Hs ≈ 3 km`.
@@ -500,8 +566,22 @@ as a fresh decision with its own evidence, not a step this plan schedules.
 
 ## Suggested order
 
-Phase 0 → Phase 6 (the safety half) → Phase 1 → Phase 2 → Phase 3 → Phase 4 →
-Phase 5 → Phase 7.
+As planned: Phase 0 → Phase 6 (the safety half) → Phase 1 → Phase 2 → Phase 3 →
+Phase 4 → Phase 5 → Phase 7.
+
+As actually executed: 0 → 6 → 1 → 2 → 5 → 3 → **3.5** → 5-revised → (4, 7
+remaining). Phase 5 moved earlier because Phase 1 deflated the scale and left the
+category labels meaningless in the meantime. Phase 3.5 was not in the plan at
+all — it came from a user photograph of a cloudless Tel Aviv sunset that the
+engine scored as a failure.
+
+**Remaining order, and why:** Phase 7 next, because ensemble spread is the only
+outstanding item that human labels cannot adjudicate — it replaces an invented
+confidence number with a measured one. Phase 4 after ~15 labels exist, because it
+is a tuning phase, and tuning against one label is fitting to noise. An earlier
+over-tune of the clear-sky ceiling (raising it to 95, which pushed Tel Aviv's p50
+to 80 and p90 to 87) was caught only by a distribution guardrail, not by
+judgement.
 
 Phase 6 is a five-minute change that makes an already-made decision permanent,
 so it goes early and then stops being a topic. Phase 2 is the largest accuracy
@@ -513,6 +593,100 @@ calibration, not from learning.** That is a deliberate consequence of the ML
 attempt having already failed.
 
 ---
+
+## Part 4 — Beauty is plural (Phase 3.5, unplanned)
+
+### Where this came from
+
+Not from the diagnosis. It came from a photograph: a Tel Aviv beach sunset on
+2026-08-23, cloudless, the whole sky in colour bands, which the engine scored
+30.9. The user's note was that summer sunsets there *are* beautiful, "they just
+look different and mostly with no clouds", and then, decisively:
+
+> don't try to optimize to a certain combination of params
+
+That is an architectural objection, not a tuning request. The engine had one
+notion of a good sky — lit cloud, ideally mid/high, ideally 40–70 % cover — and
+everything else was scored as a deficient version of it. A cloudless sky was not
+a different kind of evening; it was a failed one.
+
+### What replaced it
+
+`cloud_quality` is no longer a formula. It is the combination of five
+**pathways**, each scored on its own terms, each a genuine physical route to a
+coloured sky:
+
+| Pathway | What it is | Ceiling |
+|---|---|---|
+| `lit_cloud` | The classic: underlit mid/high cloud | 100 |
+| `twilight_gradient` | Clear-sky colour banding — Belt of Venus, anti-twilight arch; needs clean, dry air and an open horizon | 78 |
+| `crepuscular` | Sun rays through broken cloud | 62 |
+| `breaking_storm` | Cloud clearing fast at sunset — the rarest and most dramatic | 96 |
+| `horizon_band` | A lit strip beneath an otherwise solid deck | 58 |
+
+The ceilings are not equal, and shouldn't be: a breaking storm can be the best
+sunset of the year, a band under a deck is a pleasant surprise. Combination is
+**soft-max, not weighted average**:
+
+```python
+best = max(scores)
+secondary = sum(all others) / 100
+lift = MULTI_PATHWAY_LIFT * min(secondary, 1.5) * (1 - best / 100)
+score = clamp(best + lift)
+```
+
+The best route carries the evening; other active routes lift it, and the lift
+shrinks as the best score approaches its ceiling. An average would have done the
+opposite — punished a sky that was spectacular in exactly one way, which is what
+most spectacular skies are.
+
+### Why this is not just five more tuned constants
+
+The guardrail is a **win-distribution check** in `scripts/evaluate.py`: if any
+single pathway wins more than 92 % of evenings, the architecture has collapsed
+back into one recipe wearing five hats. Measured across the three cities:
+
+```
+twilight_gradient  41.7 – 76.2 %
+lit_cloud          19.5 – 36.5 %
+crepuscular         3.0 – 14.9 %
+breaking_storm      0.3 –  1.1 %
+horizon_band        1.1 –  7.3 %
+```
+
+Different climates are carried by different pathways, which is the claim the
+architecture makes and the thing that would have been invisible under a single
+formula.
+
+The winner is also **exposed to the UI** (`dominant_pathway`), because it changes
+the advice as much as the score does: a gradient evening peaks later than a
+lit-cloud one, and you look at a different part of the sky.
+
+### Known weaknesses
+
+- **`crepuscular` is the weakest.** Cloud fraction is a poor proxy for
+  *brokenness* — 50 % cover can be one solid sheet over half the sky or a
+  hundred gaps. This is a data problem, not a tuning problem; it needs a
+  texture or variance field the API does not expose.
+- **`breaking_storm` needed rescuing once.** Five sub-unit factors multiplied
+  together capped it at 27 against a ceiling of 96, so it never won an evening.
+  The data was there (16 candidate evenings in 121 London days, with cloud
+  trends of −69 % and −76 %); the arithmetic was wrong. Now a geometric mean
+  over three evidence factors. **Multiplication is for gates; a geometric mean
+  is for accumulating evidence.**
+- **`horizon_band` silently assumed an open corridor.** The corridor factor
+  defaulted to 1.0 when unmeasured, which for a pathway *defined* by light
+  reaching under a deck is the one default guaranteed to be wrong. Now
+  `Optional[float]`, scoring 0 without a measurement.
+
+### The near-field fix that came out of the same evening
+
+Scoring the corridor at ~340 km answers "is light reaching the cloud above me".
+It does not answer "what does the strip of horizon I am looking at look like" —
+that strip is 30–150 km away. Adding a near-field reading of the corridor
+samples already being fetched (`NEAR_FIELD_MAX_KM = 200`) took that evening from
+48.9 to 57.4 raw. It is also what exposed the self-normalising percentile
+problem, because the displayed score moved 30.9 → 30.6.
 
 ## Sources
 

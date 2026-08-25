@@ -119,29 +119,28 @@ SCORE_THRESHOLDS: list[tuple[float, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Percentile → displayed score calibration
+# Percentile → rank score (NOT the display path — kept for analysis)
 # ---------------------------------------------------------------------------
 #
-# The displayed 0-100 is a RANK against the location's own history, not the raw
-# physics score. Raw scores are not comparable between places: the bottom decile
-# is 42.9 in Tel Aviv against 29.6 in London, because Tel Aviv barely gets the
-# blocked-corridor evenings London does. Fixed cutoffs on that scale meant
-# "Epic" fired on 10-15 % of evenings in one city while "Decent" covered 75 %
-# in another.
+# The displayed 0-100 used to be a RANK against the location's own history.
+# That was reversed: percentile display is SELF-NORMALISING, so a fix that makes
+# the engine more right about a whole kind of evening lifts every evening of
+# that kind and moves none of their ranks. Measured — the near-field horizon fix
+# took one evening's raw score 48.9 → 57.4 while its displayed score went
+# 30.9 → 30.6. A number that cannot show the effect of an improvement is the
+# wrong number to tune against. See docs/scoring-v2-plan.md, "Why percentile
+# display was reversed".
 #
-# Anchoring the bands to percentiles fixes the share of evenings in each band BY
-# CONSTRUCTION, in every climate. The shares below are a product judgement about
-# what a daily-glance app should say, not a physical claim — they are the one
-# place that judgement is expressed, and the only place to change it:
+# The percentile now appears beneath the score as SEASONAL context ("better than
+# 51 % of August evenings here"), and the anchors below survive only because
+# scripts/evaluate.py uses them to report what a purely rank-based scale would
+# have shown. They still document the intended shape of a rarity scale:
 #
 #     Poor    bottom 30 %   "don't bother"
 #     Decent  next   38 %   "ordinary evening"
 #     Good    next   20 %   "nice if you're out"
 #     Great   next    9 %   "worth stepping outside for"
 #     Epic    top     3 %   "roughly ten nights a year"
-#
-# GO_OUTSIDE_THRESHOLD = 70 therefore means "the top ~7 % of evenings here",
-# which is a definition rather than a knob.
 CALIBRATION_ANCHORS: list[tuple[float, float]] = [
     # (cumulative percentile, displayed score at that percentile)
     (0.00,   0.0),

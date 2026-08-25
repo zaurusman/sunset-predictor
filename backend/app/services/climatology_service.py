@@ -9,10 +9,16 @@ not get the blocked-corridor evenings London does, and its corridor drops below
 therefore mean different things in different cities, which is how "Epic" ended up
 firing on 10-15 % of evenings in one place and "Decent" on 75 % in another.
 
-So the displayed score is a PERCENTILE against the location's own history:
-"how does tonight rank among evenings here?" That makes the bands mean the same
-thing everywhere, and turns GO_OUTSIDE_THRESHOLD from a knob into a definition
-(the top ~7 % of evenings).
+So this service ranks tonight against the location's own history: "how does
+tonight compare with evenings here?" That rank was briefly the displayed score
+itself; it is now shown BENEATH the absolute score as context, and the ranking
+window is SEASONAL (SEASON_WINDOW_DAYS below), so late August is compared with
+late August rather than with December fronts.
+
+Why the display reverted to the raw score: percentile display is
+self-normalising. Improving the physics for a whole kind of evening lifts every
+evening of that kind, leaving each one's rank where it was — measured at
+raw 48.9 → 57.4 against displayed 30.9 → 30.6. See docs/scoring-v2-plan.md.
 
 COST AND COLD START
 -------------------
