@@ -14,15 +14,20 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health, predict, forecast, heatmap, model_info, geocode, submit
+from app.api import (
+    health, predict, forecast, heatmap, model_info, geocode, submit, notifications,
+)
 from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
 from app.models.ml_model import MLModel
 from app.models.model_registry import ModelRegistry
 from app.services.astronomy_service import AstronomyService
 from app.services.explanation_engine import ExplanationEngine
+from app.services.notification_dispatcher import NotificationDispatcher
 from app.services.prediction_service import PredictionService
+from app.services.push_service import PushService
 from app.services.scoring_engine import ScoringEngine
+from app.services.subscription_store import SubscriptionStore
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
 
@@ -86,10 +91,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
     )
 
+    # Notifications
+    push_service = PushService(settings=settings)
+    subscription_store = SubscriptionStore(path=settings.SUBSCRIPTIONS_PATH)
+    notification_dispatcher = NotificationDispatcher(
+        store=subscription_store,
+        push_service=push_service,
+        prediction_service=prediction_service,
+        astro_service=astro_service,
+    )
+    logger.info(
+        "Push notifications: configured=%s, dispatch_secret_set=%s, "
+        "store=%s (%d subscriber(s))",
+        push_service.is_configured,
+        bool(settings.NOTIFY_DISPATCH_SECRET),
+        settings.SUBSCRIPTIONS_PATH,
+        subscription_store.count(),
+    )
+
     # Attach to app state for injection via Request
     app.state.settings = settings
     app.state.prediction_service = prediction_service
     app.state.ml_model = ml_model
+    app.state.astro_service = astro_service
+    app.state.push_service = push_service
+    app.state.subscription_store = subscription_store
+    app.state.notification_dispatcher = notification_dispatcher
 
     logger.info("All services initialised. ML model loaded: %s", ml_model.is_loaded())
 
@@ -133,6 +160,7 @@ def create_app() -> FastAPI:
     app.include_router(model_info.router)
     app.include_router(geocode.router)
     app.include_router(submit.router)
+    app.include_router(notifications.router)
 
     return app
 

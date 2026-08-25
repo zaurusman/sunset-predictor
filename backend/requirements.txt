@@ -26,6 +26,7 @@ praw==7.7.1
 python-dotenv==1.0.1
 python-multipart==0.0.20  # multipart/form-data for file uploads
 resend==2.7.0             # transactional email API
+pywebpush==2.0.3          # Web Push (VAPID) delivery to browser push services
 
 # ── Testing ──────────────────────────────────────────────────────────────────
 pytest==8.3.4

@@ -1,0 +1,97 @@
+name: Plan sunset dispatch schedule
+
+# Asks the backend which UTC hours actually need a dispatch, and commits the
+# answer to .github/dispatch-schedule.json.
+#
+# WHY THIS EXISTS: Render's free tier spins a service down after 15 minutes
+# idle, so every wake-up costs ~15 instance-minutes whether or not there was
+# anything to do. Polling every 20 minutes holds the service up ~18 hours a
+# day — about 540 of the 750 free instance-hours per month, spent before a
+# single real visitor arrives.
+#
+# Sunset times are known a day ahead, so the hours that matter are computable.
+# The dispatch workflow reads the committed file LOCALLY and skips the backend
+# entirely outside those hours. This planner is the only unconditional wake-up,
+# once a day.
+#
+# The commit doubles as repository activity, which is what keeps GitHub from
+# disabling scheduled workflows after 60 days of inactivity.
+
+on:
+  schedule:
+    # 03:00 UTC — the small hours in every timezone we are likely to serve, so
+    # planning never collides with a real dispatch window.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sunset-schedule
+  cancel-in-progress: false
+
+permissions:
+  contents: write # to commit the regenerated schedule
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the schedule from the backend
+        env:
+          API_URL: ${{ secrets.BACKEND_URL }}
+          DISPATCH_SECRET: ${{ secrets.NOTIFY_DISPATCH_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_URL:-}" ] || [ -z "${DISPATCH_SECRET:-}" ]; then
+            echo "::error::BACKEND_URL and NOTIFY_DISPATCH_SECRET must be set as repository secrets."
+            exit 1
+          fi
+
+          mkdir -p .github
+
+          # A sleeping service takes ~1 minute to wake, hence the long timeout
+          # and the retries.
+          curl --silent --show-error --fail \
+            --location "$API_URL/notifications/schedule" \
+            --header "X-Dispatch-Secret: $DISPATCH_SECRET" \
+            --max-time 180 --retry 3 --retry-delay 20 --retry-all-errors \
+            --output schedule.raw.json
+
+          python3 - <<'PY'
+          import json
+
+          with open("schedule.raw.json") as f:
+              data = json.load(f)
+
+          # Store only what the dispatch job needs to make its decision.
+          # computed_at is deliberately excluded: it would change on every run
+          # and produce a daily commit that says nothing.
+          out = {
+              "cron_hours": data.get("cron_hours", []),
+              "subscriber_count": data.get("subscriber_count", 0),
+          }
+          with open(".github/dispatch-schedule.json", "w") as f:
+              json.dump(out, f, indent=2)
+              f.write("\n")
+
+          print("subscribers:", out["subscriber_count"])
+          print("hours (UTC):", out["cron_hours"] or "(none — dispatch will stay asleep)")
+          PY
+
+          rm -f schedule.raw.json
+
+      - name: Commit if the schedule moved
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .github/dispatch-schedule.json; then
+            echo "Schedule unchanged — nothing to commit."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/dispatch-schedule.json
+          git commit -m "chore: refresh sunset dispatch schedule [skip ci]"
+          git push
