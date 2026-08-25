@@ -84,7 +84,7 @@ export default function FirstRun({ onLocationSelect }: FirstRunProps) {
           <span className="h-px flex-1 bg-gray-200 dark:bg-slate-700" />
         </div>
 
-        <LocationSearch onLocationSelect={onLocationSelect} />
+        <LocationSearch onLocationSelect={onLocationSelect} showGeolocate={false} />
 
         {error && <p className="text-sm text-red-700 dark:text-red-400">{error}</p>}
       </div>
@@ -109,8 +109,8 @@ export default function FirstRun({ onLocationSelect }: FirstRunProps) {
           ))}
         </div>
         <p className="text-gray-700 dark:text-slate-300 text-xs leading-relaxed text-pretty">
-          Most evenings land in the 40s and 50s. Anything past 65 is worth changing your
-          plans for.
+          Most evenings land in the 40s and 50s. Past 70, Afterglow tells you it&rsquo;s
+          worth changing your plans for.
         </p>
       </div>
     </div>

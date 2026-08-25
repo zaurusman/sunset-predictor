@@ -149,8 +149,8 @@ export default function ViewingCurve({
               aria-pressed={isActive}
               className={
                 isActive
-                  ? "flex flex-col items-center gap-0.5 py-1.5 rounded-lg bg-orange-50 dark:bg-orange-500/10 text-orange-700 dark:text-orange-300"
-                  : "flex flex-col items-center gap-0.5 py-1.5 rounded-lg text-gray-600 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+                  ? "flex flex-col items-center justify-center gap-0.5 min-h-[44px] rounded-lg bg-orange-50 dark:bg-orange-500/10 text-orange-700 dark:text-orange-300"
+                  : "flex flex-col items-center justify-center gap-0.5 min-h-[44px] rounded-lg text-gray-600 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white transition-colors"
               }
             >
               <span className="text-xs font-semibold tabular-nums">{clockFor(p.point)}</span>

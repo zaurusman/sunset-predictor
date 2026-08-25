@@ -353,12 +353,18 @@ def test_confidence_in_range(scoring_engine, ideal_weather):
 
 
 def test_go_outside_threshold():
-    """go_outside should be True when final_score >= 45."""
+    """go_outside should be True only from GO_OUTSIDE_THRESHOLD upward."""
     engine = ScoringEngine()
-    above = engine.score_window([("sunset", 50.0)])
-    below = engine.score_window([("sunset", 40.0)])
+    above = engine.score_window([("sunset", 75.0)])
+    below = engine.score_window([("sunset", 65.0)])
     assert above.go_outside is True
     assert below.go_outside is False
+
+
+def test_go_outside_excludes_an_average_evening():
+    """A mid-50s sky is ordinary here, and must not read as worth a trip."""
+    engine = ScoringEngine()
+    assert engine.score_window([("sunset", 55.0)]).go_outside is False
 
 
 # ---------------------------------------------------------------------------

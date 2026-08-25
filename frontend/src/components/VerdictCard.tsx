@@ -24,9 +24,15 @@ function headlineFor(prediction: PredictResponse, targetDate: string): string {
   const go = prediction.go_outside_recommendation;
   const today = new Date().toISOString().slice(0, 10);
 
-  if (targetDate > today) return go ? "Looking promising" : "Not looking great";
+  if (targetDate > today) return go ? "Looking promising" : "Nothing special yet";
   if (targetDate < today) return `A ${prediction.category.toLowerCase()} one`;
-  return go ? "Worth heading out" : "Not tonight";
+  if (go) return "Worth heading out";
+
+  // The go-outside bar (70) sits above the Great band (65), so a 65–69 evening
+  // is genuinely nice without being worth changing plans for. A flat "Not
+  // tonight" here would contradict the green Great badge beside it.
+  if (prediction.beauty_score_0_100 >= 50) return "Worth a glance";
+  return "Not tonight";
 }
 
 const RADIUS = 27;

@@ -55,7 +55,8 @@ export default function LocationSheet({
         role="dialog"
         aria-modal="true"
         aria-label="Choose a location"
-        className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-4 pt-3 pb-8 flex flex-col gap-4 shadow-2xl animate-slide-up"
+        className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-4 pt-3 flex flex-col gap-4 shadow-2xl animate-slide-up"
+        style={{ paddingBottom: "max(2rem, env(safe-area-inset-bottom))" }}
       >
         <div className="flex items-center gap-3">
           <h2 className="flex-1 text-lg font-bold tracking-tight text-gray-900 dark:text-white">
@@ -64,7 +65,7 @@ export default function LocationSheet({
           <button
             onClick={onClose}
             aria-label="Close"
-            className="w-8 h-8 rounded-full flex items-center justify-center text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
+            className="w-11 h-11 flex-shrink-0 rounded-full flex items-center justify-center text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
           >
             <X size={16} />
           </button>

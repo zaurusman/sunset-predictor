@@ -55,8 +55,11 @@ SCORE_THRESHOLDS: list[tuple[float, str]] = [
     (0, "Poor"),
 ]
 
-# Score at which we recommend going outside
-GO_OUTSIDE_THRESHOLD = 45.0
+# Score at which we recommend going outside.
+# This is the bar for "worth changing your plans for", not "better than
+# average" — most evenings land in the 40s and 50s, so a 45 recommended
+# going outside on a thoroughly ordinary sky.
+GO_OUTSIDE_THRESHOLD = 70.0
 
 
 @dataclass

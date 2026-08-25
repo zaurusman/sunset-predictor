@@ -40,7 +40,11 @@ export default function AppNav({ location, active, onChangeLocation }: AppNavPro
   return (
     <div className="flex flex-col gap-3 mb-5">
       <div className="flex items-center gap-2">
-        <Link href={hrefFor("/", location)} className="flex-1 min-w-0" aria-label="Afterglow home">
+        <Link
+          href={hrefFor("/", location)}
+          className="flex-1 min-w-0 flex items-center min-h-[44px]"
+          aria-label="Afterglow home"
+        >
           <Image
             src="/logo.png"
             alt="Afterglow"
@@ -55,15 +59,15 @@ export default function AppNav({ location, active, onChangeLocation }: AppNavPro
           (onChangeLocation ? (
             <button
               onClick={onChangeLocation}
-              className="flex items-center gap-1.5 h-8 max-w-[45%] px-2.5 rounded-full bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/50 text-gray-700 dark:text-slate-300 text-xs font-medium hover:border-orange-500/40 transition-colors"
+              className="flex items-center gap-1.5 h-11 max-w-[45%] px-3 rounded-full bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/50 text-gray-700 dark:text-slate-300 text-sm font-medium hover:border-orange-500/40 transition-colors"
             >
               <MapPin size={12} className="flex-shrink-0" />
               <span className="truncate">{location.name}</span>
               <ChevronDown size={12} className="flex-shrink-0 text-gray-400 dark:text-slate-500" />
             </button>
           ) : (
-            <span className="flex items-center gap-1.5 h-8 max-w-[45%] px-2.5 rounded-full bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/50 text-gray-700 dark:text-slate-300 text-xs font-medium">
-              <MapPin size={12} className="flex-shrink-0" />
+            <span className="flex items-center gap-1.5 h-11 max-w-[45%] px-3 rounded-full bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/50 text-gray-700 dark:text-slate-300 text-sm font-medium">
+              <MapPin size={13} className="flex-shrink-0" />
               <span className="truncate">{location.name}</span>
             </span>
           ))}
@@ -81,8 +85,8 @@ export default function AppNav({ location, active, onChangeLocation }: AppNavPro
               aria-current={isActive ? "page" : undefined}
               className={
                 isActive
-                  ? "flex-1 text-center py-2 rounded-lg text-sm font-semibold bg-white dark:bg-slate-800 text-gray-900 dark:text-white shadow-sm"
-                  : "flex-1 text-center py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+                  ? "flex-1 flex items-center justify-center min-h-[44px] rounded-lg text-sm font-semibold bg-white dark:bg-slate-800 text-gray-900 dark:text-white shadow-sm"
+                  : "flex-1 flex items-center justify-center min-h-[44px] rounded-lg text-sm font-medium text-gray-600 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white transition-colors"
               }
             >
               {tab.label}

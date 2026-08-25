@@ -119,7 +119,7 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
       <button
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}
-        className="flex items-center gap-2 px-4 py-2.5 bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-xl text-sm text-gray-600 dark:text-slate-300 hover:text-orange-500 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50 whitespace-nowrap"
+        className="flex items-center gap-2 px-4 min-h-[44px] bg-gray-100/80 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-xl text-sm text-gray-700 dark:text-slate-300 hover:text-orange-600 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors disabled:opacity-50 whitespace-nowrap"
       >
         <Calendar size={14} className="flex-shrink-0" />
         <span>{formatLabel(value)}</span>
