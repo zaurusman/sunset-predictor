@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import ThemeProvider from "@/components/ThemeProvider";
 
@@ -6,6 +6,14 @@ export const metadata: Metadata = {
   title: "Afterglow",
   description: "How beautiful will tonight's sunset be? Get a score, reasons, and the best time to watch.",
   keywords: ["sunset", "weather", "forecast", "beauty score"],
+  appleWebApp: {
+    title: "Afterglow",
+    statusBarStyle: "black-translucent",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#04050A",
 };
 
 export default function RootLayout({
