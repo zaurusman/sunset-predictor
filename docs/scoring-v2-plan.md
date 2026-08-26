@@ -11,7 +11,7 @@ Written 2026-08-25.
 | 2 — Light corridor | **Done.** Wired into predict, forecast and heatmap. |
 | 3 — Aerosol + column moisture | **Done.** Aerosol response is monotone decreasing (Corfidi); moisture scores the water column (TCWV); archive visibility is no longer invented; measured AOD now covers historical days too. Moisture's variance share went 2.8-5.0 % → 16.3-18.2 %. |
 | 3.5 — Beauty is plural | **Done.** Unplanned; added after user feedback. Colour is scored as five independent pathways combined by soft-max, not one weighted recipe. See Part 4. |
-| 4 — Earth-shadow afterglow timing | **Partly.** The clear-sky pathway peaks on real solar-depression geometry. Per-layer shadow-height illumination — the part that deletes tuned constants — is still the −3°/σ2° bell. |
+| 4 — Earth-shadow afterglow timing | **Partly, deliberately.** The clear-sky pathway peaks on real solar-depression geometry. The per-layer shadow-height formula was worked out and checked against 4 real afterglow ratings before writing code — it would score every one of them at zero afterglow. The −3°/σ2° bell stays; see Phase 4 below for why the "more physical" formula was wrong. |
 | 5 — Calibrate the scale | **Done, then partly reversed.** Percentile display shipped, was measured, and was replaced: the score is now the raw physics score, with the seasonal percentile shown beneath it as context. See "Why percentile display was reversed". |
 | 6 — Make ML shelving explicit | **Done.** `ML_BLEND_ALPHA = 1.0`, load-time quality gate, artifact moved to `data/dead/`. |
 | 7 — Better inputs (ICON, ensemble confidence) | **Done.** `icon_seamless` set explicitly within its ~7.5-day honest horizon (verified live, falls back to `auto` beyond it — the model silently returns null there, not an error). Confidence uses real ensemble spread (`cloud_cover_member01…40`) in place of the lead-time guess when a reading exists. |
@@ -511,17 +511,54 @@ reversed".
 
 ### Phase 4 — Real geometry for afterglow timing
 
-**Partly done.** The clear-sky pathway (Part 4) already peaks on real solar
-depression rather than a fitted curve. What remains is the per-layer part below,
-which is the half that deletes tuned constants.
+**Partly done, and the per-layer half was tried and reverted — the geometry
+disagrees with real evidence.**
+
+The clear-sky pathway (Part 4) already peaks on real solar depression rather
+than a fitted curve; that part stands. The per-layer part below was worked out
+in full and checked against real data before writing any code, which is what
+caught the problem:
 
 - Replace the −3°/σ2° bell with the Earth-shadow screening height
   `h = (R+Hs)/cos(d) − R`, `Hs ≈ 3 km`.
 - Per-layer illumination: a layer is lit while the shadow height is below its
-  top. Use `geopotential_height` at pressure levels, or representative heights
-  (low 1 km, mid 4 km, high 9 km) as a first cut.
-- This deletes three tuned constants, and gets "cirrus glows for 20 minutes,
-  stratus for two" for free instead of by hand.
+  top, using representative heights (low 1 km, mid 4 km, high 9 km) — or more
+  precisely, the WMO band each sits in (low 0–2 km, mid 2–7 km, high 5–13 km),
+  giving a smooth ramp through the layer instead of a step.
+
+Worked through numerically: with `Hs = 3 km`, high cloud's illumination
+fraction is 1.0 out to ~1.4° of solar depression, then ramps to 0.0 by ~3.2°.
+That is a hard, fast cutoff — real afterglow is commonly reported to persist
+15–30 minutes past sunset (~4–8° at typical mid-latitude rates), which the old
+Gaussian (peak at −3°, not fully faded until ~6–8°) was already shaped to
+match.
+
+**Then checked against the real evenings on hand, not just literature.** Four
+ratings in `data/ratings.jsonl` are genuine lit-cloud afterglow — high cloud
+78–100 %, rated a human 4 or 5, `observed_moment` "+15m" — with solar depression
+at capture between 3.6° and 4.0°. Under the new formula, high-cloud
+illumination is already ZERO at that depression: the geometry says these real,
+confirmed-beautiful evenings had no afterglow left. The old bell curve scores
+3.6–4.0° at 88–96 % of its peak — it matches the evidence; the physically
+"correct" formula does not.
+
+**Diagnosis, not just a bad constant.** `Hs` is not the problem — no value of
+it reconciles a hard cutoff at ~3° with real afterglow at ~4°+ without also
+breaking the near-sunset behaviour, because the formula is missing a term: it
+computes shadow height directly above the OBSERVER, but the cloud carrying an
+afterglow is typically well toward the sunset azimuth, not overhead — the same
+reason Phase 2's corridor samples 100–400 km upstream rather than the local
+cell. A cloud that far west and that high is, from its own position, still
+some distance from having the sun set on it even after the observer's local
+sun has gone down. Getting this right needs the same distance-toward-sunset
+machinery the corridor already has, not just a taller Earth-shadow term — which
+is a real Phase 4, not a first cut, and isn't attempted here.
+
+The −3°/σ2° bell curve in both `lit_cloud_score` and `afterglow_score`
+therefore stays as-is. Revisit only with either the azimuth-aware version of
+the geometry, or enough afterglow-specific labels (`observed_moment` in
+{"+15m", "+30m"} with real high cloud) to calibrate a replacement against
+evidence rather than derive one from first principles and hope.
 
 ### Phase 5 — Calibrate the scale
 
