@@ -6,7 +6,7 @@ Written 2026-08-25.
 
 | Phase | State |
 |---|---|
-| 0 — Measuring stick | **Mostly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with their raw inputs; one-tap UI on the verdict card, usable for any date up to a year back. `scripts/evaluate.py` is the committed harness — distribution stats, guardrails, and label correlation. Webcam labels not started. **One real label exists**, so accuracy remains unmeasured. |
+| 0 — Measuring stick | **Mostly done.** `POST /rate` + `GET /ratings/stats` collect first-party labels with their raw inputs; one-tap UI on the verdict card, usable for any date up to a year back. `RatingRequest.observed_moment` lets a label say WHICH sampled moment it describes — a sunset-lit-cloud evening and its own afterglow are different pathways on the same calendar date, and a label without this collapsed them into one. `scripts/evaluate.py` is the committed harness — distribution stats, guardrails, and label correlation. Webcam labels not started. **16 labels exist** (15 backdated from photos, EXIF timestamp classified against real sunset time), rho = 0.58 — but 15 of 16 are rated 4-5; the low end is nearly unlabeled and the correlation is not yet trustworthy. |
 | 1 — Neutralise dead weight | **Done.** Horizon and precipitation are now multiplicative gates, not weighted components; weights are 0.60/0.25/0.15. |
 | 2 — Light corridor | **Done.** Wired into predict, forecast and heatmap. |
 | 3 — Aerosol + column moisture | **Done.** Aerosol response is monotone decreasing (Corfidi); moisture scores the water column (TCWV); archive visibility is no longer invented; measured AOD now covers historical days too. Moisture's variance share went 2.8-5.0 % → 16.3-18.2 %. |
@@ -14,7 +14,7 @@ Written 2026-08-25.
 | 4 — Earth-shadow afterglow timing | **Partly.** The clear-sky pathway peaks on real solar-depression geometry. Per-layer shadow-height illumination — the part that deletes tuned constants — is still the −3°/σ2° bell. |
 | 5 — Calibrate the scale | **Done, then partly reversed.** Percentile display shipped, was measured, and was replaced: the score is now the raw physics score, with the seasonal percentile shown beneath it as context. See "Why percentile display was reversed". |
 | 6 — Make ML shelving explicit | **Done.** `ML_BLEND_ALPHA = 1.0`, load-time quality gate, artifact moved to `data/dead/`. |
-| 7 — Better inputs (ICON, ensemble confidence) | Not started — and the next phase to do, because it is the only one left that human labels cannot adjudicate. |
+| 7 — Better inputs (ICON, ensemble confidence) | **Done.** `icon_seamless` set explicitly within its ~7.5-day honest horizon (verified live, falls back to `auto` beyond it — the model silently returns null there, not an error). Confidence uses real ensemble spread (`cloud_cover_member01…40`) in place of the lead-time guess when a reading exists. |
 
 **Measured effect of Phase 2** — same one-year climatology as Part 2 below,
 scored with and without the corridor:
@@ -557,10 +557,31 @@ as a fresh decision with its own evidence, not a step this plan schedules.
 
 ### Phase 7 — Better inputs
 
-- Set `models=icon_seamless` explicitly rather than relying on `auto`.
-- Derive confidence from **ensemble spread** — `cloud_cover_member01…N` at the
-  sunset hour — instead of the hand-built heuristic. Cache aggressively; the
-  ensemble endpoint is heavier than the deterministic one.
+**Done**, with one correction the plan didn't anticipate.
+
+- `models=icon_seamless` is set explicitly — but only within its own honest
+  horizon. Verified live: the model returns null past ~180 hours (~7.5 days)
+  rather than an error, while the app promises forecasts up to 16 days. Pinning
+  the model unconditionally would have silently nulled out the back half of
+  every 16-day forecast. `ICON_SEAMLESS_MAX_DAYS = 7` gates it; requests beyond
+  that fall back to `auto`.
+- Confidence is derived from **ensemble spread** — standard deviation of
+  `cloud_cover_member01…40` at the sunset hour, verified live — replacing the
+  lead-time guess when a reading exists. Split-level members
+  (`cloud_cover_low/mid/high_member*`) turned out to return null for
+  `icon_seamless`; only total `cloud_cover` carries ensemble data, so that's
+  what confidence measures. Lead-time is now purely the fallback for past dates
+  and dates beyond the ensemble's horizon.
+- Batched (`get_ensemble_cloud_spread_map`), mirroring the existing
+  corridor-map pattern: one ensemble request covers a whole forecast's worth of
+  days instead of one call per day, which matters because `forecast()` scores
+  up to 16 days concurrently and the ensemble endpoint is the heaviest one this
+  app calls.
+
+Verified live: today's prediction carries a real ensemble-derived confidence;
+a 10-day forecast shows confidence tapering correctly as days cross the
+7.5-day ensemble horizon into the lead-time fallback (65 → 46 → 40 → 36 across
+the last three days); a 10-day forecast completes in ~1.5s end to end.
 
 ---
 
@@ -569,19 +590,20 @@ as a fresh decision with its own evidence, not a step this plan schedules.
 As planned: Phase 0 → Phase 6 (the safety half) → Phase 1 → Phase 2 → Phase 3 →
 Phase 4 → Phase 5 → Phase 7.
 
-As actually executed: 0 → 6 → 1 → 2 → 5 → 3 → **3.5** → 5-revised → (4, 7
+As actually executed: 0 → 6 → 1 → 2 → 5 → 3 → **3.5** → 5-revised → 7 → (4
 remaining). Phase 5 moved earlier because Phase 1 deflated the scale and left the
 category labels meaningless in the meantime. Phase 3.5 was not in the plan at
 all — it came from a user photograph of a cloudless Tel Aviv sunset that the
-engine scored as a failure.
+engine scored as a failure. Phase 7 moved ahead of Phase 4 deliberately: it was
+the only remaining item that human labels cannot adjudicate, so it didn't have
+to wait for a labelled dataset the way a tuning phase does.
 
-**Remaining order, and why:** Phase 7 next, because ensemble spread is the only
-outstanding item that human labels cannot adjudicate — it replaces an invented
-confidence number with a measured one. Phase 4 after ~15 labels exist, because it
-is a tuning phase, and tuning against one label is fitting to noise. An earlier
-over-tune of the clear-sky ceiling (raising it to 95, which pushed Tel Aviv's p50
-to 80 and p90 to 87) was caught only by a distribution guardrail, not by
-judgement.
+**What's left: Phase 4**, waiting for ~15 labels, because it is a tuning phase
+and tuning against one label is fitting to noise. An earlier over-tune of the
+clear-sky ceiling (raising it to 95, which pushed Tel Aviv's p50 to 80 and p90
+to 87) was caught only by a distribution guardrail, not by judgement — the same
+mistake is easier to make quietly with a real but tiny label set than with
+none at all.
 
 Phase 6 is a five-minute change that makes an already-made decision permanent,
 so it goes early and then stops being a topic. Phase 2 is the largest accuracy
