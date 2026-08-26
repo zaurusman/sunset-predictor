@@ -55,7 +55,7 @@ from app.schemas.weather import WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.climatology_service import _rank_in_sorted
-from app.services.rating_store import dedupe_latest
+from app.services.rating_store import dedupe_latest, label_0_100
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
 from app.utils.math_utils import spearman
@@ -400,8 +400,8 @@ async def report_labels(path: str, horizon_deg: float) -> None:
         )
 
         for rec in latest:
-            r = rec.get("rating")
-            if not isinstance(r, int):
+            r = label_0_100(rec)
+            if r is None:
                 continue
 
             # What the engine said when the rating was taken — kept only to
@@ -443,8 +443,9 @@ async def report_labels(path: str, horizon_deg: float) -> None:
         return
 
     rho = spearman(human, replayed)
-    low = sum(1 for h in human if h <= 2)
-    high = sum(1 for h in human if h >= 4)
+    # On the 0-100 scale, "poor" and "good" are the bottom and top two fifths.
+    low = sum(1 for h in human if h <= 40)
+    high = sum(1 for h in human if h >= 60)
     print(f"  Spearman rho = {rho:.3f}" if rho is not None else "  rho undefined")
     print(f"  {low} poor evenings, {high} good ones")
     if low == 0 or high == 0:

@@ -15,6 +15,7 @@ from fastapi import status as http_status
 
 from app.core.logging import get_logger
 from app.schemas.rating import RatingRequest, RatingResponse, RatingStats
+from app.services.rating_store import band_of, label_0_100
 from app.services.weather_service import WeatherUnavailableError
 from app.utils.math_utils import spearman
 from app.utils.time_utils import utcnow
@@ -86,6 +87,17 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
         "latitude": body.latitude,
         "longitude": body.longitude,
         "location_name": _sanitize(body.location_name),
+        # The canonical label, on the same 0-100 scale the app displays.
+        # Always present; derived from the coarse scale when that is all the
+        # caller had (see RatingRequest.score_0_100).
+        "rating_0_100": body.score_0_100(),
+        # True when the number above was actually chosen on 0-100, rather than
+        # inferred from a five-way tap. Analysis should be able to tell the
+        # difference between a considered 83 and a tap that means "somewhere
+        # in the 70s or 80s".
+        "rating_is_precise": body.rating_0_100 is not None,
+        # The coarse scale, kept for the one-tap UI and for every record
+        # written before rating_0_100 existed.
         "rating": body.rating,
         "notes": _sanitize(body.notes),
         # Which sampled moment this rating actually describes, if known — a
@@ -115,14 +127,14 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
 
     total = await store.append(record)
     logger.info(
-        "Stored rating %d/5 for %s at (%.3f, %.3f); model said %.1f. Total ratings: %d",
-        body.rating, target_date, body.latitude, body.longitude,
+        "Stored rating %.0f/100 for %s at (%.3f, %.3f); model said %.1f. Total ratings: %d",
+        body.score_0_100(), target_date, body.latitude, body.longitude,
         prediction.beauty_score_0_100, total,
     )
 
     return RatingResponse(
         success=True,
-        message=_thanks_message(body.rating, prediction.beauty_score_0_100),
+        message=_thanks_message(body.score_0_100(), prediction.beauty_score_0_100),
         rated_date=target_date,
         predicted_score=prediction.beauty_score_0_100,
         total_ratings=total,
@@ -159,9 +171,13 @@ async def rating_stats(request: Request) -> RatingStats:
     model: list[float] = []
 
     for rec in records:
-        r = rec.get("rating")
-        if isinstance(r, int):
-            histogram[r] = histogram.get(r, 0) + 1
+        label = label_0_100(rec)
+        if label is not None:
+            # Histogram stays on the coarse 1-5 bands: 100 buckets over a
+            # handful of ratings is not a distribution anyone can read, and
+            # the question it answers ("are both ends represented?") is a
+            # question about bands.
+            histogram[band_of(label)] = histogram.get(band_of(label), 0) + 1
         locations.add((round(rec.get("latitude", 0.0), 2), round(rec.get("longitude", 0.0), 2)))
         dates.add(str(rec.get("target_date")))
         # Prefer the score at the specific moment this rating describes — a
@@ -171,8 +187,8 @@ async def rating_stats(request: Request) -> RatingStats:
         pred = rec.get("predicted_score_at_observed_moment")
         if pred is None:
             pred = rec.get("predicted_score")
-        if isinstance(r, int) and isinstance(pred, (int, float)):
-            human.append(float(r))
+        if label is not None and isinstance(pred, (int, float)):
+            human.append(label)
             model.append(float(pred))
 
     rho: Optional[float] = None
@@ -201,11 +217,13 @@ def _sanitize(text: str) -> str:
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text).strip()
 
 
-def _thanks_message(rating: int, predicted: float) -> str:
-    """Acknowledge the rating, and say plainly when the model disagreed."""
-    # Map the 1–5 label onto the 0–100 scale to compare like with like.
-    implied = (rating - 1) / 4.0 * 100.0
-    gap = predicted - implied
+def _thanks_message(rating_0_100: float, predicted: float) -> str:
+    """Acknowledge the rating, and say plainly when the model disagreed.
+
+    Both numbers are already on the same 0-100 scale, so the gap is a direct
+    subtraction rather than a conversion — which is the point of the scale.
+    """
+    gap = predicted - rating_0_100
     if gap > 30:
         return "Noted — the model oversold that one. That's exactly the case it needs to learn."
     if gap < -30:
