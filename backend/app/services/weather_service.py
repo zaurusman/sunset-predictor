@@ -231,7 +231,7 @@ class WeatherService:
             try:
                 sunset_time = self._astro.get_sunset_time(lat, lon, d)
                 snapshot = self._extract_snapshot_for_hour(
-                    weather_data, aq_data, lat, lon, sunset_time
+                    weather_data, aq_data, lat, lon, sunset_time, "forecast"
                 )
                 results.append((d, snapshot))
             except Exception as exc:
@@ -285,18 +285,21 @@ class WeatherService:
             if days_ago <= 7:
                 weather_data = await self._fetch_forecast_raw(lat, lon, days=1, past_days=days_ago + 1)
                 aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
+                data_source = "forecast"
             else:
                 weather_data = await self._fetch_archive_raw(lat, lon, target_date)
                 aq_data = await self._fetch_air_quality_range_raw(
                     lat, lon, target_date, target_date
                 )
+                data_source = "archive"
         else:
             days_ahead = (target_date - today).days + 1
             weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
             aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
+            data_source = "forecast"
 
         snapshots = self._extract_window_snapshots_from_raw(
-            weather_data, aq_data, lat, lon, sunset_time
+            weather_data, aq_data, lat, lon, sunset_time, data_source
         )
         self._cache.set(cache_key, snapshots)
         return snapshots
@@ -336,7 +339,7 @@ class WeatherService:
             try:
                 sunset_time = self._astro.get_sunset_time(lat, lon, d)
                 window_snaps = self._extract_window_snapshots_from_raw(
-                    weather_data, aq_data, lat, lon, sunset_time
+                    weather_data, aq_data, lat, lon, sunset_time, "forecast"
                 )
                 results.append((d, window_snaps))
             except Exception as exc:
@@ -658,8 +661,10 @@ class WeatherService:
                 days_ago = (today - current).days
                 if days_ago <= 7:
                     weather_data, aq_data = recent_weather, recent_aq
+                    data_source = "forecast"
                 else:
                     weather_data, aq_data = archive_data, archive_aq
+                    data_source = "archive"
 
                 if weather_data is None:
                     logger.warning("No weather data source available for %s, skipping", current)
@@ -668,7 +673,7 @@ class WeatherService:
 
                 sunset_time = self._astro.get_sunset_time(lat, lon, current)
                 window_snaps = self._extract_window_snapshots_from_raw(
-                    weather_data, aq_data, lat, lon, sunset_time
+                    weather_data, aq_data, lat, lon, sunset_time, data_source
                 )
                 results.append((current, window_snaps))
             except Exception as exc:
@@ -690,7 +695,7 @@ class WeatherService:
         days_ahead = (target_date - datetime.now(UTC).date()).days + 1
         weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
         aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
-        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time)
+        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time, "forecast")
 
     async def _fetch_recent_past_snapshot(
         self, lat: float, lon: float, target_date: date, sunset_time: datetime, days_ago: int
@@ -702,7 +707,7 @@ class WeatherService:
         """
         weather_data = await self._fetch_forecast_raw(lat, lon, days=1, past_days=days_ago + 1)
         aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
-        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time)
+        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time, "forecast")
 
     async def _fetch_archive_snapshot(
         self, lat: float, lon: float, target_date: date, sunset_time: datetime
@@ -712,7 +717,7 @@ class WeatherService:
         # scored with the humidity proxy while the climatology it is ranked
         # against used real AOD.
         aq_data = await self._fetch_air_quality_range_raw(lat, lon, target_date, target_date)
-        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time)
+        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time, "archive")
 
     async def get_ensemble_cloud_spread(
         self, lat: float, lon: float, target_date: date, sunset_time: datetime
@@ -975,9 +980,16 @@ class WeatherService:
         lat: float,
         lon: float,
         sunset_time: datetime,
+        data_source: str,
     ) -> WeatherSnapshot:
         """
         Find the hourly row closest to *sunset_time* and build a WeatherSnapshot.
+
+        *data_source* is passed in by the caller rather than inferred from
+        *weather_data*, because there is nothing in an Open-Meteo response
+        that reliably says which endpoint produced it — a prior attempt
+        checked for the substring "archive" inside `generationtime_ms`, a
+        float, which can never match.
         """
         hourly = weather_data.get("hourly", {})
         time_strs: list[str] = hourly.get("time", [])
@@ -1085,7 +1097,7 @@ class WeatherService:
             tcwv_kg_m2=tcwv,
             aerosol_optical_depth=aerosol_od,
             sun_elevation_deg=sun_elev,
-            data_source="archive" if "archive" in str(weather_data.get("generationtime_ms", "")) else "forecast",
+            data_source=data_source,
             aerosol_is_estimated=aerosol_is_estimated,
         )
 
@@ -1096,6 +1108,7 @@ class WeatherService:
         lat: float,
         lon: float,
         sunset_time: datetime,
+        data_source: str,
     ) -> list[WeatherSnapshot]:
         """
         Build four window snapshots from already-fetched raw API data.
@@ -1116,7 +1129,7 @@ class WeatherService:
         snapshots: list[WeatherSnapshot] = []
         for label, offset in window_offsets:
             target_time = sunset_time + offset
-            snap = self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, target_time)
+            snap = self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, target_time, data_source)
             snap_data = snap.model_dump()
             snap_data.update(trends)
             snap_data["timestamp_label"] = label
