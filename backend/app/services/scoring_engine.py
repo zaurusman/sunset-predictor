@@ -874,12 +874,26 @@ class ScoringEngine:
         else:
             overcast_penalty = clamp((blocking_clouds - 70.0) / 30.0 * 78.0)
 
-        # --- Cirrus-sheet floor: when sky is nearly blocking-cloud-free ---
-        # A full cirrus layer (high ≈ 100 %, low ≈ 0 %) still provides a
-        # colour canvas and should not score as poorly as the bell-curve tail
-        # at 97 % suggests (~18 pts).  Set a floor of high_pct / 100 × 45 pts
-        # so that a dense cirrus deck earns at least 45 pts as a base canvas.
-        if blocking_clouds < 30.0:
+        # --- Cirrus-sheet floor: when the sky isn't low-blocked ---
+        # A full cirrus/altostratus canopy (high ≈ 100 %, low ≈ 0 %) still
+        # provides a colour canvas and should not score as poorly as the
+        # bell-curve tail at 97 % suggests (~18 pts).  Set a floor of
+        # high_pct / 100 × 45 pts so that a dense upper deck earns at least
+        # 45 pts as a base canvas.
+        #
+        # Gated on LOW cloud only, matching low_penalty's own threshold a few
+        # lines up — not on blocking_clouds, which also counts 60% of mid.
+        # A labelled evening (low=0, mid=54, high=98, human=96) scored 38.5
+        # under the blocking_clouds<30 gate: mid_pct alone pushed blocking to
+        # 32.4 and disqualified the floor, so the bare bell-curve tail (which
+        # penalises >45% high cloud) took over on a sky that was, physically,
+        # a dense but unblocked upper canopy — the same case this floor
+        # exists to rescue. Mid cloud only partially blocks (weight 0.6 here
+        # for exactly that reason) and shouldn't gate a floor meant to catch
+        # "nothing LOW is in the way". Replayed against all 33 labelled
+        # evenings, this changes only that one evening's score (38.5 -> 54.9)
+        # and moves nothing else.
+        if low_pct < 20.0:
             cirrus_floor = clamp(high_pct / 100.0 * 45.0)
             high_s = max(high_s, cirrus_floor)
 

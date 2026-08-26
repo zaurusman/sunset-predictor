@@ -776,3 +776,36 @@ def test_twilight_gradient_unchanged_when_humidity_is_absent():
     ) == pytest.approx(
         engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=85.0, dryness=60.0)
     )
+
+
+def test_cirrus_floor_survives_moderate_mid_cloud():
+    """A dense high-cloud canopy with no low cloud gets its floor even when
+    mid cloud is also substantial.
+
+    A labelled evening (low=0%, mid=54%, high=98%, human=96) scored 38.5 —
+    the worst-underscored evening in the label set — because the floor was
+    gated on `blocking_clouds = low + mid*0.6`, and 54% mid alone pushed that
+    past the 30-point gate. The bare bell-curve tail (which penalises >45%
+    high cloud) took over on what was, physically, an unblocked upper canopy:
+    exactly the case this floor exists to rescue.
+
+    A pure low-cloud deck (mid=0) must still get NO floor — this pathway is
+    specifically about the sky being open from below, not about high cloud
+    coverage alone.
+    """
+    engine = ScoringEngine()
+
+    banded = engine.lit_cloud_score(
+        low_pct=0.0, mid_pct=54.0, high_pct=98.0, total_pct=98.0,
+        sun_elevation_deg=-0.4,
+    )
+    assert banded > 50.0, f"banded mid/high canopy should clear the floor: {banded:.1f}"
+
+    low_blocked = engine.lit_cloud_score(
+        low_pct=65.0, mid_pct=0.0, high_pct=98.0, total_pct=98.0,
+        sun_elevation_deg=-0.4,
+    )
+    assert low_blocked < banded, (
+        f"heavy low cloud must still score worse than an open-below canopy: "
+        f"{low_blocked:.1f} vs {banded:.1f}"
+    )
