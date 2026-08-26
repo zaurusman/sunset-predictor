@@ -81,6 +81,21 @@ MIN_P10_P50_GAP = 3.0       # points; below this the score is degenerate
 # to 80 and its p90 to 87 with every guardrail still reporting green.
 MIN_P50_P90_GAP = 8.0
 
+# Evenings where Open-Meteo's grid independently disagrees with the photo,
+# not evenings where the engine is wrong. Fitting to these fits noise in the
+# INPUT, not the scoring logic, so --labels excludes them from correlation.
+#
+# 2026-08-08: an 18-point ERA5 grid spanning 141 km reports 0-9 % cloud
+# everywhere that evening despite the photo showing heavy overcast with a lit
+# break. Verified via EXIF (16:07:37 UTC, 32.0686/34.7620, matches the
+# record).
+#
+# 2026-07-10: every corridor sample from 60 km to 400 km reports 0 % cloud,
+# but the photo shows horizon-hugging cloud bands framing the sun. Same
+# failure mode as 2026-08-08 — the archive simply missed the cloud that
+# evening.
+KNOWN_BAD_WEATHER_DATA_DATES = {"2026-08-08", "2026-07-10"}
+
 
 async def collect(
     name: str, lat: float, lon: float, days: int, horizon_deg: float
@@ -390,6 +405,7 @@ async def report_labels(path: str, horizon_deg: float) -> None:
     paired_captured: list[float] = []
     drifted = 0
     unreplayable = 0
+    excluded_bad_data = 0
 
     async with httpx.AsyncClient(timeout=90.0) as http:
         weather = WeatherService(
@@ -400,6 +416,10 @@ async def report_labels(path: str, horizon_deg: float) -> None:
         )
 
         for rec in latest:
+            if str(rec.get("target_date")) in KNOWN_BAD_WEATHER_DATA_DATES:
+                excluded_bad_data += 1
+                continue
+
             r = label_0_100(rec)
             if r is None:
                 continue
@@ -427,6 +447,11 @@ async def report_labels(path: str, horizon_deg: float) -> None:
                     drifted += 1
 
     print(f"\n{'=' * 74}\nACCURACY vs {len(human)} human rating(s)\n{'=' * 74}")
+    if excluded_bad_data:
+        print(
+            f"  {excluded_bad_data} label(s) excluded — known-bad weather data, "
+            "not a scoring question (see KNOWN_BAD_WEATHER_DATA_DATES)."
+        )
     if unreplayable:
         print(f"  {unreplayable} label(s) could not be replayed (missing raw snapshots).")
     if captured:
