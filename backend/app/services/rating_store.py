@@ -31,6 +31,54 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# How close two ratings must be to count as the same place. ~5 km at this
+# value, matching RatingStore.find(): a jittery GPS fix, or rating the same
+# evening from home and then from the beach a few streets away, is ONE
+# observation of that evening, not two.
+DEFAULT_DEDUPE_TOLERANCE_DEG = 0.05
+
+
+def dedupe_latest(
+    records: Iterator[dict[str, Any]] | list[dict[str, Any]],
+    tolerance_deg: float = DEFAULT_DEDUPE_TOLERANCE_DEG,
+) -> list[dict[str, Any]]:
+    """One record per (evening, place), last write wins.
+
+    Lives at module level, and is the ONLY implementation, because there used
+    to be two: this store deduped on coordinates rounded to 2 dp (~1.1 km)
+    while find() matched within 0.05 deg (~5 km). Ratings 1-3 km apart were
+    therefore "already rated tonight" for the purpose of showing the UI, but
+    two separate observations for the purpose of measuring accuracy. That is
+    how one evening ended up counted twice in the label set, once with a score
+    from an engine several commits old.
+
+    Clusters greedily rather than rounding to a grid: rounding puts two points
+    1 km apart into different buckets whenever they straddle a boundary, which
+    is the bug it looks like it is avoiding.
+    """
+    by_date: dict[str, list[tuple[float, float, dict[str, Any]]]] = {}
+
+    for rec in records:
+        day = str(rec.get("target_date"))
+        try:
+            lat = float(rec.get("latitude", 0.0))
+            lon = float(rec.get("longitude", 0.0))
+        except (TypeError, ValueError):
+            continue
+
+        clusters = by_date.setdefault(day, [])
+        for i, (clat, clon, _) in enumerate(clusters):
+            if abs(clat - lat) <= tolerance_deg and abs(clon - lon) <= tolerance_deg:
+                # Later line wins; keep the first coordinates as the cluster
+                # centre so a slow drift across many ratings cannot walk the
+                # cluster arbitrarily far from where it started.
+                clusters[i] = (clat, clon, rec)
+                break
+        else:
+            clusters.append((lat, lon, rec))
+
+    return [rec for clusters in by_date.values() for _, _, rec in clusters]
+
 
 class RatingStore:
     """Append-only JSONL store. Safe for concurrent writes within one process."""
@@ -106,16 +154,11 @@ class RatingStore:
         With a handful of labels that is not a rounding error: it inflates the
         count that gates the correlation, and it double-weights exactly the
         evenings someone was uncertain about.
+
+        See dedupe_latest() for why "same place" is a distance and not a
+        rounded grid key.
         """
-        latest: dict[tuple[str, float, float], dict[str, Any]] = {}
-        for rec in self.iter_records():
-            key = (
-                str(rec.get("target_date")),
-                round(float(rec.get("latitude", 0.0)), 2),
-                round(float(rec.get("longitude", 0.0)), 2),
-            )
-            latest[key] = rec  # later lines win
-        return list(latest.values())
+        return dedupe_latest(self.iter_records())
 
     def find(
         self, latitude: float, longitude: float, target_date: str, tolerance_deg: float = 0.05

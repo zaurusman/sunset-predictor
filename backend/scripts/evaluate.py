@@ -26,6 +26,12 @@ same histogram. Only --labels, which correlates scores against ratings collected
 via POST /rate, measures whether the engine is actually right. Until enough
 ratings exist, treat everything here as "less broken", not "more accurate".
 
+Labels are scored by REPLAY: each rating's raw window snapshots are re-scored
+with the engine as it exists right now, rather than trusting the score frozen
+into the record when the rating was taken. Without that, the correlation
+silently measures a mixture of every engine version that has ever run, and
+quietly rots with each scoring change.
+
 It scores through the REAL WeatherService, so the light corridor, caching and
 data-source switching are all exercised exactly as they are in production.
 """
@@ -45,9 +51,11 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import Settings
+from app.schemas.weather import WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.climatology_service import _rank_in_sorted
+from app.services.rating_store import dedupe_latest
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
 from app.utils.math_utils import spearman
@@ -279,8 +287,76 @@ def report(result: dict) -> list[str]:
     return failures
 
 
-def report_labels(path: str) -> None:
-    """Correlate stored human ratings against the scores recorded at capture time.
+async def replay_label(
+    weather: WeatherService,
+    astro: AstronomyService,
+    engine: ScoringEngine,
+    rec: dict,
+    horizon_deg: float,
+) -> Optional[float]:
+    """Re-score one stored label's RAW snapshots with the CURRENT engine.
+
+    Returns the score comparable to that label — at the observed moment when
+    the label names one, otherwise the window aggregate — or None when the
+    record cannot be replayed.
+
+    Why this exists
+    ---------------
+    Each record stores `predicted_score`, the number the engine produced at the
+    moment the rating was captured. Correlating against THAT measures a mixture
+    of every engine version that has ever run: a label captured before a fix
+    carries the pre-fix score forever. One evening in the current set was
+    stored at 17.3 and scores 48.3 today — the same sky, two engines.
+
+    Storing the raw snapshots was always meant to make this replayable
+    (see rating_store's module docstring); nothing was actually replaying them.
+    """
+    snaps_raw = rec.get("window_snapshots") or []
+    if not snaps_raw:
+        return None
+
+    try:
+        snaps = [WeatherSnapshot(**s) for s in snaps_raw]
+    except Exception:
+        return None
+
+    try:
+        target = date.fromisoformat(str(rec.get("target_date")))
+    except ValueError:
+        return None
+
+    lat = float(rec.get("latitude", 0.0))
+    lon = float(rec.get("longitude", 0.0))
+
+    # The corridor is NOT stored on the record, and it is not optional: it
+    # gates every pathway, and horizon_band scores 0 without it. Refetch it —
+    # for a past date the archive is deterministic, so this reproduces what
+    # production saw rather than approximating it.
+    sunset_time = astro.get_sunset_time(lat, lon, target)
+    try:
+        corridor = await weather.get_corridor_samples(lat, lon, target, sunset_time)
+    except Exception:
+        corridor = []
+
+    scored: list[tuple[str, float]] = []
+    by_label: dict[str, float] = {}
+    for snap in snaps:
+        r = engine.score(snap, horizon_deg, corridor_samples=corridor)
+        label = snap.timestamp_label or "sunset"
+        scored.append((label, r.physics_score))
+        by_label[label] = r.physics_score
+
+    if not scored:
+        return None
+
+    moment = rec.get("observed_moment")
+    if moment and moment in by_label:
+        return by_label[moment]
+    return engine.score_window(scored).final_score
+
+
+async def report_labels(path: str, horizon_deg: float) -> None:
+    """Correlate stored human ratings against the CURRENT engine's scores.
 
     This is the only part of this harness that measures accuracy rather than
     distribution shape.
@@ -290,52 +366,95 @@ def report_labels(path: str) -> None:
         print(f"\nNo label file at {path} — skipping accuracy check.")
         return
 
-    # One label per (date, location): the store is append-only, so a rating
-    # that was changed leaves both versions behind and would otherwise be
-    # counted twice. Last write wins, matching RatingStore.find().
-    latest: dict[tuple, dict] = {}
+    records: list[dict] = []
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            rec = json.loads(line)
+            records.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-        latest[(
-            str(rec.get("target_date")),
-            round(float(rec.get("latitude", 0.0)), 2),
-            round(float(rec.get("longitude", 0.0)), 2),
-        )] = rec
+
+    # One label per (evening, place). Shared with RatingStore so the harness
+    # and the API cannot disagree about what counts as a duplicate.
+    latest = dedupe_latest(records)
+
+    settings = Settings()
+    astro = AstronomyService()
+    engine = ScoringEngine()
 
     human: list[float] = []
-    model: list[float] = []
-    for rec in latest.values():
-        r = rec.get("rating")
-        # A rating tied to a specific moment (observed_moment) should be
-        # compared against what the model scored AT that moment, not the
-        # evening's aggregated max — a sunset-lit-cloud reading and an
-        # afterglow-gradient reading of the same evening are different events.
-        s = rec.get("predicted_score_at_observed_moment")
-        if s is None:
-            s = rec.get("predicted_score")
-        if isinstance(r, int) and isinstance(s, (int, float)):
+    replayed: list[float] = []
+    captured: list[float] = []
+    paired_captured: list[float] = []
+    drifted = 0
+    unreplayable = 0
+
+    async with httpx.AsyncClient(timeout=90.0) as http:
+        weather = WeatherService(
+            http_client=http,
+            astro_service=astro,
+            cache=TTLCache(ttl_seconds=86_400, persist_path=None),
+            settings=settings,
+        )
+
+        for rec in latest:
+            r = rec.get("rating")
+            if not isinstance(r, int):
+                continue
+
+            # What the engine said when the rating was taken — kept only to
+            # measure how far the stored numbers have drifted from current.
+            cap = rec.get("predicted_score_at_observed_moment")
+            if cap is None:
+                cap = rec.get("predicted_score")
+
+            now = await replay_label(weather, astro, engine, rec, horizon_deg)
+            if now is None:
+                unreplayable += 1
+                if isinstance(cap, (int, float)):
+                    human.append(float(r))
+                    replayed.append(float(cap))  # fall back, but count it
+                continue
+
             human.append(float(r))
-            model.append(float(s))
+            replayed.append(now)
+            if isinstance(cap, (int, float)):
+                captured.append(float(cap))
+                paired_captured.append(now)
+                if abs(cap - now) >= 5.0:
+                    drifted += 1
 
     print(f"\n{'=' * 74}\nACCURACY vs {len(human)} human rating(s)\n{'=' * 74}")
+    if unreplayable:
+        print(f"  {unreplayable} label(s) could not be replayed (missing raw snapshots).")
+    if captured:
+        print(
+            f"  {drifted}/{len(captured)} label(s) drifted >=5 pts from the score "
+            "stored at capture time."
+        )
+        if drifted:
+            print("  Correlating against replayed scores; stored ones are stale by definition.")
+
     if len(human) < 15:
         print(f"  Need at least 15 to say anything; have {len(human)}.")
         print("  Rate evenings via POST /rate — including the dull ones.")
         return
 
-    rho = spearman(human, model)
+    rho = spearman(human, replayed)
     low = sum(1 for h in human if h <= 2)
     high = sum(1 for h in human if h >= 4)
     print(f"  Spearman rho = {rho:.3f}" if rho is not None else "  rho undefined")
     print(f"  {low} poor evenings, {high} good ones")
     if low == 0 or high == 0:
         print("  WARNING: one-sided labels. rho is not trustworthy without both ends.")
+    elif low < 3 or high < 3:
+        # Both ends technically present, but one of them is a handful of rows.
+        print(
+            "  WARNING: one end of the scale is thin — rho will swing hard on the\n"
+            "           next few ratings. Treat it as provisional."
+        )
 
 
 def main() -> int:
@@ -354,7 +473,7 @@ def main() -> int:
         result = asyncio.run(collect(name, lat, lon, args.days, args.horizon_deg))
         failures.extend(report(result))
 
-    report_labels(args.labels)
+    asyncio.run(report_labels(args.labels, args.horizon_deg))
 
     print(f"\n{'=' * 74}")
     if failures:
