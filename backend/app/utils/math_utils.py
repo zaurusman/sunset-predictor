@@ -10,6 +10,17 @@ def clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))
 
 
+def round_half_up(value: float) -> int:
+    """Round to the nearest integer, ties rounding up (matches JS Math.round).
+
+    Python's built-in round() ties to even (round(54.5) == 54), but the
+    frontend displays Math.round(score) (Math.round(54.5) == 55). Categorizing
+    off a value not equal to what's displayed can show a badge from the band
+    below the number the user is looking at. Assumes value >= 0.
+    """
+    return math.floor(value + 0.5)
+
+
 def bell_curve(x: float, peak: float, sigma: float) -> float:
     """
     Gaussian bell function returning a value in [0, 1].
