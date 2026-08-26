@@ -1,16 +1,18 @@
 """
 Scoring calibration tests.
 
-These are sanity checks for the three targeted changes made to fix
-systematic score inflation, especially for archive dates (>7 days old):
+These are sanity checks against systematic score inflation, especially for
+archive dates (>7 days old) which feed the climatology every displayed score
+is ranked against.
 
-  1. Archive visibility default: 24 km → 15 km
-  2. Estimated AOD fallback: max(40, vis*0.80) → vis*0.75  (no floor)
-  3. Window consistency bonus: +5 pts max → +3 pts max
+The atmosphere tests here changed shape in Phase 3. There is no longer a
+visibility default to calibrate: the archive reports no visibility, so the
+snapshot carries None and the scorer leaves it out. What is checked instead is
+that clean air scores high, hazy air scores low, and a missing field neither
+rewards nor punishes an evening.
 
 Each test documents what the score SHOULD be for a realistic scenario and
-why. Run these after any change to scoring_engine.py or the visibility
-default in weather_service.py to catch regressions.
+why. Run these after any change to scoring_engine.py.
 """
 from __future__ import annotations
 
@@ -42,74 +44,66 @@ engine = ScoringEngine()
 
 
 # ---------------------------------------------------------------------------
-# Fix 1 + 2: Archive atmosphere should no longer be ~93
+# Atmosphere: clean air is the ingredient
 #
-# Previously: 24 km vis → vis_score=96, AOD proxy=0.25 → aer_score≈90
-#             atmosphere = 96*0.5 + 90*0.5 = 93
-# Now:        15 km vis → vis_score=60, aer_score=60*0.75=45
-#             atmosphere = 60*0.5 + 45*0.5 = 52.5
+# This replaced a bell curve peaking at AOD 0.18, which scored pristine air
+# (0.03) at ~56 and treated a smog layer as ideal. See aerosol_clarity().
 # ---------------------------------------------------------------------------
 
-def test_estimated_atmosphere_15km_is_moderate():
-    """
-    With 15 km visibility and estimated AOD the atmosphere score should be
-    moderate (~50–65), not near-perfect (~90+).
-    Previously the 24 km default + max(40,…) floor gave ~93 automatically.
-    """
-    score = engine.atmosphere_score(15_000.0, None, 60.0)
-    assert 45.0 <= score <= 68.0, (
-        f"15 km / estimated AOD atmosphere should be moderate, got {score:.1f}"
-    )
+def test_aerosol_response_is_monotone_decreasing():
+    """The property the whole change rests on. If this ever fails, someone has
+    reintroduced the bell curve."""
+    prev = 101.0
+    for aod in [i / 100.0 for i in range(0, 151)]:
+        s = engine.aerosol_clarity(aod)
+        assert s <= prev + 1e-9, f"clarity rose at AOD {aod:.2f}: {s:.1f} > {prev:.1f}"
+        prev = s
 
 
-def test_estimated_atmosphere_scales_with_visibility():
-    """
-    When AOD is unknown (estimated), the atmosphere score must increase with
-    visibility rather than sitting at an artificial floor.
-    """
-    score_10km = engine.atmosphere_score(10_000.0, None, 60.0)
-    score_15km = engine.atmosphere_score(15_000.0, None, 60.0)
-    score_25km = engine.atmosphere_score(25_000.0, None, 60.0)
-
-    assert score_10km < score_15km < score_25km, (
-        f"Estimated atmosphere must scale with visibility: "
-        f"10km={score_10km:.1f}, 15km={score_15km:.1f}, 25km={score_25km:.1f}"
-    )
+def test_pristine_air_scores_near_perfect():
+    """Under the old bell curve this scored ~56 — the single worst mis-ranking
+    in the engine, because it demoted exactly the post-frontal evenings that
+    produce the best colour."""
+    assert engine.aerosol_clarity(0.03) >= 95.0
 
 
-def test_estimated_atmosphere_no_artificial_floor():
-    """
-    Poor visibility (5 km) with estimated AOD should score below 35.
-    The old max(40,…) floor prevented this — now it should genuinely be low.
-    """
-    score = engine.atmosphere_score(5_000.0, None, 70.0)
-    assert score < 35.0, (
-        f"Poor visibility / estimated AOD should score < 35, got {score:.1f}"
-    )
+def test_heavy_haze_scores_low():
+    assert engine.aerosol_clarity(0.8) <= 20.0
+    assert engine.aerosol_clarity(0.5) <= 50.0
 
 
-def test_real_aod_good_visibility_still_scores_high():
-    """
-    A day with real clear-air data (40 km vis, AOD 0.12) must still score
-    near-perfect on atmosphere. Good recent days must not be penalised.
-    """
-    score = engine.atmosphere_score(40_000.0, 0.12, 50.0)
-    assert score >= 88.0, (
-        f"Real clear-air data should score >= 88, got {score:.1f}"
-    )
+def test_missing_visibility_is_neither_reward_nor_penalty():
+    """An archive day (no visibility) with the same air as a forecast day
+    should not be systematically higher or lower — the old 15 km default made
+    it a fixed offset instead."""
+    clean_no_vis = engine.atmosphere_score(None, 0.05)
+    hazy_no_vis = engine.atmosphere_score(None, 0.6)
+    assert clean_no_vis >= 95.0
+    assert hazy_no_vis <= 40.0
 
 
-def test_real_vs_estimated_same_visibility_gap():
-    """
-    Real AOD (near-optimal 0.18) at 20 km should beat estimated AOD at
-    20 km by a meaningful margin (≥ 15 pts), because known-good data
-    should be rewarded over unknown data.
-    """
-    real  = engine.atmosphere_score(20_000.0, 0.18, 60.0)
-    est   = engine.atmosphere_score(20_000.0, None, 60.0)
-    assert real - est >= 15.0, (
-        f"Real AOD ({real:.1f}) should beat estimated ({est:.1f}) by ≥ 15 pts"
-    )
+def test_atmosphere_falls_back_when_only_one_signal_exists():
+    assert engine.atmosphere_score(25_000.0, None) == 100.0   # visibility only
+    assert engine.atmosphere_score(None, 0.15) == 88.0        # aerosol only
+    # Neither reported: neutral, so a data gap does not move the score.
+    assert 50.0 <= engine.atmosphere_score(None, None) <= 70.0
+
+
+def test_poor_visibility_pulls_a_clean_reading_down():
+    """Visibility is a second look at the same physics and keeps a minority
+    share, so it corrects a clean AOD reading without overturning it."""
+    clear = engine.atmosphere_score(30_000.0, 0.08)
+    murky = engine.atmosphere_score(3_000.0, 0.08)
+    assert clear > murky
+    assert murky < 80.0
+
+
+def test_surface_humidity_is_not_charged_twice():
+    """Atmosphere used to carry its own humidity penalty while moisture carried
+    another. Moisture is now scored once, as a column, in moisture_score."""
+    import inspect
+    sig = inspect.signature(engine.atmosphere_score)
+    assert "humidity_pct" not in sig.parameters
 
 
 # ---------------------------------------------------------------------------

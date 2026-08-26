@@ -25,10 +25,13 @@ export interface WeatherSummary {
   cloud_mid_pct: number;
   cloud_high_pct: number;
   cloud_total_pct: number;
-  visibility_km: number;
+  /** null when the data source does not report visibility (all archive days). */
+  visibility_km: number | null;
   precipitation_mm: number;
   aerosol_optical_depth: number | null;
   aerosol_is_estimated: boolean;
+  /** Total column water vapour, mm of precipitable water. */
+  tcwv_kg_m2: number | null;
   temperature_c: number;
   humidity_pct: number;
   wind_speed_kmh: number;
@@ -47,6 +50,22 @@ export interface PhysicsBreakdown {
   component_weights: Record<string, number>;
   /** Afterglow potential; non-null only at window points after sunset. */
   afterglow_score: number | null;
+
+  // ── Gates: multiplicative, applied after the weighted average (1.0 = no effect) ──
+  /** Fraction of sunset light reaching the clouds overhead, sampled 60-400 km
+   *  upstream along the sunset azimuth. Null when corridor data was unavailable. */
+  light_corridor_factor: number | null;
+  /** Fraction of the score surviving active rain (1.0 = dry). */
+  precipitation_gate: number;
+  /** Fraction of the score surviving horizon obstruction (1.0 = open). */
+  horizon_gate: number;
+  /** Clear-sky gradient score (0-100), already folded into cloud_quality_score.
+   *  High while cloud is low means tonight colours as a gradient, not as lit cloud. */
+  twilight_gradient_score: number;
+  /** Every independent route to a beautiful sunset, scored on its own terms. */
+  pathway_scores: Record<string, number>;
+  /** Which route is carrying tonight — decides what to look for, and when. */
+  dominant_pathway: string | null;
 }
 
 /** The four sampled moments around sunset, in chronological order. */
@@ -78,6 +97,14 @@ export interface PredictResponse {
   algorithm_version: string;
   ml_model_used: boolean;
   ml_adjustment: number | null;
+  /** Uncalibrated physics score, before percentile mapping. */
+  raw_physics_score: number | null;
+  /** Fraction of evenings at this location that score lower than tonight. */
+  climatology_percentile: number | null;
+  /** False while the local climatology is still warming — the score is ranked
+   *  against a global reference curve and will shift once local history lands. */
+  climatology_is_local: boolean;
+
   physics_component_breakdown: PhysicsBreakdown;
   weather_summary: WeatherSummary;
   location: { latitude: number; longitude: number };
@@ -167,4 +194,35 @@ export interface LocationState {
   latitude: number;
   longitude: number;
   name: string;
+}
+
+// ── Sunset ratings (ML training labels) ──────────────────────────────────────
+
+export interface RatingRequest {
+  latitude: number;
+  longitude: number;
+  /** 1 = nothing, 2 = dull, 3 = pleasant, 4 = very good, 5 = exceptional. */
+  rating: number;
+  target_date?: string; // "YYYY-MM-DD"; defaults to the local sunset date
+  location_name?: string;
+  notes?: string;
+}
+
+export interface RatingResponse {
+  success: boolean;
+  message: string;
+  rated_date: string;
+  predicted_score: number | null;
+  total_ratings: number;
+}
+
+export interface RatingStats {
+  total_ratings: number;
+  distinct_locations: number;
+  distinct_dates: number;
+  rating_histogram: Record<string, number>;
+  mean_rating: number | null;
+  spearman_vs_model: number | null;
+  spearman_sample_size: number;
+  note: string;
 }

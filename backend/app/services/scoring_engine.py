@@ -12,15 +12,58 @@ Two layers:
      +15m, +30m) and derives a daily score that reflects the best likely
      viewing moment, with bonuses for consistency and penalties for volatility.
 
-COMPONENTS (4 total, weights configurable)
-------------------------------------------
-1. Cloud Quality  (42 %) — cloud distribution at sunset
-2. Atmosphere     (28 %) — visibility, aerosol, humidity
-3. Moisture       (20 %) — rain, clearing trend, humidity
-4. Horizon        (10 %) — permanent obstruction (buildings, mountains)
+SCORED COMPONENTS (weighted average, weights configurable)
+----------------------------------------------------------
+1. Colour potential (60 %) — the best available PATHWAY to beauty (below),
+                             gated by upstream illumination
+2. Atmosphere       (25 %) — how clean the air is: aerosol, plus visibility
+                             where the source reports it
+3. Moisture         (15 %) — the atmospheric water column, plus post-rain clearing
+
+PATHWAYS — WHY THE COLOUR TERM IS A SET, NOT A FORMULA
+------------------------------------------------------
+A sunset can be beautiful in several unrelated ways, and they do not share
+ingredients. Cloud on fire needs a mid/high deck and a clear strip to the west.
+A clear-sky gradient needs the opposite — no cloud at all — plus clean dry air,
+and it peaks after the sun has gone. A breaking storm needs rain that has just
+stopped. A silhouette band needs a heavy deck that every other pathway reads as
+a ruined evening.
+
+Any single formula over these inputs has to pick a favourite. The original
+engine picked lit cloud, and so a cloudless Tel Aviv evening that was genuinely
+lovely scored 11/100 with the explanation "clear conditions produce less colour
+drama". Adding terms for the other cases would not fix it: an average asks
+every evening to be good in every way at once, which no real sunset is.
+
+So each route is scored INDEPENDENTLY, by its own physics, with its own
+preconditions, and the best one sets the score (see combine_pathways). Nothing
+is optimised toward a preferred combination of parameters, and adding a new
+kind of beautiful sunset means adding a function, not re-tuning the others.
+
+The engine also reports WHICH pathway won, because the user needs that as much
+as the number: it decides what to look for and when to be outside.
+
+GATES (multiplicative, applied after the average)
+-------------------------------------------------
+- Light corridor   — is the upstream light path clear? (folded into cloud quality)
+- Precipitation    — active rain ends a sunset; it does not "reduce" it
+- Horizon          — permanent obstruction at the observer
+
+WHY GATES INSTEAD OF WEIGHTS
+----------------------------
+Measured over a year at three cities, horizon had a standard deviation of
+ZERO across days while holding 10 % of the weight, and precipitation was
+absent on 82-93 % of evenings while its component held 20 %. As weighted
+addends they did not discriminate between days — they simply added a large
+near-constant to every score, which is a major reason "Epic" was firing on
+10-15 % of evenings.
+
+Physically they are gates, not ingredients: no light path means no colour,
+however good the sky overhead is. Multiplying expresses that and stops them
+inflating the baseline. See docs/scoring-v2-plan.md (D1, D2).
 
 Each component returns a score in [0, 100].  The final beauty score is a
-weighted average, clamped to [0, 100].
+weighted average scaled by the gates, clamped to [0, 100].
 """
 from __future__ import annotations
 
@@ -30,36 +73,287 @@ from typing import Optional
 
 from app.schemas.prediction import PhysicsBreakdown
 from app.schemas.weather import WeatherSnapshot
+from app.utils.geo import horizon_tangent_distance_km
 from app.utils.math_utils import bell_curve, clamp, weighted_average
 
 # ---------------------------------------------------------------------------
 # Default weights — override via ScoringEngine(weights={…})
 # ---------------------------------------------------------------------------
 
+# Horizon and precipitation are deliberately ABSENT — they are gates applied
+# multiplicatively after the average, not weighted addends. See the module
+# docstring and docs/scoring-v2-plan.md (D1).
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "cloud_quality": 0.42,
-    "atmosphere": 0.28,
-    "moisture": 0.20,
-    "horizon": 0.10,
+    "cloud_quality": 0.60,
+    "atmosphere": 0.25,
+    "moisture": 0.15,
 }
+
+# Floors on the two multiplicative gates. Neither can zero a score outright:
+# an obstructed horizon still shows you the upper sky, and even in rain there
+# is a little colour when the cloud breaks.
+HORIZON_FLOOR = 0.35
+PRECIP_FLOOR = 0.15
 
 # ---------------------------------------------------------------------------
 # Score → category thresholds
 # ---------------------------------------------------------------------------
 
+# ABSOLUTE thresholds on the raw physics score, which is what the app displays.
+#
+# Set from the pooled raw distribution across Tel Aviv, London and San
+# Francisco (365 days each, scripts/evaluate.py) so that the bands mean the
+# same THING everywhere — but deliberately NOT the same frequency everywhere.
+# A location with genuinely better sunset conditions should earn more good
+# evenings; that is the point of an absolute scale, and the per-location
+# frequency is reported separately as a rank ("better than 31 % of evenings
+# here").
+#
+# Re-derive these whenever the raw scale moves, alongside REFERENCE_QUANTILES.
 SCORE_THRESHOLDS: list[tuple[float, str]] = [
-    (80, "Epic"),
-    (65, "Great"),
-    (50, "Good"),
-    (30, "Decent"),
+    (85, "Epic"),
+    (72, "Great"),
+    (55, "Good"),
+    (38, "Decent"),
     (0, "Poor"),
 ]
 
-# Score at which we recommend going outside.
-# This is the bar for "worth changing your plans for", not "better than
-# average" — most evenings land in the 40s and 50s, so a 45 recommended
-# going outside on a thoroughly ordinary sky.
-GO_OUTSIDE_THRESHOLD = 70.0
+# ---------------------------------------------------------------------------
+# Percentile → rank score (NOT the display path — kept for analysis)
+# ---------------------------------------------------------------------------
+#
+# The displayed 0-100 used to be a RANK against the location's own history.
+# That was reversed: percentile display is SELF-NORMALISING, so a fix that makes
+# the engine more right about a whole kind of evening lifts every evening of
+# that kind and moves none of their ranks. Measured — the near-field horizon fix
+# took one evening's raw score 48.9 → 57.4 while its displayed score went
+# 30.9 → 30.6. A number that cannot show the effect of an improvement is the
+# wrong number to tune against. See docs/scoring-v2-plan.md, "Why percentile
+# display was reversed".
+#
+# The percentile now appears beneath the score as SEASONAL context ("better than
+# 51 % of August evenings here"), and the anchors below survive only because
+# scripts/evaluate.py uses them to report what a purely rank-based scale would
+# have shown. They still document the intended shape of a rarity scale:
+#
+#     Poor    bottom 30 %   "don't bother"
+#     Decent  next   38 %   "ordinary evening"
+#     Good    next   20 %   "nice if you're out"
+#     Great   next    9 %   "worth stepping outside for"
+#     Epic    top     3 %   "roughly ten nights a year"
+CALIBRATION_ANCHORS: list[tuple[float, float]] = [
+    # (cumulative percentile, displayed score at that percentile)
+    (0.00,   0.0),
+    (0.30,  30.0),   # Poor   → Decent
+    (0.68,  50.0),   # Decent → Good
+    (0.88,  65.0),   # Good   → Great
+    (0.97,  80.0),   # Great  → Epic
+    (1.00, 100.0),
+]
+
+# Score at which we recommend going outside — on the ABSOLUTE scale, so this
+# fires more often in a place with better skies. That is intended: if Tel Aviv
+# genuinely has a lovely sunset most summer evenings, an honest app says so
+# rather than rationing the recommendation to a fixed share of nights.
+GO_OUTSIDE_THRESHOLD = 75.0
+
+# Ensemble cloud-cover spread (standard deviation, %, across forecast members
+# at the sunset hour) -> confidence adjustment (points). Replaces the
+# lead-time guess with an actual measurement of forecast uncertainty when one
+# is available (see ScoringEngine.compute_confidence,
+# WeatherService.get_ensemble_cloud_spread).
+#
+# Anchors calibrated against live icon_seamless data over ~7.5 days in Tel
+# Aviv, London and San Francisco: spread p25-p75 ran roughly 11-31, min ~0,
+# max ~45. 0 = every member agrees exactly; 45+ is members disagreeing by
+# nearly half the 0-100 scale.
+ENSEMBLE_SPREAD_CONFIDENCE_ANCHORS: list[tuple[float, float]] = [
+    (0.0,   10.0),
+    (10.0,   5.0),
+    (20.0,   0.0),
+    (30.0,  -6.0),
+    (45.0, -12.0),
+]
+
+# ---------------------------------------------------------------------------
+# Atmosphere response curves
+# ---------------------------------------------------------------------------
+
+# Aerosol optical depth (550 nm) → clarity score. Monotone DECREASING: clean
+# air is the ingredient, haze is the spoiler. See ScoringEngine.aerosol_clarity
+# for why this is not a bell curve.
+#
+#   ≤0.05  pristine — post-frontal, maritime, high desert
+#    0.15  typical continental background
+#    0.30  visible haze
+#    0.50  poor air-quality day
+#    0.80  heavy smoke / dust event
+AEROSOL_ANCHORS: list[tuple[float, float]] = [
+    (0.00, 100.0),
+    (0.05, 100.0),
+    (0.15,  88.0),
+    (0.30,  68.0),
+    (0.50,  42.0),
+    (0.80,  15.0),
+    (1.50,   5.0),
+]
+
+# Total column water vapour (kg/m² ≈ mm precipitable water) → dryness score.
+# Reference points: 5-10 mm is a dry continental winter airmass, 15-25 mm is
+# an ordinary temperate evening, 40+ mm is tropical or a summer Mediterranean
+# heat load.
+TCWV_ANCHORS: list[tuple[float, float]] = [
+    ( 0.0, 100.0),
+    ( 8.0, 100.0),
+    (15.0,  85.0),
+    (22.0,  68.0),
+    (30.0,  48.0),
+    (40.0,  25.0),
+    (55.0,   8.0),
+    (80.0,   0.0),
+]
+
+# ---------------------------------------------------------------------------
+# Clear-sky twilight gradient
+# ---------------------------------------------------------------------------
+#
+# A cloudless sky is not a failed sunset. When the air is clean and dry, the
+# western sky after sunset becomes a saturated vertical gradient — deep orange
+# at the horizon through peach and salmon into blue and then indigo. That is
+# the Earth's own shadow rising in the east with the Belt of Venus above it,
+# and looking west it is the anti-twilight arch's counterpart: a long slant
+# path through clean lower atmosphere, reddened by Rayleigh scattering with
+# nothing to occlude it.
+#
+# This is a SEPARATE PATHWAY to colour, not a degraded version of the cloud
+# pathway, so cloud_quality_score takes the better of the two rather than
+# adding a small bonus to a penalised base.
+#
+# The old model had a "horizon glow" term worth at most +15 points that peaked
+# at solar elevation +0.5 degrees and switched off entirely below -4. That is
+# almost exactly wrong: the gradient is weak while the sun is still up and
+# strongest well after it has set. It scored a real Tel Aviv evening (photo
+# evidence, 2026-08-23) at 11/100 and explained it as "clear conditions produce
+# less colour drama".
+
+# Solar elevation at which the gradient is most saturated, and the spread
+# around it. Negative = below the horizon. The band roughly -1 to -8 degrees is
+# civil twilight, where the shadow edge is high enough to see but the sky has
+# not yet gone dark.
+TWILIGHT_PEAK_ELEV_DEG = -4.0
+TWILIGHT_SIGMA_DEG = 3.0
+
+# Best achievable clear-sky gradient, on the same 0-100 scale as the cloud
+# pathway. Deliberately below the cloud maximum: a perfect lit-cloud sky is a
+# rarer and more dramatic event than a clean twilight gradient, and the bands
+# are percentile-anchored, so this sets how often a clear evening outranks a
+# cloudy one rather than an absolute claim about beauty.
+#
+# First set to 95, which was too generous and measurably so: Tel Aviv's raw p50
+# jumped to 80 with p90 at 87, because a clear evening is the DEFAULT there and
+# every one of them became a top-decile evening. Percentile calibration hid it —
+# the displayed bands stayed perfectly shaped while the raw scores being ranked
+# were crowded into ten points, so the ordering inside them was noise.
+TWILIGHT_MAX = 78.0
+
+# The gradient is made of air, so its quality is entirely the air's quality:
+# clean (low aerosol) and dry (low water column). Blend and sharpen, because
+# on a clear evening these are the ONLY things that vary — a gentle response
+# would score every cloudless night the same and tell the user nothing.
+TWILIGHT_CLARITY_SHARE = 0.55
+TWILIGHT_SHARPNESS = 1.9
+
+# The horizon strip you actually look at is NOT your own grid cell.
+#
+# Standing on a beach watching the sunset, the bright band is sky roughly
+# 30-150 km away — cloud directly overhead does almost nothing to it, and a
+# deck 60 km west hides it completely. Scoring "is the horizon open?" from the
+# observer's cell reads the sky above and behind the viewer instead.
+#
+# Caught on a real evening (Tel Aviv, 2026-08-23, photo): the local cell
+# reported 48 % low cloud while the sample 60 km west reported 3 %, and the
+# photo shows a clean horizon over open sea. The corridor sampling already
+# fetches those upstream readings, so this costs nothing.
+#
+# Weighted toward the nearest samples and blended with a minority share of the
+# local cell, because the gradient does extend up the sky, where overhead cloud
+# dims it. Distinct from the corridor, which measures the FAR field (~340 km)
+# and asks a different question: not "can you see the band" but "is the band
+# lit at all".
+NEAR_FIELD_MAX_KM = 200.0
+NEAR_FIELD_SIGMA_KM = 90.0
+NEAR_FIELD_LOCAL_SHARE = 0.25
+
+# Local blocking cloud below this leaves the horizon band fully visible; above
+# TWILIGHT_BLOCKED_AT the gradient is hidden. Gentler than the cloud pathway's
+# low-cloud penalty because what this needs is a clear STRIP at the horizon,
+# and cloud in the grid cell is just as likely to be behind the observer. The
+# upstream corridor measures the direction that actually matters.
+TWILIGHT_OPEN_BELOW = 30.0
+TWILIGHT_BLOCKED_AT = 90.0
+
+# ---------------------------------------------------------------------------
+# Pathway ceilings and combination
+# ---------------------------------------------------------------------------
+#
+# Each ceiling says how good that KIND of evening can be at its absolute best.
+# They differ because the kinds differ in how striking and how rare they are,
+# and because the bands are percentile-anchored: a ceiling controls how often
+# one kind of evening outranks another, not an absolute claim about beauty.
+#
+# These are the most judgement-laden numbers in the engine. They are stated
+# once, here, rather than being buried as magic constants inside five
+# functions, so that disagreeing with them is a one-line change.
+#
+#   lit_cloud          100  a sky genuinely on fire is the ceiling
+#   twilight_gradient   78  see the TWILIGHT_* section
+#   breaking_storm      96  rarer than lit cloud and at least as spectacular,
+#                           but it can fizzle as the gap closes
+#   crepuscular         62  a lovely thing to catch, not a reason to travel;
+#                           also the least trustworthy detection (see below)
+#   horizon_band        58  striking when it works, fails more often than not
+CREPUSCULAR_MAX = 62.0
+BREAKING_STORM_MAX = 96.0
+HORIZON_BAND_MAX = 58.0
+
+# A horizon band needs BOTH a heavy deck overhead and an open corridor to the
+# west. Neither alone is this kind of evening.
+HORIZON_BAND_MIN_DECK = 55.0
+HORIZON_BAND_MIN_CORRIDOR = 0.55
+
+# Human-readable name for each pathway, used by the explanation engine and the
+# UI. Kept beside the ceilings so a new pathway cannot be added without also
+# deciding what to CALL it — an unnamed pathway can win an evening and leave
+# the user with a number and no idea what to go outside and look for.
+PATHWAY_LABELS: dict[str, str] = {
+    "lit_cloud": "Lit clouds",
+    "twilight_gradient": "Clear-sky gradient",
+    "crepuscular": "Sun rays",
+    "breaking_storm": "Breaking storm",
+    "horizon_band": "Band under the cloud",
+}
+
+# How much a second (third…) active pathway can add on top of the best one.
+# Small on purpose: this expresses "and there is more than one thing going on
+# tonight", not "add up the ways it could be nice".
+MULTI_PATHWAY_LIFT = 12.0
+
+# ---------------------------------------------------------------------------
+# Light-corridor constants
+# ---------------------------------------------------------------------------
+
+# Representative altitudes for the three cloud layers Open-Meteo reports.
+# WMO puts high cloud at 5–13 km, middle at 2–7 km, low below 2 km; these are
+# mid-band values used to derive each layer's illumination tangent distance.
+LAYER_HEIGHT_KM: dict[str, float] = {
+    "low": 1.0,    # → light grazes the surface ~113 km upstream
+    "mid": 4.0,    # → ~226 km
+    "high": 9.0,   # → ~339 km
+}
+
+# Floor on the corridor multiplier. A fully blocked corridor still leaves some
+# diffuse skylight, so it dims the colour score rather than zeroing it.
+CORRIDOR_FLOOR = 0.25
 
 
 @dataclass
@@ -77,6 +371,19 @@ class ScoringResult:
     # Non-zero only when sun < 0° and high clouds are present.
     # Stored here for transparency / explanation; already baked into cloud_quality.
     afterglow: float = 0.0
+    # Upstream illumination multiplier already applied to cloud_quality.
+    # None when no corridor data was available.
+    light_corridor: Optional[float] = None
+    # Multiplicative gates applied after the weighted average.
+    precipitation_gate: float = 1.0
+    horizon_gate: float = 1.0
+    # Clear-sky pathway score at this snapshot. Reported so the UI and the
+    # explanation engine can tell the user WHICH kind of sunset this is —
+    # "lit clouds" and "colour gradient" want different words and a different
+    # best-viewing time. Already folded into cloud_quality via max().
+    twilight_gradient: float = 0.0
+    # Every pathway's independent score, and which one is carrying the evening.
+    pathways: dict[str, float] = field(default_factory=dict)
 
     def to_physics_breakdown(self) -> PhysicsBreakdown:
         return PhysicsBreakdown(
@@ -87,6 +394,14 @@ class ScoringResult:
             weighted_physics_score=round(self.physics_score, 1),
             component_weights=self.weights,
             afterglow_score=round(self.afterglow, 1) if self.afterglow > 0 else None,
+            light_corridor_factor=(
+                round(self.light_corridor, 3) if self.light_corridor is not None else None
+            ),
+            precipitation_gate=round(self.precipitation_gate, 3),
+            horizon_gate=round(self.horizon_gate, 3),
+            twilight_gradient_score=round(self.twilight_gradient, 1),
+            pathway_scores={k: round(v, 1) for k, v in self.pathways.items()},
+            dominant_pathway=ScoringEngine.dominant_pathway(self.pathways),
         )
 
 
@@ -123,45 +438,96 @@ class ScoringEngine:
     # ------------------------------------------------------------------
 
     def score(
-        self, weather: WeatherSnapshot, horizon_obstruction_deg: float
+        self,
+        weather: WeatherSnapshot,
+        horizon_obstruction_deg: float,
+        corridor_samples: Optional[list[tuple[float, float, float]]] = None,
     ) -> ScoringResult:
         """
         Compute the full scoring breakdown for *weather* at *horizon_obstruction_deg*.
+
+        *corridor_samples* are ``(distance_km, cloud_low_pct, cloud_mid_pct)``
+        readings taken upstream along the sunset azimuth. When supplied, they
+        scale the colour score by how much light actually reaches the clouds
+        overhead (see light_corridor_factor). When omitted the score is
+        unadjusted, so callers without corridor data behave exactly as before.
 
         Returns a ScoringResult containing per-component scores, the weighted
         physics score, and a confidence estimate.
         """
         sun_elev = weather.sun_elevation_deg
 
-        cq = self.cloud_quality_score(
-            weather.cloud_low,
-            weather.cloud_mid,
-            weather.cloud_high,
-            weather.cloud_total,
-            sun_elevation_deg=sun_elev,
-        )
+        # Atmosphere is computed FIRST because the clear-sky pathway inside
+        # cloud_quality_score depends on it: with no cloud to catch the light,
+        # the gradient is made of nothing but air, so its saturation is a
+        # direct function of how clean that air is.
         atm = self.atmosphere_score(
             weather.visibility_m,
             weather.aerosol_optical_depth,
-            weather.relative_humidity,
         )
+
         mst = self.moisture_score(
             weather.precipitation_mm,
             weather.relative_humidity,
+            tcwv=weather.tcwv_kg_m2,
             precip_last_3h=weather.precipitation_last_3h_mm,
             pressure_trend=weather.pressure_trend_hpa_3h,
             cloud_trend=weather.cloud_total_trend_3h,
             vis_trend=weather.visibility_trend_3h_m,
         )
+
+        # The corridor is computed BEFORE the pathways, not after, because one
+        # of them needs it as an input rather than as a scaling factor: a
+        # horizon band is only distinguishable from a genuinely blocked sky by
+        # the corridor being open while the sky overhead is not.
+        corridor: Optional[float] = None
+        if corridor_samples:
+            corridor = self.light_corridor_factor(
+                corridor_samples,
+                cloud_low=weather.cloud_low,
+                cloud_mid=weather.cloud_mid,
+                cloud_high=weather.cloud_high,
+            )
+
+        pathways = self.pathway_scores(
+            low_pct=weather.cloud_low,
+            mid_pct=weather.cloud_mid,
+            high_pct=weather.cloud_high,
+            total_pct=weather.cloud_total,
+            sun_elevation_deg=sun_elev,
+            clarity=atm,
+            dryness=mst,
+            corridor=corridor,
+            corridor_samples=corridor_samples,
+            precip_mm=weather.precipitation_mm,
+            precip_last_3h=weather.precipitation_last_3h_mm,
+            pressure_trend=weather.pressure_trend_hpa_3h,
+            cloud_trend=weather.cloud_total_trend_3h,
+        )
+        cq = self.combine_pathways(pathways)
+        twilight = pathways["twilight_gradient"]
+
+        # Illumination gate: a beautiful canvas that no light reaches is grey.
+        # Applied to every pathway alike — all of them are made of sunlight
+        # that has travelled hundreds of km through the lower atmosphere, so
+        # cloud along that path extinguishes all of them.
+        if corridor is not None:
+            cq = clamp(cq * corridor)
+
         hor = self.horizon_score(horizon_obstruction_deg)
 
         component_scores = {
             "cloud_quality": cq,
             "atmosphere": atm,
             "moisture": mst,
-            "horizon": hor,
         }
-        physics_score = clamp(weighted_average(component_scores, self._weights))
+        base = clamp(weighted_average(component_scores, self._weights))
+
+        # Gates: applied after the average because they bound what is possible
+        # rather than contributing a share of it. See the module docstring.
+        precip_gate = self.precipitation_gate(weather.precipitation_mm)
+        hor_gate = self.horizon_gate(horizon_obstruction_deg)
+        physics_score = clamp(base * precip_gate * hor_gate)
 
         # Afterglow potential — computed for breakdown / explanation only.
         # The effect is already embedded in cq (cloud_quality_score with sun_elev);
@@ -176,7 +542,7 @@ class ScoringEngine:
 
         confidence = self.compute_confidence(
             weather=weather,
-            component_scores=component_scores,
+            component_scores={**component_scores, "horizon": hor},
             physics_score=physics_score,
         )
 
@@ -189,6 +555,11 @@ class ScoringEngine:
             confidence=confidence,
             weights=dict(self._weights),
             afterglow=ag,
+            light_corridor=corridor,
+            precipitation_gate=precip_gate,
+            horizon_gate=hor_gate,
+            twilight_gradient=twilight,
+            pathways=pathways,
         )
 
     # ------------------------------------------------------------------
@@ -260,7 +631,97 @@ class ScoringEngine:
     # Component 1: Cloud Quality (weight 0.42)
     # ------------------------------------------------------------------
 
-    def cloud_quality_score(
+    @staticmethod
+    def horizon_strip_blocking(
+        samples: Optional[list[tuple[float, float, float]]],
+        local_low: float,
+        local_mid: float,
+    ) -> float:
+        """How much cloud stands between the viewer and the sunset horizon.
+
+        See the NEAR_FIELD_* constants for why this is not simply the local
+        cell. Falls back to the local cell when no upstream samples exist, so
+        callers without corridor data behave exactly as before.
+        """
+        local_blocking = local_low + local_mid * 0.6
+        near = [(d, lo, mid) for d, lo, mid in (samples or []) if d <= NEAR_FIELD_MAX_KM]
+        if not near:
+            return local_blocking
+
+        total_w = 0.0
+        total_b = 0.0
+        for distance_km, low_pct, mid_pct in near:
+            w = math.exp(-0.5 * (distance_km / NEAR_FIELD_SIGMA_KM) ** 2)
+            total_w += w
+            total_b += w * (low_pct + mid_pct * 0.6)
+        if total_w == 0.0:
+            return local_blocking
+        strip = total_b / total_w
+
+        return (
+            NEAR_FIELD_LOCAL_SHARE * local_blocking
+            + (1.0 - NEAR_FIELD_LOCAL_SHARE) * strip
+        )
+
+    @staticmethod
+    def twilight_gradient_score(
+        sun_elevation_deg: float,
+        low_pct: float,
+        mid_pct: float,
+        clarity: float = 70.0,
+        dryness: float = 70.0,
+        strip_blocking: Optional[float] = None,
+    ) -> float:
+        """Score the clear-sky twilight gradient, 0-100.
+
+        The cloudless pathway to colour: see the TWILIGHT_* constants for the
+        physics and for why this is a pathway rather than a penalty case.
+
+        Three things gate it:
+
+        *Timing.* Peaks at TWILIGHT_PEAK_ELEV_DEG below the horizon. While the
+        sun is still up the sky near it is too bright for the gradient to show;
+        once it is far enough down the shadow has climbed past the zenith and
+        the colour has drained.
+
+        *An open horizon strip.* Blocking cloud hides the band — but the strip
+        in question is sky 30-150 km toward the sunset, not the observer's own
+        cell, which is mostly sky above and behind them. *strip_blocking* comes
+        from horizon_strip_blocking(); when it is absent this falls back to the
+        local cell and behaves as it used to.
+
+        *Air quality, sharply.* There is no cloud here to catch the light, so
+        everything visible is scattering by the air itself: haze turns the same
+        geometry into a flat brown murk, and a wet column does the same more
+        gently. *clarity* is the atmosphere component, *dryness* the moisture
+        component. The response is deliberately steep — in a climate where most
+        evenings are cloudless these two are the only signals that separate a
+        memorable gradient from an ordinary one, and a gentle curve would rate
+        every clear night alike.
+        """
+        elev_factor = math.exp(
+            -0.5 * ((sun_elevation_deg - TWILIGHT_PEAK_ELEV_DEG) / TWILIGHT_SIGMA_DEG) ** 2
+        )
+
+        blocking = (
+            strip_blocking if strip_blocking is not None
+            else low_pct + mid_pct * 0.6
+        )
+        if blocking <= TWILIGHT_OPEN_BELOW:
+            openness = 1.0
+        else:
+            span = TWILIGHT_BLOCKED_AT - TWILIGHT_OPEN_BELOW
+            openness = clamp(1.0 - (blocking - TWILIGHT_OPEN_BELOW) / span, lo=0.0, hi=1.0)
+
+        air = (
+            TWILIGHT_CLARITY_SHARE * clamp(clarity)
+            + (1.0 - TWILIGHT_CLARITY_SHARE) * clamp(dryness)
+        ) / 100.0
+        air_factor = air ** TWILIGHT_SHARPNESS
+
+        return clamp(elev_factor * openness * air_factor * TWILIGHT_MAX)
+
+    def lit_cloud_score(
         self,
         low_pct: float,
         mid_pct: float,
@@ -269,6 +730,8 @@ class ScoringEngine:
         sun_elevation_deg: float = 0.0,
     ) -> float:
         """
+        PATHWAY: cloud as a lit canvas — the classic sunset.
+
         Score the cloud distribution for sunset colour potential.
 
         Design intent
@@ -388,17 +851,406 @@ class ScoringEngine:
             afterglow_boost = elev_factor * canvas_factor * low_factor * 28.0
             base = clamp(base + afterglow_boost)
 
-        # --- Horizon glow: Rayleigh orange for near-clear skies at low sun angles ---
-        # Only fires when total cloud < 20 % — if clouds are present they already
-        # score their own colour; this covers the clear-sky pathway.
-        # Bell curve peaks at ~0.5° (sun just kissing the horizon), sigma 2.5°.
-        if total_pct < 20.0 and -4.0 <= sun_elevation_deg <= 6.0:
-            elev_factor = math.exp(-0.5 * ((sun_elevation_deg - 0.5) / 2.5) ** 2)
-            clearness = clamp(1.0 - total_pct / 20.0)
-            horizon_glow = elev_factor * clearness * 15.0
-            base = clamp(base + horizon_glow)
-
         return clamp(base)
+
+    # ------------------------------------------------------------------
+    # PATHWAY: crepuscular rays
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def crepuscular_score(
+        low_pct: float,
+        mid_pct: float,
+        high_pct: float,
+        sun_elevation_deg: float,
+        clarity: float = 70.0,
+    ) -> float:
+        """Shafts of light through broken cloud, with the sun still up.
+
+        A different thing to look at than colour: beams and shadows radiating
+        from behind a cloud edge. Needs cloud with GAPS in it — a solid deck
+        gives no beams and a clear sky gives nothing to break — and the sun
+        low but above the horizon, so the beams are long and near-horizontal.
+
+        HONEST LIMITATION: this is the weakest pathway here, because Open-Meteo
+        reports cloud FRACTION and brokenness is a texture property. 45 % cover
+        could be one solid mass over half the sky or a field of gaps, and those
+        are opposite cases. The mid-range fraction is a proxy for the second,
+        and it will be wrong sometimes. Fixing it properly needs cloud-texture
+        data (satellite imagery, or a convection-resolving model), which is a
+        data problem, not a scoring one — see docs/scoring-v2-plan.md.
+        """
+        # Sun low but up: beams need a shallow angle and a lit sky.
+        if not (0.0 <= sun_elevation_deg <= 12.0):
+            return 0.0
+        elev_factor = math.exp(-0.5 * ((sun_elevation_deg - 4.0) / 4.0) ** 2)
+
+        # Brokenness proxy: peak at ~45 % cover in the beam-forming layers.
+        breaking = low_pct + mid_pct * 0.8
+        broken_factor = bell_curve(breaking, peak=45.0, sigma=22.0)
+
+        # Beams are made visible by scattering off haze — but heavy haze kills
+        # the contrast. This is the one pathway that wants MIDDLING clarity.
+        clarity_factor = bell_curve(clamp(clarity), peak=72.0, sigma=22.0)
+
+        # High cirrus above diffuses the source and softens the shafts.
+        high_factor = 1.0 - clamp(high_pct, hi=100.0) / 100.0 * 0.3
+
+        return clamp(elev_factor * broken_factor * clarity_factor * high_factor * CREPUSCULAR_MAX)
+
+    # ------------------------------------------------------------------
+    # PATHWAY: breaking storm
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def breaking_storm_score(
+        precip_mm: float,
+        cloud_low: float,
+        cloud_mid: float,
+        cloud_high: float,
+        sun_elevation_deg: float,
+        precip_last_3h: Optional[float] = None,
+        pressure_trend: Optional[float] = None,
+        cloud_trend: Optional[float] = None,
+    ) -> float:
+        """The sky clearing from the west just as the sun reaches the gap.
+
+        The most spectacular and least common of these. Rain has stopped, the
+        deck is breaking up, and the low sun fires into the ragged underside of
+        a departing storm — washed-clean air, extreme contrast against a dark
+        eastern sky. Almost every "best sunset I ever saw" is this one.
+
+        Scored separately rather than as a bonus inside the cloud pathway
+        because its ingredients are different in KIND: it is about change over
+        time (rain that stopped, cloud that is thinning, pressure that is
+        rising), not about a state of the sky. The old engine could only
+        express it as a +15 clearing bonus buried in the moisture component,
+        where it was worth almost nothing.
+
+        Returns 0 while it is still raining — then it is just rain.
+        """
+        if precip_mm >= 0.3:
+            return 0.0
+        if precip_last_3h is None or precip_last_3h < 0.4:
+            return 0.0
+
+        # Recency and weight of the rain that just ended.
+        recent = clamp(precip_last_3h / 2.5, hi=1.0)
+
+        # There must still be cloud to catch the light, and it must not be a
+        # solid low deck. Ragged mid/high over a breaking low layer is ideal.
+        canvas = clamp((cloud_mid + cloud_high) / 90.0, hi=1.0)
+        not_socked_in = max(0.0, 1.0 - max(0.0, cloud_low - 45.0) / 45.0)
+
+        # Evidence the sky is actually opening rather than just pausing.
+        opening = 0.0
+        if cloud_trend is not None and cloud_trend < 0.0:
+            opening += min(1.0, -cloud_trend / 25.0) * 0.6
+        if pressure_trend is not None and pressure_trend > 0.0:
+            opening += min(1.0, pressure_trend / 2.5) * 0.4
+        opening = clamp(opening, hi=1.0)
+        if opening <= 0.0:
+            return 0.0
+
+        # Works from just before sunset through the afterglow.
+        elev_factor = math.exp(-0.5 * ((sun_elevation_deg + 1.5) / 4.5) ** 2)
+
+        # GEOMETRIC MEAN over the three pieces of evidence, not their product.
+        # Multiplying five sub-unit factors was silently fatal: measured over a
+        # year at three cities this pathway never once won an evening and never
+        # exceeded 27 against a ceiling of 96, because a typical genuine case
+        # (0.4 recent x 0.7 canvas x 0.6 opening) multiplies down to 0.17.
+        #
+        # Multiplication is the right operator for a GATE, where any single
+        # zero should kill the result. It is the wrong one for accumulating
+        # evidence that all points the same way, which is what these three are:
+        # each is a partial, noisy indication that a storm is clearing. The
+        # zero-checks above already handle the gate cases.
+        evidence = (recent * canvas * opening) ** (1.0 / 3.0)
+
+        return clamp(evidence * not_socked_in * elev_factor * BREAKING_STORM_MAX)
+
+    # ------------------------------------------------------------------
+    # PATHWAY: horizon band
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def horizon_band_score(
+        low_pct: float,
+        mid_pct: float,
+        sun_elevation_deg: float,
+        corridor: Optional[float] = None,
+        clarity: float = 70.0,
+    ) -> float:
+        """A heavy deck overhead, lit from underneath through a clear strip.
+
+        The silhouette sunset: dark cloud filling the sky, and a bright band of
+        colour under it where the light gets in beneath the deck. Every other
+        pathway reads this as a bad evening, because locally it IS heavy cloud
+        — the old engine's low-cloud penalty and overcast penalty both fire.
+
+        What separates it from a genuinely blocked sky is upstream: the
+        corridor has to be OPEN even though the sky overhead is not. That is
+        exactly what light_corridor_factor measures, so this is the one pathway
+        that takes the corridor as an input rather than only being scaled by it
+        afterwards. Without heavy local cloud AND a clear corridor, it is not
+        this kind of evening and the score is zero.
+
+        Deliberately capped low: it is a real and often striking sunset, but a
+        narrow band of light under a grey lid is a lesser event than a sky on
+        fire, and it fails more often than it succeeds.
+        """
+        # No corridor measurement means no evidence, and absent evidence this
+        # pathway is indistinguishable from a plainly blocked sky. Elsewhere a
+        # missing corridor defaults to 1.0 ("assume unblocked") because it only
+        # scales a score; here it would be the entire justification, so it must
+        # be measured. Without this guard a stratus deck scored ABOVE a cirrus
+        # overcast in the no-corridor case, which inverts the physics.
+        if corridor is None:
+            return 0.0
+        deck = low_pct + mid_pct * 0.6
+        if deck < HORIZON_BAND_MIN_DECK:
+            return 0.0
+        if corridor < HORIZON_BAND_MIN_CORRIDOR:
+            return 0.0
+
+        # More deck is more dramatic, up to the point of being total.
+        deck_factor = clamp((deck - HORIZON_BAND_MIN_DECK) / 35.0, hi=1.0)
+        # An open corridor is the whole mechanism; scale hard on it.
+        corridor_factor = clamp(
+            (corridor - HORIZON_BAND_MIN_CORRIDOR) / (1.0 - HORIZON_BAND_MIN_CORRIDOR),
+            hi=1.0,
+        )
+        # The band lives in the few degrees around sunset.
+        elev_factor = math.exp(-0.5 * ((sun_elevation_deg + 0.5) / 3.0) ** 2)
+        clarity_factor = 0.45 + 0.55 * clamp(clarity) / 100.0
+
+        return clamp(
+            deck_factor * corridor_factor * elev_factor * clarity_factor * HORIZON_BAND_MAX
+        )
+
+    # ------------------------------------------------------------------
+    # Pathways: evaluation and combination
+    # ------------------------------------------------------------------
+
+    def pathway_scores(
+        self,
+        *,
+        low_pct: float,
+        mid_pct: float,
+        high_pct: float,
+        total_pct: float,
+        sun_elevation_deg: float = 0.0,
+        clarity: float = 70.0,
+        dryness: float = 70.0,
+        corridor: Optional[float] = None,
+        corridor_samples: Optional[list[tuple[float, float, float]]] = None,
+        precip_mm: float = 0.0,
+        precip_last_3h: Optional[float] = None,
+        pressure_trend: Optional[float] = None,
+        cloud_trend: Optional[float] = None,
+    ) -> dict[str, float]:
+        """Score every route to a beautiful sunset independently.
+
+        See the PATHWAYS section at the top of this module for why this is a
+        set rather than a formula.
+        """
+        strip_blocking = (
+            self.horizon_strip_blocking(corridor_samples, low_pct, mid_pct)
+            if corridor_samples else None
+        )
+        return {
+            "lit_cloud": self.lit_cloud_score(
+                low_pct, mid_pct, high_pct, total_pct, sun_elevation_deg
+            ),
+            "twilight_gradient": self.twilight_gradient_score(
+                sun_elevation_deg, low_pct, mid_pct, clarity, dryness, strip_blocking
+            ),
+            "crepuscular": self.crepuscular_score(
+                low_pct, mid_pct, high_pct, sun_elevation_deg, clarity
+            ),
+            "breaking_storm": self.breaking_storm_score(
+                precip_mm, low_pct, mid_pct, high_pct, sun_elevation_deg,
+                precip_last_3h, pressure_trend, cloud_trend,
+            ),
+            "horizon_band": self.horizon_band_score(
+                low_pct, mid_pct, sun_elevation_deg, corridor, clarity
+            ),
+        }
+
+    @staticmethod
+    def combine_pathways(scores: dict[str, float]) -> float:
+        """Collapse the pathway scores into one number.
+
+        NOT a weighted average. Averaging asks every evening to be good in
+        every way at once, which no real sunset is: it would rank a mediocre
+        sky that ticks several boxes above a cloudless one that is doing one
+        thing superbly. That is the failure this whole structure exists to
+        avoid.
+
+        NOT a plain maximum either. When two mechanisms are genuinely running —
+        a breaking storm that also leaves a lit deck — the evening is better
+        than either alone, and a max cannot say so.
+
+        So: the best pathway sets the score, and the others add a modest lift
+        that shrinks as the best approaches 100. An evening is as good as its
+        best route to beauty, plus a little for having more than one.
+        """
+        if not scores:
+            return 0.0
+        values = sorted(scores.values(), reverse=True)
+        best = values[0]
+        if best <= 0.0:
+            return 0.0
+        secondary = sum(v for v in values[1:]) / 100.0
+        lift = MULTI_PATHWAY_LIFT * min(secondary, 1.5) * (1.0 - best / 100.0)
+        return clamp(best + lift)
+
+    @staticmethod
+    def dominant_pathway(scores: dict[str, float]) -> Optional[str]:
+        """Which route to beauty this evening is taking, if any.
+
+        The UI needs this as much as the number does: "lit clouds" and "clear
+        gradient" want different words, different best-viewing times, and send
+        someone outside looking for different things.
+        """
+        if not scores:
+            return None
+        key = max(scores, key=lambda k: scores[k])
+        return key if scores[key] > 0.0 else None
+
+    def cloud_quality_score(
+        self,
+        low_pct: float,
+        mid_pct: float,
+        high_pct: float,
+        total_pct: float,
+        sun_elevation_deg: float = 0.0,
+        clarity: float = 70.0,
+        dryness: float = 70.0,
+    ) -> float:
+        """Combined colour-potential score across all pathways.
+
+        Kept as the component-level entry point (it is what the 0.60 weight is
+        applied to). Pathways needing data beyond cloud and sun — the corridor,
+        the precipitation history — fall back to their neutral defaults here,
+        so this is the sky-only view; score() passes the full picture.
+        """
+        return self.combine_pathways(
+            self.pathway_scores(
+                low_pct=low_pct,
+                mid_pct=mid_pct,
+                high_pct=high_pct,
+                total_pct=total_pct,
+                sun_elevation_deg=sun_elevation_deg,
+                clarity=clarity,
+                dryness=dryness,
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Light corridor — the upstream illumination path
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def corridor_transmittance(
+        samples: list[tuple[float, float, float]], layer_height_km: float
+    ) -> float:
+        """Fraction of sunset light reaching a cloud layer at *layer_height_km*.
+
+        *samples* are ``(distance_km, cloud_low_pct, cloud_mid_pct)`` readings
+        taken along the sunset azimuth, upstream of the observer.
+
+        WHY THIS EXISTS
+        ---------------
+        Everything else in this engine looks only at the observer's own grid
+        cell, which cannot see the single most important thing about a sunset:
+        whether light can *reach* the clouds overhead. A solid deck 200 km
+        toward the sunset kills the display no matter how good your local sky
+        looks. Corfidi (NOAA SPC) describes the best sunsets as a mid/high deck
+        covering everything "except a narrow clear strip near the horizon" —
+        that strip is what this measures.
+
+        GEOMETRY
+        --------
+        Light illuminating a cloud at height h grazes the surface roughly
+        ``sqrt(2·R·h)`` away along the sun's azimuth (~113 km for 1 km cloud,
+        ~226 km for 4 km, ~339 km for 9 km). Nearer than that the ray is
+        already above the boundary layer; further out it hasn't descended into
+        it yet. So samples are weighted by a broad Gaussian centred on that
+        tangent distance — broad because forecast grids are coarse and the ray
+        traverses a range of distances, not a point.
+
+        Only low and mid cloud block: high cirrus diffuses light rather than
+        occluding it, which is why it is excluded from the blocking sum.
+
+        Returns 1.0 (fully transmitting) when there are no samples, so every
+        caller degrades gracefully to the previous behaviour.
+        """
+        if not samples:
+            return 1.0
+
+        tangent = horizon_tangent_distance_km(layer_height_km)
+        if tangent <= 0.0:
+            return 1.0
+        sigma = max(tangent * 0.45, 40.0)
+
+        total_w = 0.0
+        total_blocking = 0.0
+        for distance_km, low_pct, mid_pct in samples:
+            w = math.exp(-0.5 * ((distance_km - tangent) / sigma) ** 2)
+            # Mid cloud only partially occludes; high cloud not at all.
+            blocking = clamp(low_pct + mid_pct * 0.5) / 100.0
+            total_w += w
+            total_blocking += w * blocking
+
+        if total_w == 0.0:
+            return 1.0
+        return clamp(1.0 - total_blocking / total_w, lo=0.0, hi=1.0)
+
+    def light_corridor_factor(
+        self,
+        samples: list[tuple[float, float, float]],
+        cloud_low: float,
+        cloud_mid: float,
+        cloud_high: float,
+    ) -> float:
+        """Multiplier in [CORRIDOR_FLOOR, 1.0] applied to the colour score.
+
+        This is a *multiplier*, not another weighted component, because that is
+        the physics: colour = canvas × illumination. An unlit canvas is grey no
+        matter how well-shaped it is, so no amount of good local cloud should
+        be able to compensate for a blocked corridor.
+
+        Each layer is illuminated through its own tangent distance, so the
+        layers present overhead determine which part of the corridor matters.
+        A sky of pure cirrus cares about conditions ~340 km out; a low-cloud
+        sky cares about ~110 km out.
+
+        The floor keeps a blocked corridor from zeroing the score outright —
+        diffuse skylight still tints an overcast evening slightly.
+        """
+        if not samples:
+            return 1.0
+
+        layers = (
+            (cloud_low, LAYER_HEIGHT_KM["low"]),
+            (cloud_mid, LAYER_HEIGHT_KM["mid"]),
+            (cloud_high, LAYER_HEIGHT_KM["high"]),
+        )
+        total_cover = sum(cover for cover, _ in layers)
+
+        if total_cover < 5.0:
+            # Effectively clear overhead: the colour is horizon glow, which
+            # arrives along the longest slant path, so it is the far field that
+            # decides whether there is anything to see.
+            transmittance = self.corridor_transmittance(samples, LAYER_HEIGHT_KM["high"])
+        else:
+            transmittance = sum(
+                cover * self.corridor_transmittance(samples, h) for cover, h in layers
+            ) / total_cover
+
+        return CORRIDOR_FLOOR + (1.0 - CORRIDOR_FLOOR) * transmittance
 
     # ------------------------------------------------------------------
     # Afterglow potential (standalone, for breakdown and explanation)
@@ -459,50 +1311,99 @@ class ScoringEngine:
     # Component 2: Atmosphere / Clarity (weight 0.28)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def aerosol_clarity(aerosol_od: float) -> float:
+        """Score air cleanliness from aerosol optical depth, 0-100.
+
+        MONOTONE DECREASING, deliberately. This replaces a bell curve that
+        peaked at AOD 0.18 and scored pristine air (AOD 0.03) at only ~56 —
+        i.e. it treated a smog layer as the ideal and clean desert air as
+        mediocre.
+
+        That was backwards. Corfidi (NOAA/SPC, "A Guide to Forecasting Colorful
+        Sunrises and Sunsets") is explicit that tropospheric aerosols SUBDUE
+        sunset colour: they scatter and absorb across the visible band, which
+        washes the reds toward a flat milky orange. Clean air is the main
+        ingredient — the vivid skies are the ones after a front has scrubbed
+        the boundary layer, not the hazy ones.
+
+        Please do not "fix" this back into a bell curve. The intuition that a
+        little haze helps comes from confusing aerosol with high cirrus, which
+        is a cloud effect and is already scored in cloud_quality.
+        """
+        return _interpolate(AEROSOL_ANCHORS, aerosol_od)
+
     def atmosphere_score(
         self,
-        visibility_m: float,
+        visibility_m: Optional[float],
         aerosol_od: Optional[float],
-        humidity_pct: float,
     ) -> float:
         """
-        Score atmospheric clarity for sunset colour intensity.
+        Score atmospheric clarity — how cleanly light reaches you.
 
-        - High visibility = clean air = vivid colours
-        - Moderate aerosol (AOD 0.1–0.3) scatters blue light and intensifies
-          warm tones — the "pink hour" effect.  Too much (AOD > 0.6) creates
-          milky haze that dulls colours.
-        - Missing AOD falls back to a visibility-derived proxy with a gentler
-          floor (40 pts) — missing data should not tank the score.
-        - High humidity is a mild penalty only (above 75 %, max −18 pts).
+        Aerosol leads (see aerosol_clarity); visibility, when the source
+        reports it, is a second look at the same physical quantity and gets
+        the smaller share.
+
+        *visibility_m* of None means the source did not report it — true of
+        every ERA5 archive hour. It is then simply left out, rather than
+        defaulting to 15 km as before: a constant contributes nothing but a
+        fixed offset, and it made the climatology's atmosphere term a function
+        of humidity alone.
+
+        Surface humidity is NOT penalised here any more. Moisture is scored
+        once, as a water column, in moisture_score — counting it in both places
+        double-charged humid evenings.
         """
-        # Visibility: 25 km = excellent; linear below that
-        vis_score = clamp(visibility_m / 25_000.0 * 100.0)
+        aer_score = (
+            self.aerosol_clarity(aerosol_od) if aerosol_od is not None else None
+        )
+        vis_score = (
+            clamp(visibility_m / 25_000.0 * 100.0) if visibility_m is not None else None
+        )
 
-        if aerosol_od is not None:
-            # Peak at AOD ≈ 0.18 (light haze for warm tones)
-            aer_score = bell_curve(aerosol_od, peak=0.18, sigma=0.15) * 100.0
-        else:
-            # Estimated AOD: no artificial floor — tie it directly to visibility
-            # so that the default 15 km archive baseline produces a neutral score,
-            # not a phantom-high one.  Previously max(40, vis*0.80) could give ~77
-            # even with mediocre visibility; now it scales proportionally.
-            aer_score = vis_score * 0.75
-
-        # Humidity: mild penalty above 75 % (max −18 pts at 100 %)
-        hum_penalty = max(0.0, (humidity_pct - 75.0) / 25.0 * 18.0)
-
-        combined = vis_score * 0.50 + aer_score * 0.50 - hum_penalty
-        return clamp(combined)
+        if aer_score is not None and vis_score is not None:
+            return clamp(aer_score * 0.65 + vis_score * 0.35)
+        if aer_score is not None:
+            return clamp(aer_score)
+        if vis_score is not None:
+            return clamp(vis_score)
+        # Neither reported: a neutral score, so an evening is neither rewarded
+        # nor punished for a gap in the data.
+        return 60.0
 
     # ------------------------------------------------------------------
     # Component 3: Moisture / Precipitation (weight 0.20)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def column_dryness(tcwv_kg_m2: float) -> float:
+        """Score the whole-atmosphere water load, 0-100. Drier is better.
+
+        TCWV (kg/m², equivalently mm of precipitable water) is the total water
+        vapour in the column above you. It is what actually mutes sunset
+        colour: vapour both scatters and feeds the sub-visible haze that turns
+        red into milky orange, along the entire slant path the light takes.
+
+        Surface relative humidity — what this component used to score — is a
+        measurement of the bottom two metres and says very little about that
+        path. It is also bounded and heavily diurnal, so on dry evenings it sat
+        pinned at 100 and contributed no information: measured over a year at
+        three cities, moisture held 15 % of the weight while accounting for
+        2.8-5.0 % of the variance in the final score.
+
+        Anchors are absolute (8 mm is dry anywhere, 45 mm is tropical), which
+        is safe now that the displayed score is a percentile against local
+        climatology — an always-humid location is ranked against its own
+        history, not against a desert.
+        """
+        return _interpolate(TCWV_ANCHORS, tcwv_kg_m2)
+
     def moisture_score(
         self,
         precip_mm: float,
         humidity_pct: float,
+        tcwv: Optional[float] = None,
         *,
         precip_last_3h: Optional[float] = None,
         pressure_trend: Optional[float] = None,
@@ -510,20 +1411,29 @@ class ScoringEngine:
         vis_trend: Optional[float] = None,
     ) -> float:
         """
-        Score moisture and precipitation conditions.
+        Score moisture — the atmospheric water column, and post-rain clearing.
 
-        Separate treatment for:
-        - Active precipitation now  → strong penalty
-        - Recent rain + current clearing → clearing bonus (post-rain glow)
+        The base is column_dryness(*tcwv*). Surface humidity survives only as a
+        small correction (max −10 above 85 %), because a saturated boundary
+        layer does put haze in the lowest, brightest part of the view even when
+        the column above is dry. When *tcwv* is unavailable — manual overrides,
+        or any source that stops returning it — the old surface-RH curve stands
+        in, so a missing field degrades the component rather than breaking it.
+
+        NOTE: active precipitation is NOT scored here. It is a multiplicative
+        gate (see precipitation_gate) because rain ends a sunset rather than
+        reducing it by some number of points. *precip_mm* is still needed to
+        decide whether the clearing bonus applies, which it cannot while it is
+        still raining.
+
+        - Dry column → high base score
+        - Recent rain + currently dry → clearing bonus (post-rain glow)
         - Rising pressure / improving visibility / clearing clouds → bonus
-        - High humidity without rain → mild penalty only
+        - Saturated surface air → mild penalty
 
         Clearing bonus: up to +15 pts when rain stopped recently and
         atmospheric signals show improvement.
         """
-        # Active rain: 0 mm = 0 penalty; ~2 mm = ~90 penalty (near knockout)
-        precip_penalty = clamp(precip_mm * 45.0)
-
         # Clearing bonus — only applicable when it is NOT currently raining
         clearing_bonus = 0.0
         if precip_mm < 0.1:
@@ -541,10 +1451,16 @@ class ScoringEngine:
                 clearing_bonus += 3.0
             clearing_bonus = min(clearing_bonus, 15.0)
 
-        # Humidity: penalty only above 85 % (max −25 pts at 100 %)
-        hum_penalty = max(0.0, (humidity_pct - 85.0) / 15.0 * 25.0)
+        if tcwv is not None:
+            base = self.column_dryness(tcwv)
+            # Small correction only — the column already carries the moisture.
+            hum_penalty = max(0.0, (humidity_pct - 85.0) / 15.0 * 10.0)
+        else:
+            # Fallback: the pre-column behaviour, penalty only above 85 %.
+            base = 100.0
+            hum_penalty = max(0.0, (humidity_pct - 85.0) / 15.0 * 25.0)
 
-        return clamp(100.0 - precip_penalty - hum_penalty + clearing_bonus)
+        return clamp(base - hum_penalty + clearing_bonus)
 
     # ------------------------------------------------------------------
     # Component 4: Horizon (weight 0.10)
@@ -552,20 +1468,75 @@ class ScoringEngine:
 
     def horizon_score(self, obstruction_deg: float) -> float:
         """
-        Score the unobstructed horizon.
+        Score the unobstructed horizon, 0-100, for DISPLAY only.
+
+        This is no longer part of the weighted average — it is reported so the
+        user can see how much their own outlook costs them, and applied through
+        horizon_gate(). Measured across a year it had a standard deviation of
+        zero, because it is a property of where you stand, not of the evening.
+        As a weighted addend it therefore added a constant ~9 points to every
+        score without ever distinguishing one night from another.
 
         0 degrees = open ocean / flat field = 100.
-        5 degrees = gentle hills / low suburbs = ~70.
-        15+ degrees = dense urban / deep valley = ~15.
-
-        Uses a softened power curve (exponent 1.2, coefficient 3.8) so that
-        typical urban/suburban locations are not over-penalised.
+        5 degrees = gentle hills / low suburbs = ~88.
+        15+ degrees = dense urban / deep valley = ~49.
         """
-        return clamp(100.0 - (obstruction_deg ** 1.2) * 3.8)
+        return clamp(self.horizon_gate(obstruction_deg) * 100.0)
+
+    @staticmethod
+    def horizon_gate(obstruction_deg: float) -> float:
+        """Fraction of the display an obstructed horizon leaves visible.
+
+        A raised horizon hides the sun early and cuts off the brightest,
+        lowest part of the sky, so it scales the whole result rather than
+        contributing a share of it.
+
+        Deliberately gentler near zero than the old scoring curve: 2 degrees is
+        an essentially open horizon (trees across a field) and used to cost
+        nearly 9 points. It now costs under 4 %.
+
+            0°  → 1.00      5°  → 0.88      15° → 0.49
+            2°  → 0.96      10° → 0.70      25°+ → 0.35 (floor)
+        """
+        if obstruction_deg <= 0.0:
+            return 1.0
+        loss = (min(obstruction_deg, 25.0) / 25.0) ** 1.3
+        return max(HORIZON_FLOOR, 1.0 - loss)
+
+    @staticmethod
+    def precipitation_gate(precip_mm: float) -> float:
+        """Fraction of the display that survives active precipitation.
+
+        Rain does not subtract points from a sunset — it replaces it with grey.
+        Modelled as exponential decay so that drizzle barely registers (a
+        breaking shower at sunset can be spectacular) while steady rain
+        collapses the score.
+
+            0.0 mm → 1.00      1.0 mm → 0.55      3.0 mm → 0.17
+            0.2 mm → 0.89      2.0 mm → 0.30      5.0 mm+ → 0.15 (floor)
+        """
+        if precip_mm <= 0.0:
+            return 1.0
+        return max(PRECIP_FLOOR, math.exp(-0.6 * precip_mm))
 
     # ------------------------------------------------------------------
     # Category mapping
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def percentile_to_display_score(percentile: float) -> float:
+        """Map a climatological percentile in [0, 1] onto a 0-100 rank score.
+
+        NO LONGER THE DISPLAY PATH. The app shows the absolute physics score;
+        this remains for analysis (scripts/evaluate.py uses it to show what a
+        purely rank-based scale would look like) and because the anchors below
+        still document the intended shape of a rarity scale.
+
+        Piecewise-linear through CALIBRATION_ANCHORS, so each band ends up with
+        a fixed share of evenings regardless of climate. Monotone by
+        construction: a better evening never displays a lower number.
+        """
+        return _interpolate(CALIBRATION_ANCHORS, clamp(percentile, lo=0.0, hi=1.0))
 
     @staticmethod
     def score_to_category(score: float) -> str:
@@ -587,6 +1558,7 @@ class ScoringEngine:
         has_ml: bool = False,
         window_scores: Optional[list[float]] = None,
         lead_time_hours: Optional[float] = None,
+        ensemble_cloud_spread: Optional[float] = None,
     ) -> float:
         """
         Estimate prediction confidence in [15, 92].
@@ -595,17 +1567,29 @@ class ScoringEngine:
         - The score is far from the ambiguous middle (40–60)
         - Multiple window points agree
         - Aerosol data is real (not proxy-estimated)
-        - The sunset is imminent (forecast refreshes hourly and firms up)
+        - Forecast ensemble members agree on cloud cover (or the sunset is imminent,
+          when no ensemble reading is available)
 
         Confidence is lower when:
         - Signals conflict (good clouds + active rain)
         - The window is highly volatile (one great point, rest collapse)
         - Aerosol is estimated
         - Active rain conflicts with otherwise strong sky structure
-        - The target sunset is many days out (forecast skill decays with lead time)
+        - Forecast ensemble members disagree on cloud cover, or (without an
+          ensemble reading) the target sunset is many days out
+
+        *ensemble_cloud_spread* is the standard deviation of total cloud cover
+        (%) across forecast ensemble members at the sunset hour — an actual
+        measurement of forecast uncertainty (see weather_service.get_ensemble_
+        cloud_spread). When present it REPLACES the lead-time term below,
+        because both approximate the same thing and the ensemble spread is the
+        real version of what lead-time was guessing at. Pass None when no
+        ensemble reading exists (past dates, or beyond the model's ~7.5-day
+        honest horizon) to fall back to lead-time.
 
         *lead_time_hours* is the gap from now to the target sunset; pass None
         (the default) to skip the lead-time term entirely (e.g. for overrides).
+        Ignored when *ensemble_cloud_spread* is given.
         """
         base = 60.0
 
@@ -640,10 +1624,15 @@ class ScoringEngine:
         if has_ml:
             base += 4.0
 
-        # Forecast lead-time: imminent sunsets (and observed past dates) get a
-        # small boost; ~1 day out is neutral; each further day is penalised,
-        # reflecting how forecast skill decays with lead time.
-        if lead_time_hours is not None:
+        # Forecast uncertainty: prefer the real measurement (ensemble spread)
+        # over the lead-time guess when one is available.
+        if ensemble_cloud_spread is not None:
+            base += _interpolate(ENSEMBLE_SPREAD_CONFIDENCE_ANCHORS, ensemble_cloud_spread)
+        elif lead_time_hours is not None:
+            # Imminent sunsets (and observed past dates) get a small boost;
+            # ~1 day out is neutral; each further day is penalised, reflecting
+            # how forecast skill decays with lead time. Only a fallback for
+            # when no ensemble reading exists — the guess ensemble spread replaces.
             base += self._lead_time_adjustment(lead_time_hours)
 
         return clamp(base, lo=15.0, hi=92.0)
@@ -663,3 +1652,33 @@ class ScoringEngine:
             return MAX_BONUS * (1.0 - lead_time_hours / 24.0)
         days_beyond = (lead_time_hours - 24.0) / 24.0
         return -PER_DAY_PENALTY * days_beyond
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _interpolate(anchors: list[tuple[float, float]], x: float) -> float:
+    """Piecewise-linear lookup through (x, y) *anchors*, which must be sorted by x.
+
+    Values outside the table clamp to the nearest endpoint. Used for every
+    response curve in this module so the shape of a curve is a readable table
+    rather than a fitted constant — the aerosol bell curve survived as long as
+    it did partly because `bell_curve(aod, peak=0.18, sigma=0.15)` does not
+    look wrong until you evaluate it.
+    """
+    if not anchors:
+        return 0.0
+    if x <= anchors[0][0]:
+        return anchors[0][1]
+    if x >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(len(anchors) - 1):
+        x_lo, y_lo = anchors[i]
+        x_hi, y_hi = anchors[i + 1]
+        if x_lo <= x <= x_hi:
+            span = x_hi - x_lo
+            frac = 0.0 if span == 0 else (x - x_lo) / span
+            return y_lo + frac * (y_hi - y_lo)
+    return anchors[-1][1]

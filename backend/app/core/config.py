@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     OPEN_METEO_AIR_QUALITY_URL: str = "https://air-quality-api.open-meteo.com/v1"
     OPEN_METEO_ARCHIVE_URL: str = "https://archive-api.open-meteo.com/v1"
     OPEN_METEO_GEOCODING_URL: str = "https://geocoding-api.open-meteo.com/v1"
+    OPEN_METEO_ENSEMBLE_URL: str = "https://ensemble-api.open-meteo.com/v1"
+
+    # Forecast model, set explicitly rather than left at Open-Meteo's `auto`.
+    # ICON-based cloud forecasts are generally ranked above GFS/NAM-based ones,
+    # and an explicit model is a prerequisite for the ensemble spread below —
+    # confidence has to measure spread of the SAME model family it forecasts with.
+    OPEN_METEO_MODEL: str = "icon_seamless"
 
     # Reddit API credentials (optional; needed only for dataset building)
     REDDIT_CLIENT_ID: str = ""
@@ -31,8 +38,26 @@ class Settings(BaseSettings):
     MODEL_METADATA_PATH: str = "trained_models/model_metadata.json"
 
     # Blending weight: final = alpha * physics + (1 - alpha) * ml_prediction
-    # 1.0 = pure physics, 0.0 = pure ML
-    ML_BLEND_ALPHA: float = 0.4
+    # 1.0 = pure physics, 0.0 = pure ML.
+    #
+    # Deliberately 1.0 — the ML branch is OFF. The one model ever trained scored
+    # spearman_r = -0.0266 (p = 0.55), i.e. no signal, because its labels were
+    # Reddit upvotes joined to weather at five fixed cities regardless of where
+    # the photo was taken. It was shelved for that reason. At the previous 0.4 a
+    # model would have taken 60 % of the final score, so an accidental .joblib
+    # landing in trained_models/ was one file away from silently degrading every
+    # prediction. See docs/scoring-v2-plan.md (D7) and ML_MIN_SPEARMAN below.
+    ML_BLEND_ALPHA: float = 1.0
+
+    # A model must beat this rank correlation, recorded in its own metadata,
+    # before MLModel.load() will accept it. Guards against re-loading a model
+    # that measured no better than noise.
+    ML_MIN_SPEARMAN: float = 0.15
+
+    # Where human sunset ratings (ML training labels) are appended as JSONL.
+    # NOTE: Render's free tier filesystem is EPHEMERAL — point this at a mounted
+    # persistent disk before relying on it in production.
+    RATINGS_PATH: str = "data/ratings.jsonl"
 
     # Default horizon obstruction in degrees (0 = open ocean/flat horizon)
     DEFAULT_HORIZON_OBSTRUCTION_DEG: float = 2.0

@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from astral import Observer
-from astral.sun import sun, elevation as solar_elevation
+from astral.sun import sun, azimuth as solar_azimuth, elevation as solar_elevation
 
 from app.core.logging import get_logger
 
@@ -59,6 +59,28 @@ class AstronomyService:
             return solar_elevation(observer, dateandtime=dt)
         except Exception:
             return 0.0
+
+    def get_sunset_azimuth(self, lat: float, lon: float, target_date: date) -> float:
+        """Compass bearing (degrees clockwise from true north) of the setting sun.
+
+        This is the direction the light comes from, and therefore the direction
+        the light-corridor model samples. It is strongly seasonal — Tel Aviv in
+        late August sets at ~283°, London at midwinter at ~232° — so a fixed
+        "due west" assumption would sample the wrong atmosphere for most of the
+        year outside the tropics.
+        """
+        sunset = self.get_sunset_time(lat, lon, target_date)
+        observer = Observer(latitude=lat, longitude=lon)
+        try:
+            return float(solar_azimuth(observer, sunset))
+        except Exception:
+            # Polar cases where astral cannot resolve geometry — due west is the
+            # least-wrong fallback and the corridor degrades gracefully anyway.
+            logger.warning(
+                "azimuth() failed for lat=%.4f lon=%.4f date=%s — defaulting to 270°",
+                lat, lon, target_date,
+            )
+            return 270.0
 
     def get_best_viewing_window(
         self, sunset_time: datetime

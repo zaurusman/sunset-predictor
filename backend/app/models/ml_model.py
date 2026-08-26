@@ -92,13 +92,43 @@ class MLModel:
         try:
             import joblib
 
+            metadata = self._registry.load_metadata()
+
+            # Quality gate — refuse a model that never demonstrated signal.
+            #
+            # The one model ever trained here recorded spearman_r = -0.0266
+            # (p = 0.55): no better than noise. Previously load() checked only
+            # that the file existed, so dropping that .joblib back into
+            # trained_models/ would have re-armed it silently. A model has to
+            # show it beats chance, in its own metadata, before it can touch a
+            # score. See docs/scoring-v2-plan.md (D7).
+            threshold = self._settings.ML_MIN_SPEARMAN
+            recorded = metadata.get("spearman_r")
+            if recorded is None:
+                logger.warning(
+                    "Model at %s has no spearman_r in its metadata — refusing to load. "
+                    "Physics-only mode active.",
+                    self._registry.model_path,
+                )
+                self._loaded = False
+                return False
+            if float(recorded) < threshold:
+                logger.warning(
+                    "Model at %s scored spearman_r=%.4f, below the ML_MIN_SPEARMAN=%.2f "
+                    "quality gate — refusing to load. Physics-only mode active.",
+                    self._registry.model_path, float(recorded), threshold,
+                )
+                self._loaded = False
+                return False
+
             self._model = joblib.load(self._registry.model_path)
-            self._metadata = self._registry.load_metadata()
+            self._metadata = metadata
             self._loaded = True
             logger.info(
-                "Loaded ML calibration model from %s (trained %s)",
+                "Loaded ML calibration model from %s (trained %s, spearman_r=%.4f)",
                 self._registry.model_path,
                 self._metadata.get("trained_at", "unknown"),
+                float(recorded),
             )
             return True
         except Exception as exc:
@@ -193,7 +223,7 @@ class MLModel:
             weather.cloud_mid,
             weather.cloud_high,
             weather.cloud_total,
-            math.log(weather.visibility_m + 1.0),
+            math.log((weather.visibility_m or 15_000.0) + 1.0),
             weather.relative_humidity,
             weather.dewpoint_c,
             math.log1p(weather.precipitation_mm),

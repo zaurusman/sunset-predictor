@@ -15,6 +15,11 @@ from app.schemas.weather import WeatherSnapshot
 if TYPE_CHECKING:
     from app.services.scoring_engine import WindowResult
 
+# Priority floor for gate reasons. Component scores top out at 100, so this
+# guarantees a biting gate outranks any component — which is correct, because
+# a gate bounds what the evening can be rather than contributing to it.
+GATE_PRIORITY = 110.0
+
 
 class ExplanationEngine:
     """
@@ -44,10 +49,24 @@ class ExplanationEngine:
         # -----------------------------------------------------------------
         if window_result is not None and len(window_result.window_scores) > 1:
             best = window_result.best_label
+            # "Afterglow" means lit cloud, so the test is whether there is any
+            # canvas at all — not how strong the gradient is. With no mid or
+            # high cloud the late peak can only be the gradient, whatever its
+            # score.
+            gradient_evening = weather.cloud_high < 15.0 and weather.cloud_mid < 15.0
             if best == "+15m":
-                candidates.append((75.0, "Best viewing is likely about 15 minutes after sunset — stay for the afterglow."))
+                candidates.append((75.0, (
+                    "Best viewing is likely about 15 minutes after sunset — the gradient "
+                    "deepens once the sun is down."
+                    if gradient_evening else
+                    "Best viewing is likely about 15 minutes after sunset — stay for the afterglow."
+                )))
             elif best == "+30m":
-                candidates.append((72.0, "Conditions may improve after sunset — the afterglow could be the highlight."))
+                candidates.append((72.0, (
+                    "The colour keeps building after sunset — the deepest tones come last."
+                    if gradient_evening else
+                    "Conditions may improve after sunset — the afterglow could be the highlight."
+                )))
             elif best == "-15m":
                 candidates.append((70.0, "The best colour may arrive just before the sun dips below the horizon."))
             # For "sunset" we skip the timing hint — it's the default expectation
@@ -55,6 +74,62 @@ class ExplanationEngine:
             # Volatile window note
             if window_result.volatility_penalty > 4.0:
                 candidates.append((30.0, "Conditions look inconsistent across the window — confidence is moderate."))
+
+        # -----------------------------------------------------------------
+        # Gates — the binding constraints
+        #
+        # These are given priority above any component score, because when a
+        # gate is biting it IS the reason. Without this an evening suppressed
+        # to "Not tonight" by a blocked light corridor would lead with
+        # "clear air will help colours pop", which reads as a contradiction:
+        # the atmosphere component is genuinely high, it just no longer
+        # determines the outcome.
+        # -----------------------------------------------------------------
+        corridor = breakdown.light_corridor_factor
+        if corridor is not None and corridor < 0.85:
+            severity = (1.0 - corridor) * 100.0
+            if corridor < 0.45:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Cloud well to the west is blocking the sunlight before it reaches you — "
+                    "the sky overhead may look fine but there is little light to colour it.",
+                ))
+            elif corridor < 0.7:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Cloud upstream is shading the light path, so colours will likely be muted "
+                    "even if the sky above looks promising.",
+                ))
+            else:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "A little cloud along the light path may take some intensity out of the colour.",
+                ))
+        elif corridor is not None and corridor >= 0.95:
+            candidates.append((
+                60.0,
+                "The light path to the west is clear, so the sun's last light should arrive unblocked.",
+            ))
+
+        if breakdown.precipitation_gate < 0.85:
+            severity = (1.0 - breakdown.precipitation_gate) * 100.0
+            if breakdown.precipitation_gate < 0.4:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Rain around sunset will most likely replace the colour altogether.",
+                ))
+            else:
+                candidates.append((
+                    GATE_PRIORITY + severity,
+                    "Showers near sunset could interrupt the view, though a break in the rain "
+                    "can be spectacular.",
+                ))
+
+        if breakdown.horizon_gate < 0.85:
+            candidates.append((
+                GATE_PRIORITY + (1.0 - breakdown.horizon_gate) * 60.0,
+                "Your horizon is obstructed enough to hide the lowest, brightest part of the sky.",
+            ))
 
         # -----------------------------------------------------------------
         # Afterglow reasons (sun below horizon with supporting conditions)
@@ -79,6 +154,48 @@ class ExplanationEngine:
                 ))
 
         # -----------------------------------------------------------------
+        # Which KIND of sunset this is
+        #
+        # Placed above the component reasons because it frames everything
+        # after it. The score alone does not tell someone what to go outside
+        # and look for, and the pathways look nothing like each other: beams
+        # through broken cloud, a gradient with no cloud at all, and a bright
+        # band under a grey lid are three different evenings.
+        # -----------------------------------------------------------------
+        dominant = breakdown.dominant_pathway
+        paths = breakdown.pathway_scores or {}
+        dominant_score = paths.get(dominant, 0.0) if dominant else 0.0
+
+        if dominant == "breaking_storm" and dominant_score >= 30.0:
+            candidates.append((
+                dominant_score + 5.0,
+                "The rain is clearing right around sunset — light hitting the underside "
+                "of a departing storm is as good as skies get.",
+            ))
+        elif dominant == "horizon_band" and dominant_score >= 25.0:
+            candidates.append((
+                dominant_score + 5.0,
+                "Heavy cloud overhead, but it is open to the west — expect a bright band "
+                "of colour low down, under the deck.",
+            ))
+        elif dominant == "crepuscular" and dominant_score >= 30.0:
+            candidates.append((
+                dominant_score + 5.0,
+                "Broken cloud with the sun still up — watch for shafts of light rather "
+                "than colour.",
+            ))
+
+        # A second mechanism running is worth saying: it is what separates a
+        # merely good evening from a memorable one.
+        active = sorted((v for v in paths.values() if v >= 30.0), reverse=True)
+        if len(active) >= 2 and active[1] >= 0.6 * active[0]:
+            candidates.append((
+                40.0,
+                "More than one thing is going on in the sky tonight, which usually means "
+                "the view keeps changing — it is worth staying out for a while.",
+            ))
+
+        # -----------------------------------------------------------------
         # Cloud Quality reasons
         # -----------------------------------------------------------------
         cq = breakdown.cloud_quality_score
@@ -88,9 +205,28 @@ class ExplanationEngine:
         elif weather.cloud_high >= 25 and weather.cloud_low < 25:
             candidates.append((cq, "Some high clouds should help scatter warm light at sunset."))
         elif weather.cloud_high < 10 and weather.cloud_mid < 10:
-            candidates.append(
-                (100 - cq, "Very few clouds in the sky — clear conditions produce less colour drama.")
-            )
+            # A cloudless sky is not automatically a poor one. When the air is
+            # clean it colours as a gradient instead of as lit cloud, so say
+            # which kind of evening this is rather than treating "no clouds" as
+            # a failure. Telling someone "less colour drama" about a sky that
+            # is about to turn orange-to-indigo is simply wrong.
+            twilight = breakdown.twilight_gradient_score
+            if twilight >= 55.0:
+                candidates.append((
+                    cq,
+                    "No clouds, but clean air — expect colour as a gradient, "
+                    "deep orange at the horizon fading up through pink into blue.",
+                ))
+            elif twilight >= 35.0:
+                candidates.append((
+                    cq,
+                    "A clear sky: the colour will be a soft gradient near the horizon "
+                    "rather than lit-up clouds.",
+                ))
+            else:
+                candidates.append(
+                    (100 - cq, "Very few clouds, and the air is too hazy for a clean gradient.")
+                )
 
         if weather.cloud_low >= 50:
             candidates.append(
@@ -119,33 +255,36 @@ class ExplanationEngine:
         # Atmosphere reasons
         # -----------------------------------------------------------------
         atm = breakdown.atmosphere_score
-        vis_km = weather.visibility_m / 1000.0
+        vis_km = (
+            weather.visibility_m / 1000.0 if weather.visibility_m is not None else None
+        )
+        aod = weather.aerosol_optical_depth
 
         if atm >= 70:
-            if vis_km >= 15:
+            if vis_km is not None and vis_km >= 15:
                 candidates.append((atm, "Clear air and good visibility will help colours pop."))
             else:
-                candidates.append((atm, "Atmospheric conditions look favourable for strong colour."))
+                candidates.append((atm, "The air is clean, which is what makes colours vivid."))
         elif atm >= 45:
-            if weather.aerosol_optical_depth is not None and weather.aerosol_optical_depth > 0.1:
-                candidates.append(
-                    (atm, "A touch of haze may produce warm golden tones — moderate aerosol helps.")
-                )
-            else:
-                candidates.append((atm, "Atmospheric clarity is decent — expect reasonable colour."))
+            candidates.append((atm, "Atmospheric clarity is decent — expect reasonable colour."))
         else:
-            if vis_km < 8:
+            # Haze mutes colour, it does not warm it — see aerosol_clarity().
+            if vis_km is not None and vis_km < 8:
                 candidates.append(
                     (100 - atm, f"Reduced visibility ({vis_km:.0f} km) may mute sunset colours.")
                 )
+            elif aod is not None and aod >= 0.3:
+                candidates.append(
+                    (100 - atm, "Haze in the air will wash the reds toward a flat orange.")
+                )
             else:
                 candidates.append(
-                    (100 - atm, "Hazy or humid air may wash out the colours.")
+                    (100 - atm, "Hazy air may wash out the colours.")
                 )
 
         if weather.aerosol_is_estimated:
             candidates.append(
-                (5.0, "Aerosol data was estimated from visibility — confidence is slightly lower.")
+                (5.0, "Aerosol data was estimated rather than measured — confidence is slightly lower.")
             )
 
         # -----------------------------------------------------------------
@@ -187,6 +326,19 @@ class ExplanationEngine:
             candidates.append(
                 (50.0, "Clouds have been clearing over the past few hours — good sign.")
             )
+
+        # The moisture component is driven by the water COLUMN, so it can be
+        # low on an evening whose surface humidity looks unremarkable. Without
+        # a reason of its own that reads as an unexplained score.
+        if weather.tcwv_kg_m2 is not None and weather.precipitation_mm < 0.1:
+            if weather.tcwv_kg_m2 >= 32.0:
+                candidates.append(
+                    (100 - mst, "A heavy load of moisture through the whole air column will mute the colours.")
+                )
+            elif weather.tcwv_kg_m2 <= 10.0:
+                candidates.append(
+                    (mst, "The air column is unusually dry, which lets colours stay saturated.")
+                )
 
         if weather.relative_humidity >= 85 and weather.precipitation_mm < 0.1:
             candidates.append(

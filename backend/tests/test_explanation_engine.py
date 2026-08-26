@@ -92,3 +92,86 @@ def test_all_reasons_are_strings():
     for r in reasons:
         assert isinstance(r, str), f"Expected string reason, got {type(r)}: {r!r}"
         assert len(r) > 10, f"Reason too short: {r!r}"
+
+
+# ---------------------------------------------------------------------------
+# Gate reasons — the binding constraint must be the reason given
+# ---------------------------------------------------------------------------
+
+
+def _weather(**kw):
+    from app.schemas.weather import WeatherSnapshot
+    defaults = dict(
+        cloud_low=0.0, cloud_mid=10.0, cloud_high=45.0, cloud_total=50.0,
+        visibility_m=25_000.0, relative_humidity=45.0, dewpoint_c=6.0,
+        temperature_c=20.0, precipitation_mm=0.0, wind_speed_kmh=8.0,
+        pressure_hpa=1015.0, aerosol_optical_depth=0.12,
+        aerosol_is_estimated=False, sun_elevation_deg=1.0, data_source="forecast",
+    )
+    defaults.update(kw)
+    return WeatherSnapshot(**defaults)
+
+
+def test_blocked_corridor_leads_the_explanation():
+    """The bug this guards against: an evening suppressed to "Not tonight" by a
+    blocked light corridor used to lead with "clear air will help colours pop",
+    because the atmosphere component is genuinely high — it just no longer
+    determines the outcome."""
+    engine = ExplanationEngine()
+    reasons = engine.generate(
+        weather=_weather(),
+        breakdown=_make_breakdown(
+            atmosphere_score=95.0, cloud_quality_score=14.0, light_corridor_factor=0.35
+        ),
+        category="Decent",
+    )
+    assert "blocking the sunlight" in reasons[0], (
+        f"a blocked corridor must be the lead reason, got: {reasons[0]}"
+    )
+    assert not any("colours pop" in r for r in reasons[:1])
+
+
+def test_clear_corridor_is_mentioned_positively():
+    engine = ExplanationEngine()
+    reasons = engine.generate(
+        weather=_weather(),
+        breakdown=_make_breakdown(light_corridor_factor=0.98),
+        category="Great",
+    )
+    assert any("light path to the west is clear" in r for r in reasons)
+
+
+def test_rain_gate_leads_over_a_good_sky():
+    engine = ExplanationEngine()
+    reasons = engine.generate(
+        weather=_weather(precipitation_mm=4.0),
+        breakdown=_make_breakdown(
+            cloud_quality_score=80.0, atmosphere_score=90.0, precipitation_gate=0.09
+        ),
+        category="Poor",
+    )
+    assert "Rain" in reasons[0], f"rain must lead when it is the binding constraint: {reasons[0]}"
+
+
+def test_no_gate_reason_when_nothing_is_biting():
+    """Gates that aren't doing anything must stay quiet."""
+    engine = ExplanationEngine()
+    reasons = engine.generate(
+        weather=_weather(),
+        breakdown=_make_breakdown(light_corridor_factor=0.9),
+        category="Good",
+    )
+    joined = " ".join(reasons)
+    assert "Rain" not in joined
+    assert "horizon is obstructed" not in joined
+
+
+def test_missing_corridor_data_produces_no_corridor_reason():
+    """Corridor outage must not invent an explanation."""
+    engine = ExplanationEngine()
+    reasons = engine.generate(
+        weather=_weather(),
+        breakdown=_make_breakdown(light_corridor_factor=None),
+        category="Good",
+    )
+    assert not any("light path" in r for r in reasons)

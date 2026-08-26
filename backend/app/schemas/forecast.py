@@ -53,6 +53,15 @@ class DayForecast(BaseModel):
     )
 
     reasons: list[str]
+    raw_physics_score: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Uncalibrated physics score, before percentile mapping.",
+    )
+    climatology_percentile: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="Fraction of evenings at this location that score lower.",
+    )
+
     physics_component_breakdown: PhysicsBreakdown
     ml_model_used: bool
 

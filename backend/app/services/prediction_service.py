@@ -7,7 +7,7 @@ to produce a complete PredictResponse or ForecastResponse.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from app.core.config import Settings
@@ -22,8 +22,9 @@ from app.schemas.prediction import (
 )
 from app.schemas.weather import WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
+from app.services.climatology_service import ClimatologyService
 from app.services.explanation_engine import ExplanationEngine
-from app.services.scoring_engine import ScoringEngine
+from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.weather_service import WeatherService
 from app.utils.math_utils import clamp
 from app.utils.time_utils import local_sunset_date, utcnow
@@ -46,6 +47,7 @@ class PredictionService:
         explanation_engine: ExplanationEngine,
         ml_model: MLModel,
         settings: Settings,
+        climatology: Optional["ClimatologyService"] = None,
     ) -> None:
         self._weather = weather_service
         self._astro = astro_service
@@ -53,6 +55,7 @@ class PredictionService:
         self._explanation = explanation_engine
         self._ml = ml_model
         self._settings = settings
+        self._climatology = climatology
 
     # ------------------------------------------------------------------
     # Single prediction
@@ -96,10 +99,16 @@ class PredictionService:
             window_snaps = await self._weather.get_window_snapshots(
                 lat, lon, target_date, sunset_time
             )
+            # Upstream illumination path — one extra (cached) request. Shared by
+            # all four window points: the corridor 100-400 km away does not
+            # meaningfully change across a 45-minute window.
+            corridor = await self._weather.get_corridor_samples(
+                lat, lon, target_date, sunset_time
+            )
             scored: list[tuple[str, float]] = []
             snap_results: dict[str, tuple] = {}  # label → (ScoringResult, WeatherSnapshot)
             for snap in window_snaps:
-                r = self._scoring.score(snap, horizon_deg)
+                r = self._scoring.score(snap, horizon_deg, corridor_samples=corridor)
                 label = snap.timestamp_label or "sunset"
                 scored.append((label, r.physics_score))
                 snap_results[label] = (r, snap)
@@ -107,6 +116,19 @@ class PredictionService:
             window_result = self._scoring.score_window(scored)
             best_label = window_result.best_label
             primary_result, primary_weather = snap_results[best_label]
+
+        # Real forecast-uncertainty signal for confidence, when one exists —
+        # None for past dates, beyond the ensemble's honest horizon, or an
+        # override (which fully specifies conditions; nothing to be uncertain
+        # about). Never allowed to fail the prediction itself.
+        ensemble_spread: Optional[float] = None
+        if request.weather_override is None:
+            try:
+                ensemble_spread = await self._weather.get_ensemble_cloud_spread(
+                    lat, lon, target_date, sunset_time
+                )
+            except Exception as exc:
+                logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
 
         # ------------------------------------------------------------------
         # ML calibration (applied to the window final score)
@@ -121,10 +143,11 @@ class PredictionService:
                 horizon_obstruction_deg=horizon_deg,
             )
 
-        final_score = self._ml.blend(window_result.final_score, ml_score)
+        raw_score = self._ml.blend(window_result.final_score, ml_score)
         if ml_score is not None:
-           ml_adjustment = round(final_score - window_result.final_score, 2)
+           ml_adjustment = round(raw_score - window_result.final_score, 2)
 
+        final_score, percentile, is_local = self._calibrate(raw_score, lat, lon)
         category = self._scoring.score_to_category(final_score)
 
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
@@ -140,6 +163,7 @@ class PredictionService:
             has_ml=self._ml.is_loaded(),
             window_scores=list(window_result.window_scores.values()),
             lead_time_hours=lead_time_hours,
+            ensemble_cloud_spread=ensemble_spread,
         )
 
         reasons = self._explanation.generate(
@@ -166,7 +190,10 @@ class PredictionService:
             best_viewing_window_end=window_end,
             best_window_point=window_result.best_label,
             window_scores={k: round(v, 1) for k, v in window_result.window_scores.items()},
-            go_outside_recommendation=window_result.go_outside,
+            go_outside_recommendation=final_score >= GO_OUTSIDE_THRESHOLD,
+            raw_physics_score=round(raw_score, 1),
+            climatology_percentile=round(percentile, 4) if percentile is not None else None,
+            climatology_is_local=is_local,
             algorithm_version=self._settings.ALGORITHM_VERSION,
             ml_model_used=self._ml.is_loaded(),
             ml_adjustment=ml_adjustment,
@@ -175,6 +202,84 @@ class PredictionService:
             location={"latitude": lat, "longitude": lon},
             requested_at=utcnow(),
         )
+
+    # ------------------------------------------------------------------
+    # Calibration
+    # ------------------------------------------------------------------
+
+    def _calibrate(
+        self, raw_score: float, lat: float, lon: float
+    ) -> tuple[float, Optional[float], bool]:
+        """Return ``(displayed, percentile, is_local)``.
+
+        THE DISPLAYED SCORE IS ABSOLUTE — it is the raw physics score, and it
+        answers "how good will the sky look tonight?".
+
+        It used to be the percentile itself, which answered a different
+        question ("how does tonight rank here?") and had a property that only
+        became obvious when the physics improved: percentile calibration is
+        SELF-NORMALISING. Fixing the horizon-strip bug lifted one Tel Aviv
+        evening's raw score from 48.9 to 57.4, and its displayed score moved
+        from 30.9 to 30.6 — because the same fix lifted every other clear
+        evening in the same climatology, so the rank did not move. A score that
+        cannot improve when the model improves is measuring the wrong thing.
+
+        The percentile is still computed and still returned: it is shown as
+        context ("better than 31 % of evenings here"), which is where the
+        cross-location comparison genuinely belongs. See
+        ClimatologyService.percentile_of — that rank is seasonal.
+
+        A cold location is warmed in the background; this never blocks.
+        """
+        if self._climatology is None:
+            return raw_score, None, False
+
+        percentile, is_local = self._climatology.percentile_of(
+            lat, lon, raw_score, on_date=self._today_for(lat, lon)
+        )
+        if not is_local:
+            self._climatology.warm_in_background(lat, lon)
+        return raw_score, percentile, is_local
+
+    @staticmethod
+    def _today_for(lat: float, lon: float) -> date:
+        """Date used to pick the seasonal comparison window."""
+        return datetime.now(timezone.utc).date()
+
+    # ------------------------------------------------------------------
+    # Training-label capture
+    # ------------------------------------------------------------------
+
+    async def capture_rating_context(
+        self, lat: float, lon: float, target_date: date, horizon_deg: float
+    ) -> tuple[PredictResponse, list[WeatherSnapshot]]:
+        """Return the prediction for this evening plus the RAW window snapshots.
+
+        Used by POST /rate to store a human label together with the exact inputs
+        that produced the score. Storing raw snapshots — not just the score —
+        is what lets a future scoring change be replayed against old labels
+        offline, instead of needing a year of weather history refetched.
+
+        Both calls hit the same cached fetch, so this costs no extra API
+        requests beyond what predict() already did for the same evening.
+        """
+        prediction = await self.predict(
+            PredictRequest(
+                latitude=lat,
+                longitude=lon,
+                target_date=target_date,
+                horizon_obstruction_deg=horizon_deg,
+            )
+        )
+        sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
+        snapshots = await self._weather.get_window_snapshots(
+            lat, lon, target_date, sunset_time
+        )
+        return prediction, snapshots
+
+    def local_sunset_date_for(self, lat: float, lon: float) -> date:
+        """The date whose sunset is 'tonight' at this location."""
+        return local_sunset_date(lat, lon)
 
     # ------------------------------------------------------------------
     # Multi-day forecast
@@ -190,9 +295,17 @@ class PredictionService:
             lat, lon, days=request.days
         )
 
+        # One batched corridor request covers the whole forecast range.
+        corridor_map = await self._weather.get_corridor_samples_map(
+            lat, lon, [d for d, _ in daily_window_snaps]
+        )
+
         # Score each day concurrently using the same window algorithm as predict()
         tasks = [
-            self._score_day(lat, lon, d, window_snaps, horizon_deg)
+            self._score_day(
+                lat, lon, d, window_snaps, horizon_deg,
+                corridor_samples=corridor_map.get(d, []),
+            )
             for d, window_snaps in daily_window_snaps
         ]
         day_forecasts = await asyncio.gather(*tasks, return_exceptions=True)
@@ -230,13 +343,23 @@ class PredictionService:
 
         daily_windows = await self._weather.get_historical_range_windows(lat, lon, start_date, end_date)
 
+        # Corridor batched by month — keeps heatmap scores consistent with what
+        # predict() would return for the same day, which is the whole point of
+        # mirroring _score_day below.
+        corridor_map = await self._weather.get_corridor_samples_map(
+            lat, lon, [d for d, _ in daily_windows]
+        )
+
         result_days: list[HeatmapDay] = []
         for d, window_snaps in daily_windows:
             # Mirror _score_day exactly so heatmap scores match single-date predict scores
             scored: list[tuple[str, float]] = []
             snap_results: dict[str, tuple] = {}
+            day_corridor = corridor_map.get(d, [])
             for snap in window_snaps:
-                r = self._scoring.score(snap, horizon_obstruction_deg=2.0)
+                r = self._scoring.score(
+                    snap, horizon_obstruction_deg=2.0, corridor_samples=day_corridor
+                )
                 label = snap.timestamp_label or "sunset"
                 scored.append((label, r.physics_score))
                 snap_results[label] = (r, snap)
@@ -254,7 +377,8 @@ class PredictionService:
                     horizon_obstruction_deg=2.0,
                 )
 
-            final_score = round(self._ml.blend(window_result.final_score, ml_score), 1)
+            raw_score = self._ml.blend(window_result.final_score, ml_score)
+            final_score = round(self._calibrate(raw_score, lat, lon)[0], 1)
             result_days.append(HeatmapDay(
                 date=d,
                 score=final_score,
@@ -278,6 +402,7 @@ class PredictionService:
         target_date: date,
         window_snaps: list[WeatherSnapshot],
         horizon_deg: float,
+        corridor_samples: Optional[list[tuple[float, float, float]]] = None,
     ) -> DayForecast:
         sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
         window_start, window_end = self._astro.get_best_viewing_window(sunset_time)
@@ -286,7 +411,7 @@ class PredictionService:
         scored: list[tuple[str, float]] = []
         snap_results: dict[str, tuple] = {}
         for snap in window_snaps:
-            r = self._scoring.score(snap, horizon_deg)
+            r = self._scoring.score(snap, horizon_deg, corridor_samples=corridor_samples)
             label = snap.timestamp_label or "sunset"
             scored.append((label, r.physics_score))
             snap_results[label] = (r, snap)
@@ -304,9 +429,17 @@ class PredictionService:
                 horizon_obstruction_deg=horizon_deg,
             )
 
-        final_score = self._ml.blend(window_result.final_score, ml_score)
+        raw_score = self._ml.blend(window_result.final_score, ml_score)
+        final_score, percentile, _is_local = self._calibrate(raw_score, lat, lon)
         category = self._scoring.score_to_category(final_score)
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
+        try:
+            ensemble_spread = await self._weather.get_ensemble_cloud_spread(
+                lat, lon, target_date, sunset_time
+            )
+        except Exception as exc:
+            logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
+            ensemble_spread = None
         confidence = self._scoring.compute_confidence(
             weather=primary_weather,
             component_scores={
@@ -319,6 +452,7 @@ class PredictionService:
             has_ml=self._ml.is_loaded(),
             window_scores=list(window_result.window_scores.values()),
             lead_time_hours=lead_time_hours,
+            ensemble_cloud_spread=ensemble_spread,
         )
         reasons = self._explanation.generate(
             weather=primary_weather,
@@ -340,7 +474,9 @@ class PredictionService:
             best_viewing_window_end=window_end,
             best_window_point=window_result.best_label,
             window_scores={k: round(v, 1) for k, v in window_result.window_scores.items()},
-            go_outside_recommendation=window_result.go_outside,
+            go_outside_recommendation=final_score >= GO_OUTSIDE_THRESHOLD,
+            raw_physics_score=round(raw_score, 1),
+            climatology_percentile=round(percentile, 4) if percentile is not None else None,
             reasons=reasons,
             physics_component_breakdown=breakdown,
             ml_model_used=self._ml.is_loaded(),
@@ -357,7 +493,10 @@ def _build_weather_summary(weather: WeatherSnapshot) -> WeatherSummary:
         cloud_mid_pct=round(weather.cloud_mid, 1),
         cloud_high_pct=round(weather.cloud_high, 1),
         cloud_total_pct=round(weather.cloud_total, 1),
-        visibility_km=round(weather.visibility_m / 1000.0, 1),
+        visibility_km=(
+            round(weather.visibility_m / 1000.0, 1)
+            if weather.visibility_m is not None else None
+        ),
         precipitation_mm=round(weather.precipitation_mm, 2),
         aerosol_optical_depth=(
             round(weather.aerosol_optical_depth, 3)
@@ -365,6 +504,7 @@ def _build_weather_summary(weather: WeatherSnapshot) -> WeatherSummary:
             else None
         ),
         aerosol_is_estimated=weather.aerosol_is_estimated,
+        tcwv_kg_m2=weather.tcwv_kg_m2,
         temperature_c=round(weather.temperature_c, 1),
         humidity_pct=round(weather.relative_humidity, 1),
         wind_speed_kmh=round(weather.wind_speed_kmh, 1),

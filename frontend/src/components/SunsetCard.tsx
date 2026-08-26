@@ -80,6 +80,7 @@ export default function SunsetCard({ day, defaultExpanded = false }: SunsetCardP
             windowScores={day.window_scores}
             bestPoint={day.best_window_point}
             sunsetTime={day.sunset_time}
+            dominantPathway={day.physics_component_breakdown.dominant_pathway}
           />
 
           <div>

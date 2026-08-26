@@ -13,6 +13,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.schemas.weather import WeatherOverride, WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
+from app.utils.geo import destination_point
 from app.utils.cache import TTLCache
 
 logger = get_logger(__name__)
@@ -21,6 +22,20 @@ UTC = timezone.utc
 # HTTP status codes worth retrying: 429 (rate-limited) and any 5xx (transient
 # server error). Other 4xx (e.g. 400 bad params) won't fix themselves on retry.
 _RETRYABLE_STATUS = {429}
+
+# icon_seamless (ICON global + EU + D2, blended) covers roughly 7.5 days —
+# verified live, `forecast_days=16` with this model silently returns null
+# beyond ~180 hours rather than an error. The app promises forecasts up to 16
+# days out (`auto` reaches further by falling back to GFS), so the explicit
+# model is only safe to request within its own honest horizon; requests
+# beyond it fall back to `auto` rather than nulling out the back half of the
+# forecast.
+ICON_SEAMLESS_MAX_DAYS = 7
+
+# Ensemble spread caches longer than the 900s default — it changes on model
+# run cadence (~every 6h for icon_seamless), not on every poll, and the
+# endpoint is heavier than the deterministic one.
+_ENSEMBLE_CACHE_TTL_SECONDS = 3600
 
 
 class WeatherUnavailableError(Exception):
@@ -49,9 +64,20 @@ FORECAST_HOURLY_VARS = ",".join([
     "wind_speed_10m",
     "surface_pressure",
     "weather_code",
+    "total_column_integrated_water_vapour",
 ])
 
 AIR_QUALITY_HOURLY_VARS = "aerosol_optical_depth,dust"
+
+# Light-corridor sampling: only the blocking layers are needed upstream, so the
+# request stays small even across six coordinates.
+CORRIDOR_HOURLY_VARS = "cloud_cover_low,cloud_cover_mid"
+
+# Distances (km) along the sunset azimuth at which the corridor is sampled.
+# Chosen to bracket the illumination tangent distances of the three cloud
+# layers — ~113 km (low), ~226 km (mid), ~339 km (high) — with points either
+# side of each so the Gaussian weighting in the scoring engine has support.
+CORRIDOR_DISTANCES_KM: list[float] = [60.0, 120.0, 180.0, 240.0, 320.0, 400.0]
 
 ARCHIVE_HOURLY_VARS = ",".join([
     "cloud_cover",
@@ -65,6 +91,10 @@ ARCHIVE_HOURLY_VARS = ",".join([
     "precipitation",
     "wind_speed_10m",
     "surface_pressure",
+    # ERA5 returns null for `visibility` and for every relative_humidity_*hPa
+    # level, but does provide the water column — which is why the moisture
+    # component scores TCWV. Verified against 72 consecutive archive hours.
+    "total_column_integrated_water_vapour",
 ])
 
 
@@ -257,7 +287,9 @@ class WeatherService:
                 aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
             else:
                 weather_data = await self._fetch_archive_raw(lat, lon, target_date)
-                aq_data = None
+                aq_data = await self._fetch_air_quality_range_raw(
+                    lat, lon, target_date, target_date
+                )
         else:
             days_ahead = (target_date - today).days + 1
             weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
@@ -313,6 +345,254 @@ class WeatherService:
         self._cache.set(cache_key, results)
         return results
 
+    # ------------------------------------------------------------------
+    # Light corridor — upstream sampling along the sunset azimuth
+    # ------------------------------------------------------------------
+
+    async def get_corridor_samples(
+        self,
+        lat: float,
+        lon: float,
+        target_date: date,
+        sunset_time: datetime,
+    ) -> list[tuple[float, float, float]]:
+        """Cloud cover upstream of the observer, toward the setting sun.
+
+        Returns ``(distance_km, cloud_low_pct, cloud_mid_pct)`` for each sample
+        point along the sunset azimuth. Empty list on any failure — the scoring
+        engine treats that as "no corridor information" and leaves the score
+        unadjusted, so a corridor outage degrades to the previous behaviour
+        rather than breaking predictions.
+
+        COST
+        ----
+        This is ONE HTTP request regardless of sample count: Open-Meteo accepts
+        comma-separated coordinate lists (up to 1000 points). Results are cached
+        on the same rounded-coordinate grid as every other fetch, so nearby
+        users share it. Given the rate-limit sensitivity of this app, that
+        one-request property is the reason the design is viable at all.
+
+        The remote atmosphere is sampled at the OBSERVER's sunset instant, not
+        at the remote location's own sunset — light arrives effectively
+        instantly, so what matters is the state of the corridor at the moment
+        the observer is looking.
+        """
+        cache_key = TTLCache.make_key(
+            "corridor", *self._ckey_coords(lat, lon), str(target_date)
+        )
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            azimuth = self._astro.get_sunset_azimuth(lat, lon, target_date)
+            points = [
+                (d, *destination_point(lat, lon, azimuth, d))
+                for d in CORRIDOR_DISTANCES_KM
+            ]
+
+            today = datetime.now(UTC).date()
+            days_ago = (today - target_date).days
+            lats = ",".join(f"{p[1]:.4f}" for p in points)
+            lons = ",".join(f"{p[2]:.4f}" for p in points)
+
+            if target_date < today and days_ago > 7:
+                raw = await self._fetch_archive_raw_multi(lats, lons, target_date)
+            else:
+                past_days = days_ago + 1 if target_date < today else 0
+                days_ahead = max((target_date - today).days + 2, 2)
+                raw = await self._fetch_forecast_raw_multi(
+                    lats, lons, days=days_ahead, past_days=past_days
+                )
+
+            samples: list[tuple[float, float, float]] = []
+            # A multi-coordinate response is a LIST of per-location objects, in
+            # request order; a single-coordinate response is a bare object.
+            entries = raw if isinstance(raw, list) else [raw]
+            for (distance_km, _plat, _plon), entry in zip(points, entries):
+                cloud = self._extract_corridor_cloud(entry, sunset_time)
+                if cloud is not None:
+                    samples.append((distance_km, cloud[0], cloud[1]))
+
+            if not samples:
+                logger.debug("Corridor fetch returned no usable samples for %s", target_date)
+                return []
+
+            self._cache.set(cache_key, samples)
+            return samples
+
+        except Exception as exc:
+            # Never let the corridor break a prediction — it is an enhancement
+            # to the score, not a prerequisite for producing one.
+            logger.warning(
+                "Light-corridor sampling failed for lat=%.3f lon=%.3f date=%s: %s "
+                "— scoring without it.",
+                lat, lon, target_date, exc,
+            )
+            return []
+
+    async def get_corridor_samples_map(
+        self, lat: float, lon: float, dates: list[date]
+    ) -> dict[date, list[tuple[float, float, float]]]:
+        """Corridor samples for many dates, batched by calendar month.
+
+        The sunset azimuth swings through ~60° over a year outside the tropics,
+        so the corridor for January points somewhere quite different from July's
+        and a single set of coordinates cannot serve a whole range. Grouping by
+        month keeps the azimuth error under a couple of degrees — far below the
+        angular width the Gaussian distance weighting already tolerates — while
+        collapsing the request count from one-per-day to one-per-month.
+
+        A 7-day forecast is therefore one request; a 12-month heatmap is twelve,
+        each cached for a day. Any month that fails is simply absent from the
+        result, and those days score without corridor adjustment.
+        """
+        if not dates:
+            return {}
+
+        by_month: dict[tuple[int, int], list[date]] = {}
+        for d in dates:
+            by_month.setdefault((d.year, d.month), []).append(d)
+
+        out: dict[date, list[tuple[float, float, float]]] = {}
+        for (year, month), group in sorted(by_month.items()):
+            group.sort()
+            cache_key = TTLCache.make_key(
+                "corridor_month", *self._ckey_coords(lat, lon), year, month,
+                str(group[0]), str(group[-1]),
+            )
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                out.update(cached)
+                continue
+
+            try:
+                month_map = await self._fetch_corridor_month(lat, lon, group)
+            except Exception as exc:
+                logger.warning(
+                    "Corridor batch failed for %04d-%02d at lat=%.3f lon=%.3f: %s "
+                    "— those days score without it.",
+                    year, month, lat, lon, exc,
+                )
+                continue
+
+            # Archive months are immutable; give them a long TTL.
+            is_past = group[-1] < datetime.now(UTC).date() - timedelta(days=8)
+            self._cache.set(cache_key, month_map, ttl_override=86400 if is_past else None)
+            out.update(month_map)
+
+        return out
+
+    async def _fetch_corridor_month(
+        self, lat: float, lon: float, group: list[date]
+    ) -> dict[date, list[tuple[float, float, float]]]:
+        """One corridor request covering every date in *group* (same month)."""
+        # Azimuth taken at the middle of the group so the error is symmetric
+        # across it, rather than accumulating toward one end.
+        mid = group[len(group) // 2]
+        azimuth = self._astro.get_sunset_azimuth(lat, lon, mid)
+        points = [
+            (d_km, *destination_point(lat, lon, azimuth, d_km))
+            for d_km in CORRIDOR_DISTANCES_KM
+        ]
+        lats = ",".join(f"{p[1]:.4f}" for p in points)
+        lons = ",".join(f"{p[2]:.4f}" for p in points)
+
+        today = datetime.now(UTC).date()
+        start, end = group[0], group[-1]
+
+        if end < today - timedelta(days=7):
+            raw = await self._fetch_archive_range_raw_multi(lats, lons, start, end)
+        else:
+            past_days = max((today - start).days + 1, 0)
+            days_ahead = max((end - today).days + 2, 2)
+            raw = await self._fetch_forecast_raw_multi(
+                lats, lons, days=days_ahead, past_days=min(past_days, 92)
+            )
+
+        entries = raw if isinstance(raw, list) else [raw]
+        for entry in entries:
+            _prepopulate_parsed_times(entry)
+
+        result: dict[date, list[tuple[float, float, float]]] = {}
+        for d in group:
+            sunset_time = self._astro.get_sunset_time(lat, lon, d)
+            samples: list[tuple[float, float, float]] = []
+            for (distance_km, _plat, _plon), entry in zip(points, entries):
+                cloud = self._extract_corridor_cloud(entry, sunset_time)
+                if cloud is not None:
+                    samples.append((distance_km, cloud[0], cloud[1]))
+            if samples:
+                result[d] = samples
+        return result
+
+    async def _fetch_archive_range_raw_multi(
+        self, lats: str, lons: str, start_date: date, end_date: date
+    ) -> Any:
+        url = f"{self._settings.OPEN_METEO_ARCHIVE_URL}/archive"
+        params = {
+            "latitude": lats,
+            "longitude": lons,
+            "hourly": CORRIDOR_HOURLY_VARS,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "timezone": "UTC",
+        }
+        return await self._get_json(url, params)
+
+    @staticmethod
+    def _extract_corridor_cloud(
+        entry: dict[str, Any], sunset_time: datetime
+    ) -> Optional[tuple[float, float]]:
+        """Pull (cloud_low, cloud_mid) at the sunset hour from one corridor point."""
+        hourly = entry.get("hourly", {})
+        time_strs: list[str] = hourly.get("time", [])
+        if not time_strs:
+            return None
+        times = hourly.get("_times_parsed") or [
+            datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs
+        ]
+        idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+
+        def get(key: str) -> float:
+            vals = hourly.get(key, [])
+            if idx < len(vals) and vals[idx] is not None:
+                return float(vals[idx])
+            return 0.0
+
+        return get("cloud_cover_low"), get("cloud_cover_mid")
+
+    async def _fetch_forecast_raw_multi(
+        self, lats: str, lons: str, days: int, past_days: int = 0
+    ) -> Any:
+        url = f"{self._settings.OPEN_METEO_BASE_URL}/forecast"
+        params: dict = {
+            "latitude": lats,
+            "longitude": lons,
+            "hourly": CORRIDOR_HOURLY_VARS,
+            "forecast_days": days,
+            "timezone": "UTC",
+        }
+        if days <= ICON_SEAMLESS_MAX_DAYS:
+            params["models"] = self._settings.OPEN_METEO_MODEL
+        if past_days > 0:
+            params["past_days"] = past_days
+        return await self._get_json(url, params)
+
+    async def _fetch_archive_raw_multi(
+        self, lats: str, lons: str, target_date: date
+    ) -> Any:
+        url = f"{self._settings.OPEN_METEO_ARCHIVE_URL}/archive"
+        params = {
+            "latitude": lats,
+            "longitude": lons,
+            "hourly": CORRIDOR_HOURLY_VARS,
+            "start_date": str(target_date),
+            "end_date": str(target_date),
+            "timezone": "UTC",
+        }
+        return await self._get_json(url, params)
+
     async def get_historical_snapshot(
         self, lat: float, lon: float, target_date: date
     ) -> WeatherSnapshot:
@@ -347,11 +627,16 @@ class WeatherService:
         # dates with days_ago > 7 are safely in the archive; ≤7 use forecast+past_days
         archive_boundary = today - timedelta(days=8)
 
-        # One bulk archive fetch for the old portion
+        # One bulk archive fetch for the old portion, plus one bulk aerosol
+        # fetch covering the same span — measured AOD for historical days, so
+        # the climatology is built with the same atmosphere term as a live
+        # prediction rather than with the humidity proxy.
         archive_data: Optional[dict] = None
+        archive_aq: Optional[dict] = None
         if start_date <= archive_boundary:
             archive_end = min(end_date, archive_boundary)
             archive_data = await self._fetch_archive_range_raw(lat, lon, start_date, archive_end)
+            archive_aq = await self._fetch_air_quality_range_raw(lat, lon, start_date, archive_end)
 
         # One forecast fetch covers all of the recent 7 days
         recent_weather: Optional[dict] = None
@@ -362,7 +647,7 @@ class WeatherService:
 
         # Pre-parse timestamps once so the per-day loop doesn't re-parse the
         # same 8760-entry list on every _extract_snapshot_for_hour / _extract_trends call.
-        for _d in [archive_data, recent_weather, recent_aq]:
+        for _d in [archive_data, archive_aq, recent_weather, recent_aq]:
             if _d is not None:
                 _prepopulate_parsed_times(_d)
 
@@ -374,7 +659,7 @@ class WeatherService:
                 if days_ago <= 7:
                     weather_data, aq_data = recent_weather, recent_aq
                 else:
-                    weather_data, aq_data = archive_data, None
+                    weather_data, aq_data = archive_data, archive_aq
 
                 if weather_data is None:
                     logger.warning("No weather data source available for %s, skipping", current)
@@ -423,7 +708,94 @@ class WeatherService:
         self, lat: float, lon: float, target_date: date, sunset_time: datetime
     ) -> WeatherSnapshot:
         weather_data = await self._fetch_archive_raw(lat, lon, target_date)
-        return self._extract_snapshot_for_hour(weather_data, None, lat, lon, sunset_time)
+        # Measured aerosol, same as every other path — otherwise a past date is
+        # scored with the humidity proxy while the climatology it is ranked
+        # against used real AOD.
+        aq_data = await self._fetch_air_quality_range_raw(lat, lon, target_date, target_date)
+        return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time)
+
+    async def get_ensemble_cloud_spread(
+        self, lat: float, lon: float, target_date: date, sunset_time: datetime
+    ) -> Optional[float]:
+        """Standard deviation of total cloud cover (%) across forecast ensemble
+        members at the sunset hour — an actual measurement of forecast
+        uncertainty, in place of guessing it from how far away the date is.
+
+        Only meaningful for a genuine FORECAST: past dates have no ensemble to
+        disagree, and a target beyond ICON_SEAMLESS_MAX_DAYS is past the model's
+        honest horizon (verified live — members return null past ~7.5 days
+        rather than an error). Returns None in either case, or if the request
+        fails; the caller falls back to the lead-time heuristic.
+
+        Single-day convenience wrapper — a multi-day forecast should use
+        get_ensemble_cloud_spread_map instead so N days cost one request, not N.
+        """
+        result = await self.get_ensemble_cloud_spread_map(lat, lon, [(target_date, sunset_time)])
+        return result.get(target_date)
+
+    async def get_ensemble_cloud_spread_map(
+        self, lat: float, lon: float, targets: list[tuple[date, datetime]]
+    ) -> dict[date, float]:
+        """Ensemble cloud-cover spread for many dates, batched into ONE request.
+
+        Every date within ICON_SEAMLESS_MAX_DAYS shares a single ensemble
+        forecast — the endpoint already returns the whole horizon per call, so
+        fetching it once per date (as a 16-day forecast's per-day scoring would
+        otherwise do) is 7 wasted requests against a heavier-than-usual
+        endpoint. Dates outside the horizon are simply absent from the result.
+        """
+        in_range = [
+            (d, st) for d, st in targets
+            if 0 <= (d - datetime.now(UTC).date()).days <= ICON_SEAMLESS_MAX_DAYS
+        ]
+        if not in_range:
+            return {}
+
+        max_days_ahead = max((d - datetime.now(UTC).date()).days for d, _ in in_range)
+        cache_key = TTLCache.make_key(
+            "ensemble_spread_map", *self._ckey_coords(lat, lon), max_days_ahead
+        )
+        hourly = self._cache.get(cache_key)
+        if hourly is None:
+            try:
+                data = await self._fetch_ensemble_raw(lat, lon, days=max_days_ahead + 1)
+            except WeatherUnavailableError:
+                logger.warning("Ensemble fetch failed for (%.4f, %.4f) — no spread signal", lat, lon)
+                return {}
+            hourly = data.get("hourly", {})
+            self._cache.set(cache_key, hourly, ttl_override=_ENSEMBLE_CACHE_TTL_SECONDS)
+
+        time_strs: list[str] = hourly.get("time", [])
+        if not time_strs:
+            return {}
+        times = [datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs]
+        member_keys = [k for k in hourly if k.startswith("cloud_cover_member")]
+
+        out: dict[date, float] = {}
+        for d, sunset_time in in_range:
+            idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+            members = [
+                hourly[k][idx] for k in member_keys
+                if idx < len(hourly[k]) and hourly[k][idx] is not None
+            ]
+            if len(members) < 4:
+                continue
+            mean = sum(members) / len(members)
+            variance = sum((m - mean) ** 2 for m in members) / len(members)
+            out[d] = variance ** 0.5
+        return out
+
+    async def _fetch_ensemble_raw(self, lat: float, lon: float, days: int) -> dict[str, Any]:
+        url = f"{self._settings.OPEN_METEO_ENSEMBLE_URL}/ensemble"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "cloud_cover",
+            "models": self._settings.OPEN_METEO_MODEL,
+            "forecast_days": days,
+            "timezone": "UTC",
+        }
+        return await self._get_json(url, params)
 
     async def _fetch_forecast_raw(
         self, lat: float, lon: float, days: int = 7, past_days: int = 0
@@ -436,6 +808,8 @@ class WeatherService:
             "forecast_days": days,
             "timezone": "UTC",
         }
+        if days <= ICON_SEAMLESS_MAX_DAYS:
+            params["models"] = self._settings.OPEN_METEO_MODEL
         if past_days > 0:
             params["past_days"] = past_days
         return await self._get_json(url, params)
@@ -493,7 +867,34 @@ class WeatherService:
             logger.debug("Air quality API unavailable: %s — using proxy", exc)
             return None
 
-    async def _get_json(self, url: str, params: dict) -> dict[str, Any]:
+    async def _fetch_air_quality_range_raw(
+        self, lat: float, lon: float, start_date: date, end_date: date
+    ) -> Optional[dict[str, Any]]:
+        """Fetch aerosol optical depth for a date range. Returns None on failure.
+
+        The air-quality endpoint serves history from the same CAMS reanalysis
+        that powers the forecast, so a whole year comes back in ONE request.
+        That matters: without it, historical days fell through to the humidity
+        proxy while live forecasts got measured AOD, and the climatology a
+        prediction is ranked against was therefore built with a different
+        atmosphere term than the prediction itself.
+        """
+        url = f"{self._settings.OPEN_METEO_AIR_QUALITY_URL}/air-quality"
+        params: dict = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": AIR_QUALITY_HOURLY_VARS,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "timezone": "UTC",
+        }
+        try:
+            return await self._get_json(url, params)
+        except Exception as exc:
+            logger.debug("Air quality range unavailable: %s — using proxy", exc)
+            return None
+
+    async def _get_json(self, url: str, params: dict) -> Any:
         """Execute a GET request and return parsed JSON.
 
         Retries on transient failures — Open-Meteo rate-limits (HTTP 429),
@@ -599,14 +1000,24 @@ class WeatherService:
                 return float(values[idx])
             return default
 
+        def get_opt(key: str) -> Optional[float]:
+            """Like get(), but reports "not provided" rather than inventing one."""
+            values = hourly.get(key, [])
+            if idx < len(values) and values[idx] is not None:
+                return float(values[idx])
+            return None
+
         cloud_low = get("cloud_cover_low", 0.0)
         cloud_mid = get("cloud_cover_mid", 0.0)
         cloud_high = get("cloud_cover_high", 0.0)
         cloud_total = get("cloud_cover", max(cloud_low, cloud_mid, cloud_high))
-        # Archive API often omits visibility; 15 km is a neutral "hazy-but-clear"
-        # baseline.  24 km (the previous default) was a pristine clear-sky value
-        # that systematically over-rewarded every archive day.
-        visibility_m = get("visibility", 15000.0)
+        # The ERA5 archive returns null for visibility on every hour, so
+        # historical days have none. Report that honestly as None instead of
+        # substituting a constant: a constant is not a neutral choice, it is a
+        # fixed offset added to every archive day's atmosphere score, and it
+        # left the climatology's atmosphere term varying with humidity alone.
+        visibility_m = get_opt("visibility")
+        tcwv = get_opt("total_column_integrated_water_vapour")
         humidity = get("relative_humidity_2m", 50.0)
         dewpoint = get("dew_point_2m", 10.0)
         temperature = get("temperature_2m", 15.0)
@@ -634,12 +1045,21 @@ class WeatherService:
                     aerosol_od = float(aod_vals[aq_idx])
 
         if aerosol_od is None:
-            # Proxy estimation from visibility and humidity.
-            # NOTE: This is a rough approximation. A clear atmosphere (high visibility,
-            # low humidity) suggests low AOD; hazy conditions suggest higher AOD.
-            # Values are calibrated against typical real-world AOD ranges (0.05–0.6).
-            vis_km = visibility_m / 1000.0
-            aerosol_od = max(0.05, min(0.8, (1.0 - vis_km / 40.0) * 0.4 + humidity / 100.0 * 0.15))
+            # Proxy, used only when the air-quality API is unreachable — it now
+            # covers the archive range too, so this is a genuine fallback
+            # rather than the normal path for historical days.
+            #
+            # Built from whatever moisture signal exists: hygroscopic aerosol
+            # grows in humid air, so a wet column is a weak indicator of higher
+            # optical depth. Visibility is used when the source reports it.
+            # This is a rough approximation and is flagged as estimated so the
+            # confidence score and the explanation can say so.
+            estimate = 0.08 + humidity / 100.0 * 0.15
+            if tcwv is not None:
+                estimate += min(tcwv, 50.0) / 50.0 * 0.20
+            if visibility_m is not None:
+                estimate += max(0.0, 1.0 - visibility_m / 40_000.0) * 0.25
+            aerosol_od = max(0.05, min(0.8, estimate))
             aerosol_is_estimated = True
 
         # Solar elevation at the ACTUAL requested time (sunset_time), not at the
@@ -662,6 +1082,7 @@ class WeatherService:
             precipitation_mm=precipitation,
             wind_speed_kmh=wind_speed,
             pressure_hpa=pressure,
+            tcwv_kg_m2=tcwv,
             aerosol_optical_depth=aerosol_od,
             sun_elevation_deg=sun_elev,
             data_source="archive" if "archive" in str(weather_data.get("generationtime_ms", "")) else "forecast",
@@ -738,13 +1159,24 @@ class WeatherService:
         precip_sum = sum(get("precipitation", i) for i in range(past_idx, sunset_idx))
         pressure_trend = get("surface_pressure", sunset_idx) - get("surface_pressure", past_idx)
         cloud_trend = get("cloud_cover", sunset_idx) - get("cloud_cover", past_idx)
-        vis_trend = get("visibility", sunset_idx) - get("visibility", past_idx)
+
+        # Visibility is absent from the archive entirely; a trend of 0.0 there
+        # would read as "steady" when the truth is "unknown", and the clearing
+        # bonus keys off exactly that distinction.
+        vis_values = hourly.get("visibility", [])
+        have_vis = (
+            sunset_idx < len(vis_values) and vis_values[sunset_idx] is not None
+            and past_idx < len(vis_values) and vis_values[past_idx] is not None
+        )
+        vis_trend = (
+            float(vis_values[sunset_idx]) - float(vis_values[past_idx]) if have_vis else None
+        )
 
         return {
             "precipitation_last_3h_mm": round(precip_sum, 2),
             "pressure_trend_hpa_3h": round(pressure_trend, 1),
             "cloud_total_trend_3h": round(cloud_trend, 1),
-            "visibility_trend_3h_m": round(vis_trend, 0),
+            "visibility_trend_3h_m": round(vis_trend, 0) if vis_trend is not None else None,
         }
 
     # ------------------------------------------------------------------

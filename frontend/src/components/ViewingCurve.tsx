@@ -6,6 +6,17 @@ import { formatTime, getScoreHexColor } from "@/lib/utils";
 import { useIsDark } from "@/lib/useIsDark";
 
 interface ViewingCurveProps {
+  /** High cloud %, so the caption only claims an afterglow when there is
+   *  actually a canvas for the light to land on. 15 % matches the threshold
+   *  the scoring engine uses before it will award any afterglow at all. */
+  cloudHighPct?: number;
+  /** Which pathway is carrying the evening. A cloudless evening still peaks
+   *  after sunset — but as a colour gradient, not as lit cloud, and the caption
+   *  has to say which, or it sends the user looking for the wrong thing.
+   *  Keyed on the winning pathway rather than on a score threshold: what makes
+   *  it a gradient evening is that the gradient is what is carrying it, not
+   *  that the gradient passed some absolute bar. */
+  dominantPathway?: string | null;
   /** Physics score at each sampled moment, keyed by window point. */
   windowScores: Record<string, number>;
   /** The window point that scored highest. */
@@ -54,8 +65,12 @@ export default function ViewingCurve({
   windowScores,
   bestPoint,
   sunsetTime,
+  cloudHighPct,
+  dominantPathway,
 }: ViewingCurveProps) {
   const isDark = useIsDark();
+  const hasAfterglowCanvas = (cloudHighPct ?? 0) >= 15;
+  const isGradientEvening = dominantPathway === "twilight_gradient";
 
   const available = WINDOW_POINTS.filter((p) => typeof windowScores[p] === "number");
   const peak = available.includes(bestPoint as (typeof WINDOW_POINTS)[number])
@@ -168,7 +183,11 @@ export default function ViewingCurve({
             Best colour around{" "}
             <span className="font-semibold text-gray-900 dark:text-white">{clockFor(peak)}</span>
             {peak !== "sunset" && peak.startsWith("+")
-              ? " — after the sun is down, when the afterglow lights the high cloud."
+              ? hasAfterglowCanvas
+                ? " — after the sun is down, when the afterglow lights the high cloud."
+                : isGradientEvening
+                  ? " — after the sun is down, when the gradient is deepest."
+                  : " — just after the sun is down."
               : "."}
           </>
         ) : (

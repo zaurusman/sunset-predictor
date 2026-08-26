@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from app.services import scoring_engine as engine_module
 from app.services.scoring_engine import ScoringEngine
 from app.schemas.weather import WeatherSnapshot
 
@@ -147,10 +148,43 @@ def test_cloud_quality_bell_curve_peak():
 # Moisture / precipitation tests
 # ---------------------------------------------------------------------------
 
-def test_precipitation_penalizes_moisture_score(scoring_engine, rainy_weather):
-    """Rain should produce a very low moisture score."""
+def test_precipitation_collapses_the_score(scoring_engine, rainy_weather):
+    """Rain must tank the final score.
+
+    The mechanism moved: precipitation used to be a penalty inside the moisture
+    component, and is now a multiplicative gate, because rain replaces a sunset
+    rather than deducting points from it. The requirement is unchanged — what is
+    asserted is the outcome, not the internal route to it.
+    """
     result = scoring_engine.score(rainy_weather, horizon_obstruction_deg=2.0)
-    assert result.moisture < 20, f"Expected moisture score < 20 with rain, got {result.moisture}"
+    assert result.precipitation_gate < 0.2, (
+        f"5 mm of rain should nearly close the gate, got {result.precipitation_gate:.2f}"
+    )
+    assert result.physics_score < 20, (
+        f"Expected the score to collapse in rain, got {result.physics_score:.1f}"
+    )
+
+
+def test_precipitation_gate_is_graduated_not_binary():
+    """Drizzle should barely register; steady rain should not.
+
+    A shower breaking at sunset is one of the better things that can happen, so
+    the gate decays smoothly rather than switching off at the first drop.
+    """
+    engine = ScoringEngine()
+    assert engine.precipitation_gate(0.0) == 1.0
+    assert engine.precipitation_gate(0.2) > 0.85, "drizzle should barely matter"
+    assert engine.precipitation_gate(1.0) < 0.6
+    assert engine.precipitation_gate(3.0) < 0.2
+    assert engine.precipitation_gate(50.0) >= 0.15, "gate must never reach zero"
+
+
+def test_precipitation_gate_is_monotone():
+    prev = 1.1
+    for mm in (0.0, 0.5, 1.0, 2.0, 5.0, 10.0):
+        g = engine_module.ScoringEngine().precipitation_gate(mm)
+        assert g <= prev, "more rain must never help"
+        prev = g
 
 
 def test_post_rain_clearing_bonus():
@@ -160,8 +194,9 @@ def test_post_rain_clearing_bonus():
     """
     engine = ScoringEngine()
 
-    # Currently raining — bad
-    score_active = engine.moisture_score(2.5, 70.0)
+    # Currently raining — the penalty now lives in the gate, not the component,
+    # so compare through it rather than through moisture_score alone.
+    score_active = engine.moisture_score(2.5, 70.0) * engine.precipitation_gate(2.5)
 
     # Rain stopped, recently cleared, pressure rising
     score_clearing = engine.moisture_score(
@@ -189,18 +224,68 @@ def test_post_rain_clearing_bonus():
 
 def test_missing_aerosol_does_not_tank_score():
     """
-    Missing aerosol data should not cause a severe penalty.
-    With good visibility the atmosphere score should still be reasonable.
+    A missing field should degrade the component, never punish the evening.
+    With visibility reported, atmosphere still has a real signal to score.
     """
     engine = ScoringEngine()
-    score_with_aod = engine.atmosphere_score(20_000.0, 0.18, 50.0)
-    score_no_aod = engine.atmosphere_score(20_000.0, None, 50.0)
-    # No-AOD fallback should be within 20 pts of real AOD score
+    score_with_aod = engine.atmosphere_score(20_000.0, 0.15)
+    score_no_aod = engine.atmosphere_score(20_000.0, None)
     assert score_no_aod >= score_with_aod - 20.0, (
         f"Missing AOD score ({score_no_aod:.1f}) dropped too far below real AOD ({score_with_aod:.1f})"
     )
-    # Should still clear a reasonable floor
     assert score_no_aod >= 45.0, f"Missing AOD score too low: {score_no_aod:.1f}"
+
+
+# ---------------------------------------------------------------------------
+# Moisture as a water column (Phase 3)
+#
+# Motivation, measured: with moisture scored from surface RH alone it held
+# 15 % of the weight while accounting for 2.8-5.0 % of the variance in the
+# final score across three cities. It sat pinned at 100 on every dry evening.
+# ---------------------------------------------------------------------------
+
+def test_column_dryness_is_monotone_decreasing():
+    engine = ScoringEngine()
+    prev = 101.0
+    for tcwv in range(0, 81):
+        s = engine.column_dryness(float(tcwv))
+        assert s <= prev + 1e-9, f"dryness rose at TCWV {tcwv}"
+        prev = s
+
+
+def test_column_dryness_spans_the_range():
+    """A signal that cannot separate a dry airmass from a tropical one would
+    reproduce exactly the dead weight this replaced."""
+    engine = ScoringEngine()
+    assert engine.column_dryness(6.0) >= 95.0     # dry continental winter
+    assert 55.0 <= engine.column_dryness(25.0) <= 75.0   # ordinary temperate
+    assert engine.column_dryness(45.0) <= 25.0    # tropical / heat load
+
+
+def test_moisture_now_discriminates_between_dry_evenings():
+    """Both of these evenings have unremarkable surface humidity and would have
+    scored an identical 100 before. They are not the same evening."""
+    engine = ScoringEngine()
+    dry = engine.moisture_score(0.0, 55.0, tcwv=9.0)
+    humid = engine.moisture_score(0.0, 55.0, tcwv=38.0)
+    assert dry - humid >= 40.0, f"dry={dry:.1f} humid={humid:.1f}"
+
+
+def test_moisture_falls_back_when_column_is_missing():
+    """Manual overrides carry no TCWV; the component must degrade to the old
+    surface-RH behaviour rather than collapsing to zero."""
+    engine = ScoringEngine()
+    assert engine.moisture_score(0.0, 55.0) == 100.0
+    assert engine.moisture_score(0.0, 95.0) < 100.0
+
+
+def test_surface_humidity_still_corrects_a_dry_column():
+    """A saturated boundary layer puts haze in the brightest part of the view
+    even when the column above is dry — but only as a small correction."""
+    engine = ScoringEngine()
+    dry_surface = engine.moisture_score(0.0, 50.0, tcwv=10.0)
+    wet_surface = engine.moisture_score(0.0, 100.0, tcwv=10.0)
+    assert 5.0 <= dry_surface - wet_surface <= 12.0
 
 
 # ---------------------------------------------------------------------------
@@ -208,12 +293,34 @@ def test_missing_aerosol_does_not_tank_score():
 # ---------------------------------------------------------------------------
 
 def test_horizon_obstruction_penalty(scoring_engine, ideal_weather):
-    """Large horizon obstruction should significantly reduce horizon score."""
+    """A blocked horizon should materially reduce the score.
+
+    Horizon is now a gate rather than a weighted component: it has zero
+    day-to-day variance, so as an addend it only ever added a constant. The
+    curve was also softened near zero (see horizon_gate), which is why the
+    15-degree threshold here is 55 rather than the old 40.
+    """
     result_open = scoring_engine.score(ideal_weather, horizon_obstruction_deg=0.0)
     result_blocked = scoring_engine.score(ideal_weather, horizon_obstruction_deg=15.0)
-    assert result_blocked.horizon < 40, f"Expected horizon score < 40 at 15 deg, got {result_blocked.horizon}"
+    assert result_blocked.horizon < 55, f"Expected horizon score < 55 at 15 deg, got {result_blocked.horizon}"
     assert result_open.horizon > 90, f"Expected horizon score > 90 at 0 deg, got {result_open.horizon}"
     assert result_open.physics_score > result_blocked.physics_score
+
+
+def test_horizon_is_a_gate_not_a_weighted_component():
+    """The weights must not contain horizon — that was the inflation bug."""
+    assert "horizon" not in ScoringEngine()._weights
+
+
+def test_open_horizon_costs_almost_nothing():
+    """2 degrees is an open horizon and used to cost ~9 points as an addend."""
+    assert ScoringEngine().horizon_gate(0.0) == 1.0
+    assert ScoringEngine().horizon_gate(2.0) > 0.95
+
+
+def test_horizon_gate_has_a_floor():
+    """Even a wall leaves the upper sky visible."""
+    assert ScoringEngine().horizon_gate(90.0) >= 0.35
 
 
 def test_horizon_suburban_not_crushed():
@@ -224,6 +331,7 @@ def test_horizon_suburban_not_crushed():
     engine = ScoringEngine()
     score = engine.horizon_score(5.0)
     assert score >= 60.0, f"Suburban horizon (5 deg) should score >= 60, got {score}"
+    assert score <= 95.0, "…but it should still cost something"
 
 
 # ---------------------------------------------------------------------------
@@ -324,9 +432,9 @@ def test_score_to_category_boundaries():
     """Category thresholds should map correctly."""
     engine = ScoringEngine()
     assert engine.score_to_category(85) == "Epic"
-    assert engine.score_to_category(70) == "Great"
+    assert engine.score_to_category(72) == "Great"
     assert engine.score_to_category(55) == "Good"
-    assert engine.score_to_category(40) == "Decent"
+    assert engine.score_to_category(38) == "Decent"
     assert engine.score_to_category(15) == "Poor"
     assert engine.score_to_category(0) == "Poor"
     assert engine.score_to_category(100) == "Epic"
@@ -419,20 +527,61 @@ def test_afterglow_peaks_near_minus_3_degrees():
 
 def test_afterglow_requires_high_clouds():
     """
-    No afterglow boost when high cloud coverage is below the 15 % threshold.
-    The score at sun −3° should not be meaningfully higher than at sun +2°
-    — any delta is horizon-glow variation, not afterglow.
-    (Horizon glow fires at both elevations but with different intensity, so
-    exact equality is not expected; we only check there's no +boost.)
+    The CLOUD afterglow boost needs a canvas: limb light below the horizon has
+    to land on something. Below the 15 % high-cloud threshold there is nothing
+    to illuminate, so that boost must not fire.
+
+    Tested through afterglow_score rather than cloud_quality_score. This test
+    used to assert that a near-clear sky scores no higher at -3 deg than at
+    +2 deg, which is false and was the bug: a clear sky colours by the twilight
+    gradient, which peaks several degrees BELOW the horizon. Asserting it
+    through cloud_quality_score now conflates the two pathways.
     """
     engine = ScoringEngine()
-    # Near-clear sky: 5% high, 5% total — afterglow threshold not met
-    pre  = engine.cloud_quality_score(2.0, 3.0, 5.0, 8.0, sun_elevation_deg=+2.0)
-    post = engine.cloud_quality_score(2.0, 3.0, 5.0, 8.0, sun_elevation_deg=-3.0)
-    assert post <= pre + 2.0, (
-        f"No high clouds → no afterglow boost; score should not rise at -3°, "
-        f"got {post:.1f} vs {pre:.1f}"
+    assert engine.afterglow_score(-3.0, cloud_high=5.0, cloud_low=2.0, cloud_total=8.0) == 0.0
+    assert engine.afterglow_score(-3.0, cloud_high=45.0, cloud_low=2.0, cloud_total=50.0) > 40.0
+
+
+def test_clear_sky_improves_after_the_sun_goes_down():
+    """The evening that motivated the twilight pathway: cloudless Tel Aviv,
+    clean air, photographed ~20 minutes after sunset as a saturated orange-to-
+    indigo gradient. The old engine scored it 11/100 and said "clear conditions
+    produce less colour drama"."""
+    engine = ScoringEngine()
+    # The measured conditions that evening: atmosphere 93, moisture 68.
+    at_sunset = engine.cloud_quality_score(
+        0.0, 0.0, 0.0, 0.0, sun_elevation_deg=0.0, clarity=93.0, dryness=68.0
     )
+    after = engine.cloud_quality_score(
+        0.0, 0.0, 0.0, 0.0, sun_elevation_deg=-4.0, clarity=93.0, dryness=68.0
+    )
+    assert after > at_sunset, (
+        f"the gradient peaks below the horizon, not at it: {after:.1f} vs {at_sunset:.1f}"
+    )
+    assert after >= 45.0, f"a clean cloudless twilight must be a real score, got {after:.1f}"
+
+
+def test_clear_sky_discriminates_on_air_quality():
+    """In a climate where most evenings are cloudless, air quality is the only
+    thing that separates them. A flat response would rate them all alike, which
+    is the failure mode the first version of this pathway had — it pushed half
+    of Tel Aviv's year above a raw score of 80."""
+    engine = ScoringEngine()
+    pristine = engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=100.0, dryness=100.0)
+    ordinary = engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=85.0, dryness=60.0)
+    murky = engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=40.0, dryness=35.0)
+    assert pristine - ordinary >= 15.0, f"{pristine:.1f} vs {ordinary:.1f}"
+    assert ordinary - murky >= 20.0, f"{ordinary:.1f} vs {murky:.1f}"
+
+
+def test_clear_sky_cannot_manufacture_an_epic():
+    """A gradient is a lovely evening, not the year's best sky. Epic should stay
+    reserved for lit cloud."""
+    engine = ScoringEngine()
+    best_possible = engine.twilight_gradient_score(
+        -4.0, 0.0, 0.0, clarity=100.0, dryness=100.0
+    )
+    assert best_possible <= 80.0, f"clear-sky ceiling too high: {best_possible:.1f}"
 
 
 def test_afterglow_blocked_by_overcast():
@@ -443,7 +592,11 @@ def test_afterglow_blocked_by_overcast():
     engine = ScoringEngine()
     pre  = engine.cloud_quality_score(70.0, 30.0, 60.0, 90.0, sun_elevation_deg=+2.0)
     post = engine.cloud_quality_score(70.0, 30.0, 60.0, 90.0, sun_elevation_deg=-3.0)
-    assert post == pre, (
+    # Not exact equality: with the sun still up, an overcast sky can score a
+    # little on the crepuscular pathway, which is a different mechanism and is
+    # allowed to vary with elevation. What must not happen is a RISE after
+    # sunset, which is what an afterglow boost would look like.
+    assert post <= pre, (
         f"Overcast → no afterglow boost, but got {post:.1f} vs {pre:.1f}"
     )
 

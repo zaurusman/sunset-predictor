@@ -57,6 +57,48 @@ class PhysicsBreakdown(BaseModel):
     weighted_physics_score: float = Field(ge=0, le=100)
     component_weights: dict[str, float]
 
+    # Light corridor: fraction of sunset light reaching the clouds overhead,
+    # measured along the sunset azimuth 100-400 km upstream. 1.0 = clear path.
+    # None when corridor data was unavailable (the score is then unadjusted).
+    # Multiplicative gates applied after the weighted average. 1.0 = no effect.
+    precipitation_gate: float = Field(
+        default=1.0, ge=0, le=1,
+        description="Fraction of the score surviving active rain (1.0 = dry).",
+    )
+    horizon_gate: float = Field(
+        default=1.0, ge=0, le=1,
+        description="Fraction of the score surviving horizon obstruction (1.0 = open).",
+    )
+
+    # Clear-sky pathway score: how strong the cloudless colour gradient is.
+    # High with a LOW cloud contribution means tonight is a gradient evening
+    # rather than a lit-cloud one — which the UI should say, because the two
+    # look different and peak at different times.
+    twilight_gradient_score: float = Field(
+        default=0.0, ge=0, le=100,
+        description="Clear-sky twilight gradient score (0-100), already folded into cloud_quality_score.",
+    )
+
+    # Every independent route to a beautiful sunset, scored on its own terms,
+    # plus whichever one is carrying tonight. The UI needs the winner as much
+    # as it needs the number: it decides what to look for and when.
+    pathway_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-pathway colour scores (0-100): lit_cloud, twilight_gradient, crepuscular, breaking_storm, horizon_band.",
+    )
+    dominant_pathway: Optional[str] = Field(
+        default=None,
+        description="Key of the highest-scoring pathway, or None when no pathway is active.",
+    )
+
+    light_corridor_factor: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description=(
+            "Illumination multiplier applied to cloud_quality_score. Below ~0.7 "
+            "means upstream cloud is shading the display regardless of the local sky."
+        ),
+    )
+
     # Afterglow potential (0–100). Non-zero only when sun is below the horizon
     # and conditions support afterglow (high clouds present, not overcast).
     # This is an explanatory field — the effect is already baked into
@@ -79,10 +121,14 @@ class WeatherSummary(BaseModel):
     cloud_mid_pct: float
     cloud_high_pct: float
     cloud_total_pct: float
-    visibility_km: float
+    # None when the data source does not report visibility (all archive days).
+    visibility_km: Optional[float]
     precipitation_mm: float
     aerosol_optical_depth: Optional[float]
     aerosol_is_estimated: bool
+    # Total column water vapour (mm of precipitable water) — what the moisture
+    # component actually scores. None when the source does not report it.
+    tcwv_kg_m2: Optional[float] = None
     temperature_c: float
     humidity_pct: float
     wind_speed_kmh: float
@@ -130,6 +176,24 @@ class PredictResponse(BaseModel):
     ml_adjustment: Optional[float] = Field(
         default=None,
         description="Raw adjustment applied by the ML model (positive = boosted, negative = reduced)",
+    )
+
+    # Calibration: beauty_score_0_100 is a RANK against this location's own
+    # climatology, not the raw physics score. These expose what produced it.
+    raw_physics_score: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Uncalibrated physics score, before percentile mapping.",
+    )
+    climatology_percentile: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="Fraction of evenings at this location that score lower.",
+    )
+    climatology_is_local: bool = Field(
+        default=False,
+        description=(
+            "True when ranked against this location's own history; False when a "
+            "global reference curve stood in because the local one is still warming."
+        ),
     )
 
     physics_component_breakdown: PhysicsBreakdown

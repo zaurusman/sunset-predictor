@@ -19,13 +19,34 @@ class WeatherSnapshot(BaseModel):
     cloud_total: float = Field(ge=0, le=100, description="Total cloud cover %")
 
     # Atmosphere
-    visibility_m: float = Field(ge=0, description="Horizontal visibility in metres")
+    #
+    # visibility_m is None when the data source does not report it. The ERA5
+    # archive never does — measured over 72 consecutive archive hours it
+    # returned null every time — so historical days genuinely have no
+    # visibility, and the previous 15 km default silently fed a constant into
+    # the atmosphere score for every archive day. None means "unknown"; the
+    # scorer leaves it out rather than inventing a value.
+    visibility_m: Optional[float] = Field(
+        default=None, ge=0, description="Horizontal visibility in metres, or None if unreported"
+    )
     relative_humidity: float = Field(ge=0, le=100, description="Relative humidity %")
     dewpoint_c: float = Field(description="Dew point temperature °C")
     temperature_c: float = Field(description="Air temperature °C")
     precipitation_mm: float = Field(ge=0, description="Precipitation in mm")
     wind_speed_kmh: float = Field(ge=0, description="Wind speed km/h")
     pressure_hpa: float = Field(description="Surface pressure hPa")
+
+    # Total column integrated water vapour (kg/m², equivalently mm of
+    # precipitable water). This is the whole-atmosphere moisture load, which is
+    # what actually mutes sunset colour — surface relative humidity says only
+    # what the bottom few metres are doing. Available on BOTH the forecast and
+    # archive endpoints, which is why it, and not pressure-level humidity, is
+    # what the moisture component scores: the archive returns null for every
+    # relative_humidity_*hPa level, so scoring those would make live forecasts
+    # incomparable with the climatology they are ranked against.
+    tcwv_kg_m2: Optional[float] = Field(
+        default=None, ge=0, description="Total column integrated water vapour (kg/m²)"
+    )
 
     # Aerosol optical depth — None means unavailable (fallback proxy was used)
     aerosol_optical_depth: Optional[float] = Field(

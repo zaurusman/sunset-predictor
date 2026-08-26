@@ -31,10 +31,15 @@ export default function EvidenceDrawer({ prediction }: EvidenceDrawerProps) {
 
   const helping = prediction.reasons.filter(isPositiveReason);
   const hurting = prediction.reasons.filter((r) => !isPositiveReason(r));
-  const summary = [
-    ...helping.slice(0, 1).map((text) => ({ text, positive: true })),
-    ...hurting.slice(0, 1).map((text) => ({ text, positive: false })),
-  ];
+  // One line each way, but the side that matches the verdict leads. Always
+  // putting the positive first meant a "Not tonight" evening opened with
+  // "clear air will help colours pop", which reads as a contradiction.
+  const positiveFirst = prediction.beauty_score_0_100 >= 50;
+  const helpingLine = helping.slice(0, 1).map((text) => ({ text, positive: true }));
+  const hurtingLine = hurting.slice(0, 1).map((text) => ({ text, positive: false }));
+  const summary = positiveFirst
+    ? [...helpingLine, ...hurtingLine]
+    : [...hurtingLine, ...helpingLine];
 
   const w = prediction.weather_summary;
   const haze = hazeLabel(w.aerosol_optical_depth);
@@ -85,8 +90,18 @@ export default function EvidenceDrawer({ prediction }: EvidenceDrawerProps) {
               <Stat label="Cloud" value={`${Math.round(w.cloud_total_pct)}%`} />
               <Stat label="High cloud" value={`${Math.round(w.cloud_high_pct)}%`} />
               <Stat label="Low cloud" value={`${Math.round(w.cloud_low_pct)}%`} />
-              <Stat label="Visibility" value={`${Math.round(w.visibility_km)} km`} />
+              {/* Archive dates carry no visibility — showing a made-up number
+                  there would be worse than showing nothing. */}
+              {w.visibility_km !== null && (
+                <Stat label="Visibility" value={`${Math.round(w.visibility_km)} km`} />
+              )}
               <Stat label="Humidity" value={`${Math.round(w.humidity_pct)}%`} />
+              {/* The water column is what the moisture component scores, so it
+                  belongs in the evidence — surface humidity alone doesn't
+                  explain a low moisture bar. */}
+              {w.tcwv_kg_m2 !== null && (
+                <Stat label="Air moisture" value={`${Math.round(w.tcwv_kg_m2)} mm`} />
+              )}
               <Stat label="Rain" value={`${w.precipitation_mm} mm`} />
               {haze && (
                 <Stat
