@@ -23,6 +23,20 @@ UTC = timezone.utc
 # server error). Other 4xx (e.g. 400 bad params) won't fix themselves on retry.
 _RETRYABLE_STATUS = {429}
 
+# icon_seamless (ICON global + EU + D2, blended) covers roughly 7.5 days —
+# verified live, `forecast_days=16` with this model silently returns null
+# beyond ~180 hours rather than an error. The app promises forecasts up to 16
+# days out (`auto` reaches further by falling back to GFS), so the explicit
+# model is only safe to request within its own honest horizon; requests
+# beyond it fall back to `auto` rather than nulling out the back half of the
+# forecast.
+ICON_SEAMLESS_MAX_DAYS = 7
+
+# Ensemble spread caches longer than the 900s default — it changes on model
+# run cadence (~every 6h for icon_seamless), not on every poll, and the
+# endpoint is heavier than the deterministic one.
+_ENSEMBLE_CACHE_TTL_SECONDS = 3600
+
 
 class WeatherUnavailableError(Exception):
     """Raised when the weather provider is unreachable or rate-limiting us
@@ -559,6 +573,8 @@ class WeatherService:
             "forecast_days": days,
             "timezone": "UTC",
         }
+        if days <= ICON_SEAMLESS_MAX_DAYS:
+            params["models"] = self._settings.OPEN_METEO_MODEL
         if past_days > 0:
             params["past_days"] = past_days
         return await self._get_json(url, params)
@@ -698,6 +714,89 @@ class WeatherService:
         aq_data = await self._fetch_air_quality_range_raw(lat, lon, target_date, target_date)
         return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time)
 
+    async def get_ensemble_cloud_spread(
+        self, lat: float, lon: float, target_date: date, sunset_time: datetime
+    ) -> Optional[float]:
+        """Standard deviation of total cloud cover (%) across forecast ensemble
+        members at the sunset hour — an actual measurement of forecast
+        uncertainty, in place of guessing it from how far away the date is.
+
+        Only meaningful for a genuine FORECAST: past dates have no ensemble to
+        disagree, and a target beyond ICON_SEAMLESS_MAX_DAYS is past the model's
+        honest horizon (verified live — members return null past ~7.5 days
+        rather than an error). Returns None in either case, or if the request
+        fails; the caller falls back to the lead-time heuristic.
+
+        Single-day convenience wrapper — a multi-day forecast should use
+        get_ensemble_cloud_spread_map instead so N days cost one request, not N.
+        """
+        result = await self.get_ensemble_cloud_spread_map(lat, lon, [(target_date, sunset_time)])
+        return result.get(target_date)
+
+    async def get_ensemble_cloud_spread_map(
+        self, lat: float, lon: float, targets: list[tuple[date, datetime]]
+    ) -> dict[date, float]:
+        """Ensemble cloud-cover spread for many dates, batched into ONE request.
+
+        Every date within ICON_SEAMLESS_MAX_DAYS shares a single ensemble
+        forecast — the endpoint already returns the whole horizon per call, so
+        fetching it once per date (as a 16-day forecast's per-day scoring would
+        otherwise do) is 7 wasted requests against a heavier-than-usual
+        endpoint. Dates outside the horizon are simply absent from the result.
+        """
+        in_range = [
+            (d, st) for d, st in targets
+            if 0 <= (d - datetime.now(UTC).date()).days <= ICON_SEAMLESS_MAX_DAYS
+        ]
+        if not in_range:
+            return {}
+
+        max_days_ahead = max((d - datetime.now(UTC).date()).days for d, _ in in_range)
+        cache_key = TTLCache.make_key(
+            "ensemble_spread_map", *self._ckey_coords(lat, lon), max_days_ahead
+        )
+        hourly = self._cache.get(cache_key)
+        if hourly is None:
+            try:
+                data = await self._fetch_ensemble_raw(lat, lon, days=max_days_ahead + 1)
+            except WeatherUnavailableError:
+                logger.warning("Ensemble fetch failed for (%.4f, %.4f) — no spread signal", lat, lon)
+                return {}
+            hourly = data.get("hourly", {})
+            self._cache.set(cache_key, hourly, ttl_override=_ENSEMBLE_CACHE_TTL_SECONDS)
+
+        time_strs: list[str] = hourly.get("time", [])
+        if not time_strs:
+            return {}
+        times = [datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs]
+        member_keys = [k for k in hourly if k.startswith("cloud_cover_member")]
+
+        out: dict[date, float] = {}
+        for d, sunset_time in in_range:
+            idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+            members = [
+                hourly[k][idx] for k in member_keys
+                if idx < len(hourly[k]) and hourly[k][idx] is not None
+            ]
+            if len(members) < 4:
+                continue
+            mean = sum(members) / len(members)
+            variance = sum((m - mean) ** 2 for m in members) / len(members)
+            out[d] = variance ** 0.5
+        return out
+
+    async def _fetch_ensemble_raw(self, lat: float, lon: float, days: int) -> dict[str, Any]:
+        url = f"{self._settings.OPEN_METEO_ENSEMBLE_URL}/ensemble"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "cloud_cover",
+            "models": self._settings.OPEN_METEO_MODEL,
+            "forecast_days": days,
+            "timezone": "UTC",
+        }
+        return await self._get_json(url, params)
+
     async def _fetch_forecast_raw(
         self, lat: float, lon: float, days: int = 7, past_days: int = 0
     ) -> dict[str, Any]:
@@ -709,6 +808,8 @@ class WeatherService:
             "forecast_days": days,
             "timezone": "UTC",
         }
+        if days <= ICON_SEAMLESS_MAX_DAYS:
+            params["models"] = self._settings.OPEN_METEO_MODEL
         if past_days > 0:
             params["past_days"] = past_days
         return await self._get_json(url, params)

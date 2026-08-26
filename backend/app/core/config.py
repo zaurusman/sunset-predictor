@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     OPEN_METEO_AIR_QUALITY_URL: str = "https://air-quality-api.open-meteo.com/v1"
     OPEN_METEO_ARCHIVE_URL: str = "https://archive-api.open-meteo.com/v1"
     OPEN_METEO_GEOCODING_URL: str = "https://geocoding-api.open-meteo.com/v1"
+    OPEN_METEO_ENSEMBLE_URL: str = "https://ensemble-api.open-meteo.com/v1"
+
+    # Forecast model, set explicitly rather than left at Open-Meteo's `auto`.
+    # ICON-based cloud forecasts are generally ranked above GFS/NAM-based ones,
+    # and an explicit model is a prerequisite for the ensemble spread below —
+    # confidence has to measure spread of the SAME model family it forecasts with.
+    OPEN_METEO_MODEL: str = "icon_seamless"
 
     # Reddit API credentials (optional; needed only for dataset building)
     REDDIT_CLIENT_ID: str = ""

@@ -157,6 +157,24 @@ CALIBRATION_ANCHORS: list[tuple[float, float]] = [
 # rather than rationing the recommendation to a fixed share of nights.
 GO_OUTSIDE_THRESHOLD = 75.0
 
+# Ensemble cloud-cover spread (standard deviation, %, across forecast members
+# at the sunset hour) -> confidence adjustment (points). Replaces the
+# lead-time guess with an actual measurement of forecast uncertainty when one
+# is available (see ScoringEngine.compute_confidence,
+# WeatherService.get_ensemble_cloud_spread).
+#
+# Anchors calibrated against live icon_seamless data over ~7.5 days in Tel
+# Aviv, London and San Francisco: spread p25-p75 ran roughly 11-31, min ~0,
+# max ~45. 0 = every member agrees exactly; 45+ is members disagreeing by
+# nearly half the 0-100 scale.
+ENSEMBLE_SPREAD_CONFIDENCE_ANCHORS: list[tuple[float, float]] = [
+    (0.0,   10.0),
+    (10.0,   5.0),
+    (20.0,   0.0),
+    (30.0,  -6.0),
+    (45.0, -12.0),
+]
+
 # ---------------------------------------------------------------------------
 # Atmosphere response curves
 # ---------------------------------------------------------------------------
@@ -1540,6 +1558,7 @@ class ScoringEngine:
         has_ml: bool = False,
         window_scores: Optional[list[float]] = None,
         lead_time_hours: Optional[float] = None,
+        ensemble_cloud_spread: Optional[float] = None,
     ) -> float:
         """
         Estimate prediction confidence in [15, 92].
@@ -1548,17 +1567,29 @@ class ScoringEngine:
         - The score is far from the ambiguous middle (40–60)
         - Multiple window points agree
         - Aerosol data is real (not proxy-estimated)
-        - The sunset is imminent (forecast refreshes hourly and firms up)
+        - Forecast ensemble members agree on cloud cover (or the sunset is imminent,
+          when no ensemble reading is available)
 
         Confidence is lower when:
         - Signals conflict (good clouds + active rain)
         - The window is highly volatile (one great point, rest collapse)
         - Aerosol is estimated
         - Active rain conflicts with otherwise strong sky structure
-        - The target sunset is many days out (forecast skill decays with lead time)
+        - Forecast ensemble members disagree on cloud cover, or (without an
+          ensemble reading) the target sunset is many days out
+
+        *ensemble_cloud_spread* is the standard deviation of total cloud cover
+        (%) across forecast ensemble members at the sunset hour — an actual
+        measurement of forecast uncertainty (see weather_service.get_ensemble_
+        cloud_spread). When present it REPLACES the lead-time term below,
+        because both approximate the same thing and the ensemble spread is the
+        real version of what lead-time was guessing at. Pass None when no
+        ensemble reading exists (past dates, or beyond the model's ~7.5-day
+        honest horizon) to fall back to lead-time.
 
         *lead_time_hours* is the gap from now to the target sunset; pass None
         (the default) to skip the lead-time term entirely (e.g. for overrides).
+        Ignored when *ensemble_cloud_spread* is given.
         """
         base = 60.0
 
@@ -1593,10 +1624,15 @@ class ScoringEngine:
         if has_ml:
             base += 4.0
 
-        # Forecast lead-time: imminent sunsets (and observed past dates) get a
-        # small boost; ~1 day out is neutral; each further day is penalised,
-        # reflecting how forecast skill decays with lead time.
-        if lead_time_hours is not None:
+        # Forecast uncertainty: prefer the real measurement (ensemble spread)
+        # over the lead-time guess when one is available.
+        if ensemble_cloud_spread is not None:
+            base += _interpolate(ENSEMBLE_SPREAD_CONFIDENCE_ANCHORS, ensemble_cloud_spread)
+        elif lead_time_hours is not None:
+            # Imminent sunsets (and observed past dates) get a small boost;
+            # ~1 day out is neutral; each further day is penalised, reflecting
+            # how forecast skill decays with lead time. Only a fallback for
+            # when no ensemble reading exists — the guess ensemble spread replaces.
             base += self._lead_time_adjustment(lead_time_hours)
 
         return clamp(base, lo=15.0, hi=92.0)

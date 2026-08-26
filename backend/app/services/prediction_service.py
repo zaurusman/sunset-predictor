@@ -117,6 +117,19 @@ class PredictionService:
             best_label = window_result.best_label
             primary_result, primary_weather = snap_results[best_label]
 
+        # Real forecast-uncertainty signal for confidence, when one exists —
+        # None for past dates, beyond the ensemble's honest horizon, or an
+        # override (which fully specifies conditions; nothing to be uncertain
+        # about). Never allowed to fail the prediction itself.
+        ensemble_spread: Optional[float] = None
+        if request.weather_override is None:
+            try:
+                ensemble_spread = await self._weather.get_ensemble_cloud_spread(
+                    lat, lon, target_date, sunset_time
+                )
+            except Exception as exc:
+                logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
+
         # ------------------------------------------------------------------
         # ML calibration (applied to the window final score)
         # ------------------------------------------------------------------
@@ -150,6 +163,7 @@ class PredictionService:
             has_ml=self._ml.is_loaded(),
             window_scores=list(window_result.window_scores.values()),
             lead_time_hours=lead_time_hours,
+            ensemble_cloud_spread=ensemble_spread,
         )
 
         reasons = self._explanation.generate(
@@ -419,6 +433,13 @@ class PredictionService:
         final_score, percentile, _is_local = self._calibrate(raw_score, lat, lon)
         category = self._scoring.score_to_category(final_score)
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
+        try:
+            ensemble_spread = await self._weather.get_ensemble_cloud_spread(
+                lat, lon, target_date, sunset_time
+            )
+        except Exception as exc:
+            logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
+            ensemble_spread = None
         confidence = self._scoring.compute_confidence(
             weather=primary_weather,
             component_scores={
@@ -431,6 +452,7 @@ class PredictionService:
             has_ml=self._ml.is_loaded(),
             window_scores=list(window_result.window_scores.values()),
             lead_time_hours=lead_time_hours,
+            ensemble_cloud_spread=ensemble_spread,
         )
         reasons = self._explanation.generate(
             weather=primary_weather,

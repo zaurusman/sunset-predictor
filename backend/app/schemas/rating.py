@@ -23,9 +23,14 @@ against the same labels without refetching history.
 from __future__ import annotations
 
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+# Same four moments the engine samples (app/services/weather_service.py). A
+# rating without one of these is assumed to describe the whole evening, which
+# is how every rating before this field existed was recorded.
+ObservedMoment = Literal["-15m", "sunset", "+15m", "+30m"]
 
 
 class RatingRequest(BaseModel):
@@ -47,6 +52,19 @@ class RatingRequest(BaseModel):
     target_date: Optional[date] = Field(
         default=None,
         description="Evening being rated. Defaults to the local sunset date.",
+    )
+    observed_moment: Optional[ObservedMoment] = Field(
+        default=None,
+        description=(
+            "Which sampled moment this rating actually describes, if known — "
+            "e.g. a photo timestamped 20 minutes after sunset should be rated "
+            "against '+15m' or '+30m', not the whole evening. A sunset-lit-cloud "
+            "evening and an afterglow-gradient evening are different physical "
+            "events that happen to share a date; without this a rating collapses "
+            "them into one label and the engine cannot tell which moment it got "
+            "right or wrong. None means the rating describes the evening as a "
+            "whole (e.g. the in-app one-tap rating, which isn't tied to a moment)."
+        ),
     )
     location_name: str = Field(default="", max_length=200)
     notes: str = Field(default="", max_length=500)

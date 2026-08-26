@@ -311,7 +311,14 @@ def report_labels(path: str) -> None:
     human: list[float] = []
     model: list[float] = []
     for rec in latest.values():
-        r, s = rec.get("rating"), rec.get("predicted_score")
+        r = rec.get("rating")
+        # A rating tied to a specific moment (observed_moment) should be
+        # compared against what the model scored AT that moment, not the
+        # evening's aggregated max — a sunset-lit-cloud reading and an
+        # afterglow-gradient reading of the same evening are different events.
+        s = rec.get("predicted_score_at_observed_moment")
+        if s is None:
+            s = rec.get("predicted_score")
         if isinstance(r, int) and isinstance(s, (int, float)):
             human.append(float(r))
             model.append(float(s))

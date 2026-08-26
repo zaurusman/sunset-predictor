@@ -88,6 +88,10 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
         "location_name": _sanitize(body.location_name),
         "rating": body.rating,
         "notes": _sanitize(body.notes),
+        # Which sampled moment this rating actually describes, if known — a
+        # sunset-lit-cloud evening and an afterglow-gradient one are different
+        # events that share a date. None means "the evening as a whole".
+        "observed_moment": body.observed_moment,
         # What the model said at capture time — the thing we are measuring.
         "predicted_score": prediction.beauty_score_0_100,
         "predicted_category": prediction.category,
@@ -97,6 +101,14 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
         "physics_breakdown": prediction.physics_component_breakdown.model_dump(),
         "window_scores": prediction.window_scores,
         "best_window_point": prediction.best_window_point,
+        # What the model scored at the SPECIFIC moment this rating describes,
+        # when that's known — the number this rating should actually be
+        # compared against. Falls back to the evening's aggregated score when
+        # the moment wasn't given.
+        "predicted_score_at_observed_moment": (
+            prediction.window_scores.get(body.observed_moment)
+            if body.observed_moment else None
+        ),
         # Raw inputs — lets any future scoring change be replayed offline.
         "window_snapshots": [s.model_dump(mode="json") for s in snapshots],
     }
@@ -152,7 +164,13 @@ async def rating_stats(request: Request) -> RatingStats:
             histogram[r] = histogram.get(r, 0) + 1
         locations.add((round(rec.get("latitude", 0.0), 2), round(rec.get("longitude", 0.0), 2)))
         dates.add(str(rec.get("target_date")))
-        pred = rec.get("predicted_score")
+        # Prefer the score at the specific moment this rating describes — a
+        # sunset-lit-cloud reading and an afterglow-gradient reading of the
+        # same evening are different physical events. Falls back to the
+        # aggregated evening score for ratings that predate this field.
+        pred = rec.get("predicted_score_at_observed_moment")
+        if pred is None:
+            pred = rec.get("predicted_score")
         if isinstance(r, int) and isinstance(pred, (int, float)):
             human.append(float(r))
             model.append(float(pred))
