@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from app.core.logging import get_logger
+from app.schemas.rating import COARSE_TO_0_100
 
 logger = get_logger(__name__)
 
@@ -36,6 +37,33 @@ logger = get_logger(__name__)
 # evening from home and then from the beach a few streets away, is ONE
 # observation of that evening, not two.
 DEFAULT_DEDUPE_TOLERANCE_DEG = 0.05
+
+
+def label_0_100(rec: dict[str, Any]) -> Optional[float]:
+    """The human label from one record, on the canonical 0-100 scale.
+
+    Records written since the scale change carry `rating_0_100` directly.
+    Older ones carry only the 1-5 tap value, which is converted to its band
+    CENTRE — the honest reading of a five-way choice.
+
+    Returns None when the record has no usable rating at all.
+    """
+    precise = rec.get("rating_0_100")
+    if isinstance(precise, (int, float)):
+        return float(precise)
+    coarse = rec.get("rating")
+    if isinstance(coarse, int) and coarse in COARSE_TO_0_100:
+        return COARSE_TO_0_100[coarse]
+    return None
+
+
+def band_of(score_0_100: float) -> int:
+    """Which of the five coarse bands a 0-100 label falls in (1-5).
+
+    For histograms and the "are both ends represented?" check, where 100
+    buckets over a few dozen ratings would be unreadable.
+    """
+    return max(1, min(5, int(score_0_100 // 20) + 1))
 
 
 def dedupe_latest(
