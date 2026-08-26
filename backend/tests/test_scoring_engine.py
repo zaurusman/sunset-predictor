@@ -720,3 +720,59 @@ def test_past_date_negative_lead_treated_as_imminent():
     """Observed past dates (negative lead) get the imminent boost, not a penalty."""
     engine = ScoringEngine()
     assert _conf(engine, -48.0) == pytest.approx(_conf(engine, 0.0))
+
+
+def test_twilight_gradient_rewards_a_moist_boundary_layer():
+    """A humid coastal evening gives a better twilight arch than a bone-dry one.
+
+    Measured against 23 labelled clear-sky evenings in Tel Aviv: surface
+    relative humidity ranks +0.61 against the human score, and it still ranks
+    +0.49 on the 15 of those where the ERA5 archive independently confirms zero
+    cloud at every level — so this is the air itself, not cloud the cloud-cover
+    field failed to report.
+
+    The engine had the sign backwards. Its `air` term rewarded dry, clean air,
+    which is a continental-desert intuition: on a Mediterranean coast the dry
+    evenings are the easterly ones, and they produce a hard, pale gradient.
+    """
+    engine = ScoringEngine()
+    dry = engine.twilight_gradient_score(
+        -4.0, 0.0, 0.0, clarity=70.0, dryness=70.0, humidity_pct=40.0
+    )
+    moist = engine.twilight_gradient_score(
+        -4.0, 0.0, 0.0, clarity=70.0, dryness=70.0, humidity_pct=75.0
+    )
+    assert moist > dry + 5.0, (
+        f"a moist boundary layer must beat a bone-dry one: {moist:.1f} vs {dry:.1f}"
+    )
+
+
+def test_twilight_gradient_falls_off_when_the_air_saturates():
+    """Moisture helps until it becomes haze. Fog does not make a better arch.
+
+    No labelled evening here exceeds 78 % surface RH, so the falling edge is a
+    physical prior rather than a fitted one — stated explicitly so nobody reads
+    it as measured.
+    """
+    engine = ScoringEngine()
+    moist = engine.twilight_gradient_score(
+        -4.0, 0.0, 0.0, clarity=70.0, dryness=70.0, humidity_pct=75.0
+    )
+    saturated = engine.twilight_gradient_score(
+        -4.0, 0.0, 0.0, clarity=70.0, dryness=70.0, humidity_pct=97.0
+    )
+    assert saturated < moist, f"{saturated:.1f} vs {moist:.1f}"
+
+
+def test_twilight_gradient_unchanged_when_humidity_is_absent():
+    """Callers with no humidity keep the previous behaviour exactly.
+
+    Manual overrides and any snapshot predating the field must degrade to the
+    old curve rather than silently picking up a default that moves their score.
+    """
+    engine = ScoringEngine()
+    assert engine.twilight_gradient_score(
+        -4.0, 0.0, 0.0, clarity=85.0, dryness=60.0, humidity_pct=None
+    ) == pytest.approx(
+        engine.twilight_gradient_score(-4.0, 0.0, 0.0, clarity=85.0, dryness=60.0)
+    )

@@ -256,12 +256,61 @@ TWILIGHT_SIGMA_DEG = 3.0
 # were crowded into ten points, so the ordering inside them was noise.
 TWILIGHT_MAX = 78.0
 
-# The gradient is made of air, so its quality is entirely the air's quality:
-# clean (low aerosol) and dry (low water column). Blend and sharpen, because
-# on a clear evening these are the ONLY things that vary — a gentle response
-# would score every cloudless night the same and tell the user nothing.
+# The gradient is made of air, so its quality is entirely the air's quality.
+# Blend and sharpen, because on a clear evening these are the ONLY things that
+# vary — a gentle response would score every cloudless night the same and tell
+# the user nothing.
 TWILIGHT_CLARITY_SHARE = 0.55
 TWILIGHT_SHARPNESS = 1.9
+
+# ...but "dry is better" was the wrong sign for THIS pathway.
+#
+# Measured against 23 labelled clear-sky evenings in Tel Aviv, every input the
+# air term actually used ranked the wrong way round against the human score:
+#
+#     surface RH        +0.61     <- not used at all
+#     TCWV              +0.29
+#     dryness  (TCWV)   -0.17     <- 45 % of `air`, positive weight
+#     clarity           -0.17     <- 55 % of `air`, positive weight
+#
+# Both independent moisture measures say the same thing — more water in the
+# air, better arch — and the engine inverted it. On the 15 of those evenings
+# where the ERA5 archive independently reports zero cloud at every level,
+# surface RH still ranks +0.49, and the sign survives every leave-one-out. So
+# this is the air itself, not cloud that the cloud-cover fields under-reported.
+#
+# Why surface RH here, when column_dryness() argues at length that RH measures
+# the bottom two metres and TCWV is the honest instrument? Because that
+# argument is about the wrong pathway. Light reaching a lit CLOUD arrives from
+# above and crosses the whole column, so TCWV is right for lit_cloud. The
+# twilight arch is light that has travelled a long, near-tangential path
+# through the boundary layer itself — which is exactly the layer surface RH
+# measures. The two components are not competing; they belong to different
+# pathways, and the labels agree.
+#
+# Physically: a dry evening on this coast is an easterly, desert-sourced one,
+# and it gives a hard pale gradient. A humid evening is onshore marine flow,
+# and the vapour is what reddens and softens the arch.
+#
+# The anchors below are humidity -> twilight vapour quality (0-100). The RISING
+# limb is measured; the FALLING limb above ~80 % is a physical prior (moisture
+# becomes haze, and fog makes no arch at all) — no labelled evening here
+# exceeds 78 % RH, so nothing above that is fitted and it must not be read as
+# though it were.
+TWILIGHT_HUMIDITY_ANCHORS: list[tuple[float, float]] = [
+    (30.0, 55.0),
+    (50.0, 72.0),
+    (65.0, 88.0),
+    (78.0, 100.0),
+    (88.0, 82.0),
+    (96.0, 45.0),
+]
+
+# How much of the air blend the boundary-layer vapour term takes when humidity
+# is available. It displaces the column-dryness half rather than adding a third
+# term: on this pathway dryness measured -0.17, so keeping it at full weight
+# would leave a known wrong-signed input in the product.
+TWILIGHT_VAPOUR_SHARE = 0.45
 
 # The horizon strip you actually look at is NOT your own grid cell.
 #
@@ -503,6 +552,7 @@ class ScoringEngine:
             precip_last_3h=weather.precipitation_last_3h_mm,
             pressure_trend=weather.pressure_trend_hpa_3h,
             cloud_trend=weather.cloud_total_trend_3h,
+            humidity_pct=weather.relative_humidity,
         )
         cq = self.combine_pathways(pathways)
         twilight = pathways["twilight_gradient"]
@@ -671,6 +721,7 @@ class ScoringEngine:
         clarity: float = 70.0,
         dryness: float = 70.0,
         strip_blocking: Optional[float] = None,
+        humidity_pct: Optional[float] = None,
     ) -> float:
         """Score the clear-sky twilight gradient, 0-100.
 
@@ -692,12 +743,19 @@ class ScoringEngine:
 
         *Air quality, sharply.* There is no cloud here to catch the light, so
         everything visible is scattering by the air itself: haze turns the same
-        geometry into a flat brown murk, and a wet column does the same more
-        gently. *clarity* is the atmosphere component, *dryness* the moisture
-        component. The response is deliberately steep — in a climate where most
-        evenings are cloudless these two are the only signals that separate a
-        memorable gradient from an ordinary one, and a gentle curve would rate
-        every clear night alike.
+        geometry into a flat brown murk. *clarity* is the atmosphere component.
+        The response is deliberately steep — in a climate where most evenings
+        are cloudless this is most of what separates a memorable gradient from
+        an ordinary one, and a gentle curve would rate every clear night alike.
+
+        The other half of the air blend is the water in it. When
+        *humidity_pct* is given it scores the boundary layer the light actually
+        crosses (TWILIGHT_HUMIDITY_ANCHORS), where moisture HELPS up to the
+        point it becomes haze; without it the column-dryness *dryness* score
+        stands in, preserving the previous behaviour for callers that have no
+        humidity. See the TWILIGHT_HUMIDITY_ANCHORS comment for the measurement
+        that established the direction, and for which half of that curve is
+        measured and which half is a prior.
         """
         elev_factor = math.exp(
             -0.5 * ((sun_elevation_deg - TWILIGHT_PEAK_ELEV_DEG) / TWILIGHT_SIGMA_DEG) ** 2
@@ -713,9 +771,15 @@ class ScoringEngine:
             span = TWILIGHT_BLOCKED_AT - TWILIGHT_OPEN_BELOW
             openness = clamp(1.0 - (blocking - TWILIGHT_OPEN_BELOW) / span, lo=0.0, hi=1.0)
 
+        if humidity_pct is not None:
+            vapour = _interpolate(TWILIGHT_HUMIDITY_ANCHORS, humidity_pct)
+            wet_share, wet_term = TWILIGHT_VAPOUR_SHARE, vapour
+        else:
+            wet_share, wet_term = 1.0 - TWILIGHT_CLARITY_SHARE, clamp(dryness)
+
         air = (
             TWILIGHT_CLARITY_SHARE * clamp(clarity)
-            + (1.0 - TWILIGHT_CLARITY_SHARE) * clamp(dryness)
+            + wet_share * wet_term
         ) / 100.0
         air_factor = air ** TWILIGHT_SHARPNESS
 
@@ -1049,6 +1113,7 @@ class ScoringEngine:
         precip_last_3h: Optional[float] = None,
         pressure_trend: Optional[float] = None,
         cloud_trend: Optional[float] = None,
+        humidity_pct: Optional[float] = None,
     ) -> dict[str, float]:
         """Score every route to a beautiful sunset independently.
 
@@ -1064,7 +1129,8 @@ class ScoringEngine:
                 low_pct, mid_pct, high_pct, total_pct, sun_elevation_deg
             ),
             "twilight_gradient": self.twilight_gradient_score(
-                sun_elevation_deg, low_pct, mid_pct, clarity, dryness, strip_blocking
+                sun_elevation_deg, low_pct, mid_pct, clarity, dryness,
+                strip_blocking, humidity_pct,
             ),
             "crepuscular": self.crepuscular_score(
                 low_pct, mid_pct, high_pct, sun_elevation_deg, clarity
