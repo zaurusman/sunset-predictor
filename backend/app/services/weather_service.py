@@ -32,6 +32,26 @@ _RETRYABLE_STATUS = {429}
 # forecast.
 ICON_SEAMLESS_MAX_DAYS = 7
 
+# A complete archive month never changes (ERA5 is final), so it is cached for
+# a month and shared by every caller — the heatmap and the climatology build
+# fetch overlapping history, and used to pay for it twice.
+_ARCHIVE_MONTH_TTL_SECONDS = 30 * 86_400
+
+# Once an evening's viewing window is over, its reading is frozen: kept for a
+# day instead of being re-fetched every CACHE_TTL. Tonight's answer should not
+# drift after the sun has set, and refreshing it would only spend quota.
+_FROZEN_TTL_SECONDS = 86_400
+# How long after sunset the viewing window runs (matches the "+30m" point).
+_WINDOW_END_AFTER_SUNSET = timedelta(minutes=30)
+
+def _share_whole_month(needed_days: int, month_days: int) -> bool:
+    """Fetch a complete archive month WHOLE (a shared cache entry) only when at
+    least half of it is needed. A range that merely clips a month — say the
+    single last day — would otherwise pay for 30 days to use one; for the
+    six-point corridor that is ~14 weighted calls instead of ~6."""
+    return 2 * needed_days >= month_days
+
+
 # Ensemble spread caches longer than the 900s default — it changes on model
 # run cadence (~every 6h for icon_seamless), not on every poll, and the
 # endpoint is heavier than the deterministic one.
@@ -117,6 +137,11 @@ class WeatherService:
         self._astro = astro_service
         self._cache = cache
         self._settings = settings
+        # Open-Meteo rejects bursts with 429 "Too many concurrent requests"
+        # (seen live when a heatmap's months were fetched all at once). One
+        # cap for the whole process, so user requests and a background
+        # climatology build cannot pile up against it either.
+        self._concurrency = asyncio.Semaphore(settings.OPEN_METEO_MAX_CONCURRENCY)
 
     def _ckey_coords(self, lat: float, lon: float) -> tuple[float, float]:
         """Round (lat, lon) for the cache key (not for the actual fetch).
@@ -128,6 +153,17 @@ class WeatherService:
         """
         decimals = self._settings.CACHE_COORD_DECIMALS
         return round(lat, decimals), round(lon, decimals)
+
+    def _frozen_get(self, cache_key: str, window_over: bool) -> Any:
+        """Cache read that, once the evening's window is over, also accepts an
+        expired entry and pins it for _FROZEN_TTL_SECONDS — so the last
+        reading from before sunset is what stays on screen."""
+        cached = self._cache.get(cache_key)
+        if cached is None and window_over:
+            cached = self._cache.get_stale(cache_key)
+            if cached is not None:
+                self._cache.set(cache_key, cached, ttl_override=_FROZEN_TTL_SECONDS)
+        return cached
 
     def _stale_or_raise(self, cache_key: str, exc: WeatherUnavailableError, what: str) -> Any:
         """Fallback when Open-Meteo is unavailable: return the last good
@@ -295,7 +331,8 @@ class WeatherService:
         and to keep the score stable within a single server session.
         """
         cache_key = TTLCache.make_key("window_snaps", *self._ckey_coords(lat, lon), str(target_date))
-        cached = self._cache.get(cache_key)
+        window_over = sunset_time + _WINDOW_END_AFTER_SUNSET < datetime.now(UTC)
+        cached = self._frozen_get(cache_key, window_over)
         if cached is not None:
             logger.debug("Cache hit for window_snaps lat=%.4f lon=%.4f date=%s", lat, lon, target_date)
             return cached
@@ -327,7 +364,10 @@ class WeatherService:
         snapshots = self._extract_window_snapshots_from_raw(
             weather_data, aq_data, lat, lon, sunset_time, data_source
         )
-        self._cache.set(cache_key, snapshots)
+        self._cache.set(
+            cache_key, snapshots,
+            ttl_override=_FROZEN_TTL_SECONDS if window_over else None,
+        )
         return snapshots
 
     async def get_forecast_range_windows(
@@ -414,7 +454,8 @@ class WeatherService:
         cache_key = TTLCache.make_key(
             "corridor", *self._ckey_coords(lat, lon), str(target_date)
         )
-        cached = self._cache.get(cache_key)
+        window_over = sunset_time + _WINDOW_END_AFTER_SUNSET < datetime.now(UTC)
+        cached = self._frozen_get(cache_key, window_over)
         if cached is not None:
             return cached
 
@@ -452,7 +493,10 @@ class WeatherService:
                 logger.debug("Corridor fetch returned no usable samples for %s", target_date)
                 return []
 
-            self._cache.set(cache_key, samples)
+            self._cache.set(
+                cache_key, samples,
+                ttl_override=_FROZEN_TTL_SECONDS if window_over else None,
+            )
             return samples
 
         except Exception as exc:
@@ -488,17 +532,29 @@ class WeatherService:
         for d in dates:
             by_month.setdefault((d.year, d.month), []).append(d)
 
-        out: dict[date, list[tuple[float, float, float]]] = {}
-        for (year, month), group in sorted(by_month.items()):
+        today = datetime.now(UTC).date()
+
+        async def one_month(year: int, month: int, group: list[date]) -> dict:
             group.sort()
-            cache_key = TTLCache.make_key(
-                "corridor_month", *self._ckey_coords(lat, lon), year, month,
-                str(group[0]), str(group[-1]),
-            )
+            wanted = set(group)
+            first = date(year, month, 1)
+            last = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+            if last < today - timedelta(days=8) and _share_whole_month(len(group), last.day):
+                # A complete archive month, mostly needed: computed for the
+                # WHOLE month (same azimuth, same request) so the heatmap and
+                # the climatology share one entry.
+                group = [first + timedelta(days=i) for i in range((last - first).days + 1)]
+                cache_key = TTLCache.make_key(
+                    "corridor_month_full", *self._ckey_coords(lat, lon), year, month,
+                )
+            else:
+                cache_key = TTLCache.make_key(
+                    "corridor_month", *self._ckey_coords(lat, lon), year, month,
+                    str(group[0]), str(group[-1]),
+                )
             cached = self._cache.get(cache_key)
             if cached is not None:
-                out.update(cached)
-                continue
+                return {d: v for d, v in cached.items() if d in wanted}
 
             try:
                 month_map = await self._fetch_corridor_month(lat, lon, group)
@@ -508,13 +564,22 @@ class WeatherService:
                     "— those days score without it.",
                     year, month, lat, lon, exc,
                 )
-                continue
+                return {}
 
             # Archive months are immutable; give them a long TTL.
-            is_past = group[-1] < datetime.now(UTC).date() - timedelta(days=8)
-            self._cache.set(cache_key, month_map, ttl_override=86400 if is_past else None)
-            out.update(month_map)
+            is_past = group[-1] < today - timedelta(days=8)
+            self._cache.set(
+                cache_key, month_map,
+                ttl_override=_ARCHIVE_MONTH_TTL_SECONDS if is_past else None,
+            )
+            return {d: v for d, v in month_map.items() if d in wanted}
 
+        # Months are independent requests — fetch them concurrently.
+        out: dict[date, list[tuple[float, float, float]]] = {}
+        for part in await asyncio.gather(
+            *(one_month(y, m, g) for (y, m), g in sorted(by_month.items()))
+        ):
+            out.update(part)
         return out
 
     async def _fetch_corridor_month(
@@ -645,7 +710,9 @@ class WeatherService:
         Fetch 4-point window snapshots per day for [start_date, end_date].
 
         Mirrors predict()'s data-source split exactly so heatmap scores match:
-          - days_ago > 7  → archive API (one bulk request for the whole range)
+          - days_ago > 7  → archive API, fetched and cached per calendar month
+                            (see _archive_months_raw) so overlapping ranges —
+                            the heatmap and the climatology build — share it
           - days_ago <= 7 → forecast API with past_days (same as get_window_snapshots)
         """
         cache_key = TTLCache.make_key("hist_range_windows", *self._ckey_coords(lat, lon), str(start_date), str(end_date))
@@ -672,13 +739,24 @@ class WeatherService:
         try:
             if start_date <= archive_boundary:
                 archive_end = min(end_date, archive_boundary)
-                archive_data = await self._fetch_archive_range_raw(lat, lon, start_date, archive_end)
-                archive_aq = await self._fetch_air_quality_range_raw(lat, lon, start_date, archive_end)
+                archive_data, archive_aq = await self._archive_months_raw(
+                    lat, lon, start_date, archive_end, archive_boundary
+                )
 
-            # One forecast fetch covers all of the recent 7 days
+            # One forecast fetch covers all of the recent 7 days — cached, since
+            # the heatmap and the climatology build make the identical request.
             if end_date > archive_boundary:
-                recent_weather = await self._fetch_forecast_raw(lat, lon, days=1, past_days=7)
-                recent_aq = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=7)
+                recent_key = TTLCache.make_key("recent_past7", *self._ckey_coords(lat, lon))
+                recent = self._cache.get(recent_key)
+                if recent is None:
+                    recent = (
+                        await self._fetch_forecast_raw(lat, lon, days=1, past_days=7),
+                        await self._fetch_air_quality_raw(lat, lon, days=1, past_days=7),
+                    )
+                    self._cache.set(recent_key, recent)
+                # Copies: the pre-parse below adds keys, and must not write
+                # them into the cached object.
+                recent_weather, recent_aq = (_copy_raw(r) for r in recent)
         except WeatherUnavailableError as exc:
             return self._stale_or_raise(cache_key, exc, "historical range windows")
 
@@ -783,12 +861,29 @@ class WeatherService:
         otherwise do) is 7 wasted requests against a heavier-than-usual
         endpoint. Dates outside the horizon are simply absent from the result.
         """
+        now = datetime.now(UTC)
         in_range = [
             (d, st) for d, st in targets
-            if 0 <= (d - datetime.now(UTC).date()).days <= ICON_SEAMLESS_MAX_DAYS
+            if 0 <= (d - now.date()).days <= ICON_SEAMLESS_MAX_DAYS
         ]
+
+        # An evening whose window is over keeps the spread it was last given
+        # (see _FROZEN_TTL_SECONDS) — no fetch, and confidence doesn't shift.
+        out: dict[date, float] = {}
+        coords = self._ckey_coords(lat, lon)
+        pending: list[tuple[date, datetime]] = []
+        for d, st in in_range:
+            frozen = (
+                self._cache.get_stale(TTLCache.make_key("ensemble_day", *coords, str(d)))
+                if st + _WINDOW_END_AFTER_SUNSET < now else None
+            )
+            if frozen is not None:
+                out[d] = frozen
+            else:
+                pending.append((d, st))
+        in_range = pending
         if not in_range:
-            return {}
+            return out
 
         max_days_ahead = max((d - datetime.now(UTC).date()).days for d, _ in in_range)
         cache_key = TTLCache.make_key(
@@ -800,17 +895,16 @@ class WeatherService:
                 data = await self._fetch_ensemble_raw(lat, lon, days=max_days_ahead + 1)
             except WeatherUnavailableError:
                 logger.warning("Ensemble fetch failed for (%.4f, %.4f) — no spread signal", lat, lon)
-                return {}
+                return out
             hourly = data.get("hourly", {})
             self._cache.set(cache_key, hourly, ttl_override=_ENSEMBLE_CACHE_TTL_SECONDS)
 
         time_strs: list[str] = hourly.get("time", [])
         if not time_strs:
-            return {}
+            return out
         times = [datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs]
         member_keys = [k for k in hourly if k.startswith("cloud_cover_member")]
 
-        out: dict[date, float] = {}
         for d, sunset_time in in_range:
             idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
             members = [
@@ -822,6 +916,10 @@ class WeatherService:
             mean = sum(members) / len(members)
             variance = sum((m - mean) ** 2 for m in members) / len(members)
             out[d] = variance ** 0.5
+            self._cache.set(
+                TTLCache.make_key("ensemble_day", *coords, str(d)), out[d],
+                ttl_override=_FROZEN_TTL_SECONDS,
+            )
         return out
 
     async def _fetch_ensemble_raw(self, lat: float, lon: float, days: int) -> dict[str, Any]:
@@ -852,6 +950,67 @@ class WeatherService:
         if past_days > 0:
             params["past_days"] = past_days
         return await self._get_json(url, params)
+
+    async def _archive_months_raw(
+        self, lat: float, lon: float, start: date, end: date, archive_boundary: date
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+        """Archive weather + aerosol covering [start, end], built from cached
+        calendar-month chunks and merged into single raw dicts.
+
+        A month that is complete (ends on or before *archive_boundary*) and at
+        least half needed is fetched WHOLE and cached for
+        _ARCHIVE_MONTH_TTL_SECONDS — so the climatology's months and the
+        heatmap's twelve land on the same entries. Any other month is fetched
+        only for the days asked, under a key naming them.
+
+        Open-Meteo weights a request by the days it spans, so a year in twelve
+        monthly requests costs the same quota as one yearly request.
+
+        Aerosol is all-or-nothing, as it was with one request: if any month's
+        aerosol fetch fails the whole range falls back to the proxy, rather
+        than letting a day in the gap silently take its nearest-hour value
+        from a neighbouring month.
+        """
+        coords = self._ckey_coords(lat, lon)
+
+        # Plan the chunks first, then fetch them concurrently — a year is ~13
+        # months × 2 endpoints, and one after another that is a slow first load.
+        plan: list[tuple[date, date, Optional[int]]] = []
+        month = date(start.year, start.month, 1)
+        while month <= end:
+            next_month = date(month.year + month.month // 12, month.month % 12 + 1, 1)
+            month_last = next_month - timedelta(days=1)
+            need_start, need_end = max(month, start), min(month_last, end)
+            whole = month_last <= archive_boundary and _share_whole_month(
+                (need_end - need_start).days + 1, month_last.day
+            )
+            fetch_start, fetch_end = (month, month_last) if whole else (need_start, need_end)
+            ttl = _ARCHIVE_MONTH_TTL_SECONDS if month_last <= archive_boundary else None
+            plan.append((fetch_start, fetch_end, ttl))
+            month = next_month
+
+        async def weather_chunk(fs: date, fe: date, ttl: Optional[int]) -> dict[str, Any]:
+            key = TTLCache.make_key("archive_month", *coords, str(fs), str(fe))
+            w = self._cache.get(key)
+            if w is None:
+                w = await self._fetch_archive_range_raw(lat, lon, fs, fe)
+                self._cache.set(key, w, ttl_override=ttl)
+            return w
+
+        async def aq_chunk(fs: date, fe: date, ttl: Optional[int]) -> Optional[dict[str, Any]]:
+            key = TTLCache.make_key("aq_month", *coords, str(fs), str(fe))
+            a = self._cache.get(key)
+            if a is None:
+                a = await self._fetch_air_quality_range_raw(lat, lon, fs, fe)
+                if a is not None:  # never cache a failure
+                    self._cache.set(key, a, ttl_override=ttl)
+            return a
+
+        weather_chunks = await asyncio.gather(*(weather_chunk(*p) for p in plan))
+        aq_chunks = await asyncio.gather(*(aq_chunk(*p) for p in plan))
+        aq_ok = all(a is not None for a in aq_chunks)
+
+        return _merge_raw(list(weather_chunks)), (_merge_raw(list(aq_chunks)) if aq_ok else None)
 
     async def _fetch_archive_raw(
         self, lat: float, lon: float, target_date: date
@@ -951,7 +1110,8 @@ class WeatherService:
 
         for attempt in range(max_retries + 1):
             try:
-                response = await self._http.get(url, params=params)
+                async with self._concurrency:
+                    response = await self._http.get(url, params=params)
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as exc:
@@ -1282,6 +1442,30 @@ def _error_reason(response: httpx.Response) -> str:
         pass
     text = (response.text or "").strip().replace("\n", " ")
     return text[:200] or f"HTTP {response.status_code} (empty body)"
+
+
+def _merge_raw(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Concatenate time-ordered, non-overlapping Open-Meteo responses into one,
+    as if it had been a single request. Always returns a NEW dict, so cached
+    chunks are never mutated by later pre-parsing."""
+    if not chunks:
+        return {}
+    merged = {k: v for k, v in chunks[0].items() if k != "hourly"}
+    hourly: dict[str, list] = {}
+    for chunk in chunks:
+        for key, values in chunk.get("hourly", {}).items():
+            if key.startswith("_"):
+                continue  # derived, e.g. _times_parsed
+            hourly.setdefault(key, []).extend(values)
+    merged["hourly"] = hourly
+    return merged
+
+
+def _copy_raw(data: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Shallow copy deep enough that pre-parsing leaves the original alone."""
+    if data is None:
+        return None
+    return {**data, "hourly": dict(data.get("hourly", {}))}
 
 
 def _prepopulate_parsed_times(data: dict) -> None:

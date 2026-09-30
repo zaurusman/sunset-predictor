@@ -30,7 +30,7 @@ what it always did; the build just no longer pays for the ~245 evenings the
 seasonal rank never looks at.
 
   - results are cached for CLIMATOLOGY_TTL (30 days); a climate does not move
-  - one curve serves a CLIMATE_CELL_DEG cell (~25 km), built at its centre
+  - one curve serves a CLIMATE_CELL_DEG cell (~25 km)
   - a cold location is warmed in the BACKGROUND, and meanwhile falls back to
     REFERENCE_QUANTILES, a global curve averaged across three climates
   - a FAILED build is not retried for CLIMATOLOGY_RETRY_COOLDOWN_SECONDS;
@@ -192,10 +192,10 @@ class ClimatologyService:
     async def build(self, lat: float, lon: float) -> Optional[list[tuple[int, float]]]:
         """Build and cache ``(day_of_year, score)`` pairs. Returns None on failure.
 
-        Fetched at the centre of the climate cell, so the curve does not depend
-        on which user in the cell happened to trigger the build.
+        Fetched at the requesting user's own coordinates, not the cell centre:
+        the weather service caches archive months on its finer grid, so this
+        way the build and that user's heatmap share the same cached months.
         """
-        lat, lon = self._coords(lat, lon)
         windows = []
         for start, end in _build_ranges(date.today()):
             windows += await self._weather.get_historical_range_windows(lat, lon, start, end)

@@ -222,3 +222,127 @@ async def test_stale_forecast_range_drops_days_already_past(monkeypatch):
     svc._cache.set(key, [(yesterday, ["y"]), (today, ["t"])], ttl_override=-1)
 
     assert await svc.get_forecast_range_windows(32.1, 34.8, 3) == [(today, ["t"])]
+
+
+# ---------------------------------------------------------------------------
+# Shared archive months (heatmap ↔ climatology) and the after-sunset freeze
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_overlapping_history_ranges_share_cached_archive_months(monkeypatch):
+    """The climatology's few months must come out of the heatmap's cache (and
+    vice versa) instead of being fetched again."""
+    from datetime import timedelta
+
+    svc = _make_service(lambda request: httpx.Response(200, json={}))
+    fetched: list[tuple] = []
+
+    async def fake_archive(lat, lon, start, end):
+        fetched.append(("wx", start, end))
+        return {"hourly": {"time": []}}
+
+    async def fake_aq(lat, lon, start, end):
+        fetched.append(("aq", start, end))
+        return {"hourly": {"time": []}}
+
+    monkeypatch.setattr(svc, "_fetch_archive_range_raw", fake_archive)
+    monkeypatch.setattr(svc, "_fetch_air_quality_range_raw", fake_aq)
+
+    today = datetime.now(UTC).date()
+    boundary = today - timedelta(days=8)
+    year_ago = today - timedelta(days=365)
+
+    # "Heatmap": a year up to the archive boundary.
+    await svc._archive_months_raw(32.1, 34.8, year_ago, boundary, boundary)
+    n = len(fetched)
+    # "Climatology": a slice from inside that year, touching at least half of
+    # each month it spans — nothing new to fetch.
+    m = (year_ago + timedelta(days=45)).replace(day=10)
+    await svc._archive_months_raw(32.1, 34.8, m, m + timedelta(days=45), boundary)
+    assert len(fetched) == n
+
+    # A range that only clips a month (1 day) fetches just that day, not the
+    # whole month — the shared-month rule must not make a small need expensive.
+    fetched.clear()
+    one = (year_ago + timedelta(days=200)).replace(day=28)
+    await svc._archive_months_raw(32.5, 35.2, one, one, boundary)
+    assert fetched == [("wx", one, one), ("aq", one, one)]
+
+
+def test_merge_raw_concatenates_and_never_mutates_chunks():
+    from app.services.weather_service import _merge_raw
+
+    a = {"latitude": 1, "hourly": {"time": ["t1"], "x": [1]}}
+    b = {"latitude": 1, "hourly": {"time": ["t2"], "x": [2], "_times_parsed": ["junk"]}}
+    m = _merge_raw([a, b])
+    assert m["hourly"] == {"time": ["t1", "t2"], "x": [1, 2]}
+    m["hourly"]["time"].append("t3")
+    assert a["hourly"]["time"] == ["t1"]
+
+
+@pytest.mark.asyncio
+async def test_tonight_is_frozen_once_the_viewing_window_is_over(monkeypatch):
+    """After the window ends, an expired reading is kept (and re-pinned)
+    rather than re-fetched, so tonight's answer doesn't drift."""
+    from datetime import timedelta
+
+    svc = _make_service(lambda request: httpx.Response(200, json={}))
+    svc._cache = TTLCache(ttl_seconds=900, stale_grace_seconds=3600)
+    fetches = {"n": 0}
+
+    async def fake_forecast(*a, **k):
+        fetches["n"] += 1
+        return {"hourly": {}}
+
+    monkeypatch.setattr(svc, "_fetch_forecast_raw", fake_forecast)
+    monkeypatch.setattr(svc, "_fetch_air_quality_raw", fake_forecast)
+    monkeypatch.setattr(svc, "_extract_window_snapshots_from_raw", lambda *a, **k: ["new"])
+
+    today = datetime.now(UTC).date()
+    sunset = datetime.now(UTC) - timedelta(hours=2)          # window long over
+    key = TTLCache.make_key("window_snaps", *svc._ckey_coords(32.1, 34.8), str(today))
+    svc._cache.set(key, ["before-sunset"], ttl_override=-1)   # expired
+
+    assert await svc.get_window_snapshots(32.1, 34.8, today, sunset) == ["before-sunset"]
+    assert fetches["n"] == 0
+    assert svc._cache.get(key) == ["before-sunset"]           # pinned fresh again
+
+
+@pytest.mark.asyncio
+async def test_before_the_window_ends_an_expired_reading_is_refreshed(monkeypatch):
+    from datetime import timedelta
+
+    svc = _make_service(lambda request: httpx.Response(200, json={}))
+    svc._cache = TTLCache(ttl_seconds=900, stale_grace_seconds=3600)
+
+    async def fake_forecast(*a, **k):
+        return {"hourly": {}}
+
+    monkeypatch.setattr(svc, "_fetch_forecast_raw", fake_forecast)
+    monkeypatch.setattr(svc, "_fetch_air_quality_raw", fake_forecast)
+    monkeypatch.setattr(svc, "_extract_window_snapshots_from_raw", lambda *a, **k: ["new"])
+
+    today = datetime.now(UTC).date()
+    sunset = datetime.now(UTC) + timedelta(hours=2)          # still to come
+    key = TTLCache.make_key("window_snaps", *svc._ckey_coords(32.1, 34.8), str(today))
+    svc._cache.set(key, ["old"], ttl_override=-1)
+
+    assert await svc.get_window_snapshots(32.1, 34.8, today, sunset) == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_ensemble_spread_is_frozen_after_the_window(monkeypatch):
+    from datetime import timedelta
+
+    svc = _make_service(lambda request: httpx.Response(200, json={}))
+
+    async def must_not_fetch(*a, **k):
+        raise AssertionError("ensemble re-fetched after sunset")
+
+    monkeypatch.setattr(svc, "_fetch_ensemble_raw", must_not_fetch)
+    today = datetime.now(UTC).date()
+    svc._cache.set(TTLCache.make_key("ensemble_day", *svc._ckey_coords(32.1, 34.8), str(today)), 12.5)
+
+    sunset = datetime.now(UTC) - timedelta(hours=1)
+    assert await svc.get_ensemble_cloud_spread(32.1, 34.8, today, sunset) == 12.5
