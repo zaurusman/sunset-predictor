@@ -243,6 +243,7 @@ function HomeContent() {
         current={location}
         places={places}
         onSelect={handleLocationSelect}
+        alertsVersion={alertsVersion}
       />
 
       {photoOpen && (
