@@ -7,7 +7,7 @@ API layer maps to a clean 503.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -180,8 +180,11 @@ async def test_window_snapshots_fall_back_to_stale_when_provider_down(monkeypatc
 
     monkeypatch.setattr(svc, "_fetch_forecast_raw", down)
 
-    today = datetime.now(UTC).date()
-    sunset = datetime(today.year, today.month, today.day, 17, 0, tzinfo=UTC)
+    # Sunset a few hours ahead of the real clock, so the viewing window is
+    # never over — otherwise the after-sunset freeze re-pins the stale entry.
+    now = datetime.now(UTC)
+    today = now.date()
+    sunset = now + timedelta(hours=3)
     key = TTLCache.make_key("window_snaps", *svc._ckey_coords(32.1, 34.8), str(today))
     svc._cache.set(key, ["old-snap"], ttl_override=-1)  # expired
 
