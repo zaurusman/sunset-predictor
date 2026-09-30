@@ -30,6 +30,7 @@ from app.services.scoring_engine import ScoringEngine
 from app.services.subscription_store import PostgresSubscriptionStore
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
+from app.utils.durable_cache import PostgresCacheTier
 from app.utils.time_utils import local_sunset_date
 
 setup_logging()
@@ -126,6 +127,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             lead_max_hours=settings.ALERT_LEAD_MAX_HOURS,
             decimals=settings.CACHE_COORD_DECIMALS,
         )
+    # Durable tier for the long-lived weather cache (climatology curves,
+    # archive months, frozen evenings). Render wipes /tmp on every deploy, and
+    # rebuilding every location's climatology from Open-Meteo afterwards is a
+    # suspected source of the intermittent 503s. Reuses the pool above.
+    if subscription_store is not None:
+        try:
+            tier = PostgresCacheTier(subscription_store.pool)
+            await tier.ensure_schema()
+            await cache.attach_durable(tier)
+        except Exception as exc:
+            logger.error("Durable weather cache disabled: %s", exc)
     logger.info(
         "Push alerts: store=%s, sender=%s",
         "postgres" if subscription_store else "off",
@@ -149,6 +161,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("Shutting down…")
     await http_client.aclose()
+    await cache.close_durable()
     if subscription_store is not None:
         await subscription_store.close()
 
