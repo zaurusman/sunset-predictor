@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Coffee } from "lucide-react";
 import { rateSunset } from "@/lib/api";
 import type { LocationState } from "@/lib/types";
+import { SUPPORT_URL } from "./SupportFooter";
 
 interface RateSunsetProps {
   location: LocationState;
@@ -112,6 +114,18 @@ export default function RateSunset({
               ? `The model said ${Math.round(predictedScore)} — off by a lot. Logged.`
               : "Logged.")}
         </p>
+        {submitted === 5 && (
+          // Someone who just saw one of the year's best is the most likely to chip in.
+          <a
+            href={SUPPORT_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="self-start inline-flex items-center gap-1.5 min-h-[44px] px-4 rounded-full text-sm font-medium text-gray-700 dark:text-slate-300 bg-orange-50 dark:bg-orange-500/10 border border-orange-200 dark:border-orange-500/30 hover:border-orange-500/60 transition-colors"
+          >
+            <Coffee size={14} className="text-orange-500" />
+            Glad you caught it. Buy me a coffee?
+          </a>
+        )}
         <button
           type="button"
           onClick={() => setSubmitted(null)}

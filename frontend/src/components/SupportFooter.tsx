@@ -1,6 +1,6 @@
 import { Coffee } from "lucide-react";
 
-const SUPPORT_URL = "https://buymeacoffee.com/afterglowsunset";
+export const SUPPORT_URL = "https://buymeacoffee.com/afterglowsunset";
 
 /**
  * Quiet support link at the bottom of every tab. Deliberately low-key: people
