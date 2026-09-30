@@ -183,9 +183,9 @@ class TTLCache:
         self._durable_queue.put_nowait((key, blob, expires_at))
 
     async def _durable_writer(self) -> None:
-        """One background writer. A cold location sets ~100 archive months in
-        one burst; the linger lets them collect so the burst costs one
-        executemany (and one Neon wake-up) instead of ~100 separate writes."""
+        """One background writer. A cold location sets its archive months and
+        climatology curve in one burst; the linger lets them collect so the
+        burst costs one executemany (and one Neon wake-up), not one per key."""
         queue = self._durable_queue
         while True:
             item = await queue.get()
