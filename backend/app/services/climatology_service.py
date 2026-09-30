@@ -22,13 +22,20 @@ raw 48.9 → 57.4 against displayed 30.9 → 30.6. See docs/scoring-v2-plan.md.
 
 COST AND COLD START
 -------------------
-Building a location's climatology costs one bulk archive request plus one
-corridor request per month, then scores a year of evenings — a few seconds. Far
-too slow to sit in the path of a prediction, so:
+Only the evenings the seasonal rank can actually use are fetched — the last
+SEASON_WINDOW_DAYS, plus last year's same date forward through the window and
+the cache lifetime (see _build_ranges) — about 90 days rather than a year.
+Scored exactly as before, light corridor included, so the percentile means
+what it always did; the build just no longer pays for the ~245 evenings the
+seasonal rank never looks at.
 
   - results are cached for CLIMATOLOGY_TTL (30 days); a climate does not move
+  - one curve serves a CLIMATE_CELL_DEG cell (~25 km)
   - a cold location is warmed in the BACKGROUND, and meanwhile falls back to
     REFERENCE_QUANTILES, a global curve averaged across three climates
+  - a FAILED build is not retried for CLIMATOLOGY_RETRY_COOLDOWN_SECONDS;
+    otherwise every prediction for a cold cell re-launched it, hammering an
+    Open-Meteo that was very likely failing because of rate limits
 
 The fallback matters: without it a cold location would show raw physics scores,
 which are on a visibly different scale, and the number would jump once the warm
@@ -37,6 +44,7 @@ finished. With it, the first view is approximately right and later views refine.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import date, timedelta
 from typing import Optional
 
@@ -51,13 +59,19 @@ logger = get_logger(__name__)
 # A climate does not change month to month; re-deriving it more often is waste.
 CLIMATOLOGY_TTL_SECONDS = 30 * 86_400
 
-# Days of history used to build a distribution. A full year is the minimum that
-# covers the seasonal cycle — sunset quality is strongly seasonal, and a
-# six-month sample would encode whichever half it happened to see.
-CLIMATOLOGY_DAYS = 365
-
 # Below this many scored days the distribution is too thin to rank against.
-MIN_USABLE_DAYS = 120
+# A full build yields ~91 (see _build_ranges); this tolerates a partial one.
+MIN_USABLE_DAYS = 50
+
+# Side length of the grid cell one curve serves, in degrees (~25 km). The
+# archive is ERA5, whose native grid is 0.25°, so a finer cell buys nothing but
+# extra builds; a metro area's users now share one instead of each paying for
+# their own. Not coarser: at 0.5° Tel Aviv's curve would be built ~20 km
+# inland, and the coast is exactly where sunset climate changes fastest.
+CLIMATE_CELL_DEG = 0.25
+
+# After a failed build, wait this long before trying again for that cell.
+CLIMATOLOGY_RETRY_COOLDOWN_SECONDS = 1800
 
 # Half-width of the seasonal comparison window, in days.
 #
@@ -68,9 +82,11 @@ MIN_USABLE_DAYS = 120
 # read the same, which tells a daily-glance user nothing. Ranked seasonally the
 # app can say "good for August" instead.
 #
-# 45 days each side gives ~91 samples: wide enough that the rank is stable,
-# narrow enough that late August is not being compared with November.
-SEASON_WINDOW_DAYS = 45
+# 30 days each side gives ~61 samples: enough for a stable rank, and tight
+# enough that late August is compared with August–September, not November.
+# (Was 45; narrowed to track the season more closely and to shrink the build
+# fetch, which is sized off this window — see _build_ranges.)
+SEASON_WINDOW_DAYS = 30
 
 # BUMP THIS whenever a change moves the raw score scale — a component curve, a
 # weight, a gate, anything score() touches.
@@ -118,8 +134,10 @@ class ClimatologyService:
         self._scoring = scoring_engine
         self._cache = cache
         # Guards against a burst of requests for a cold location each kicking
-        # off its own year-long backfill.
+        # off its own backfill.
         self._in_flight: set[tuple[float, float]] = set()
+        # cell → monotonic time before which a failed build is not retried.
+        self._retry_after: dict[tuple[float, float], float] = {}
 
     # ------------------------------------------------------------------
     # Public
@@ -161,6 +179,8 @@ class ClimatologyService:
         key = self._coords(lat, lon)
         if self.is_warm(lat, lon) or key in self._in_flight:
             return
+        if time.monotonic() < self._retry_after.get(key, 0.0):
+            return
         self._in_flight.add(key)
         try:
             asyncio.get_running_loop().create_task(self._warm(lat, lon, key))
@@ -170,13 +190,18 @@ class ClimatologyService:
             self._in_flight.discard(key)
 
     async def build(self, lat: float, lon: float) -> Optional[list[tuple[int, float]]]:
-        """Build and cache ``(day_of_year, score)`` pairs. Returns None on failure."""
-        end = date.today() - timedelta(days=1)
-        start = end - timedelta(days=CLIMATOLOGY_DAYS - 1)
+        """Build and cache ``(day_of_year, score)`` pairs. Returns None on failure.
 
-        windows = await self._weather.get_historical_range_windows(lat, lon, start, end)
+        Fetched at the requesting user's own coordinates, not the cell centre:
+        the weather service caches archive months on its finer grid, so this
+        way the build and that user's heatmap share the same cached months.
+        """
+        windows = []
+        for start, end in _build_ranges(date.today()):
+            windows += await self._weather.get_historical_range_windows(lat, lon, start, end)
         if not windows:
             return None
+
         corridor_map = await self._weather.get_corridor_samples_map(
             lat, lon, [d for d, _ in windows]
         )
@@ -216,20 +241,27 @@ class ClimatologyService:
     # ------------------------------------------------------------------
 
     async def _warm(self, lat: float, lon: float, key: tuple[float, float]) -> None:
+        built = None
         try:
-            await self.build(lat, lon)
+            built = await self.build(lat, lon)
         except Exception as exc:
             # Background task: a failure must not surface anywhere. The
             # reference curve keeps serving until the next attempt.
             logger.warning("Climatology warm failed for (%.2f, %.2f): %s", lat, lon, exc)
         finally:
             self._in_flight.discard(key)
+            if built is None:
+                self._retry_after[key] = time.monotonic() + CLIMATOLOGY_RETRY_COOLDOWN_SECONDS
+            else:
+                self._retry_after.pop(key, None)
 
     @staticmethod
     def _coords(lat: float, lon: float) -> tuple[float, float]:
-        # Coarser than the weather cache: climate varies over ~100 km, not 10 km,
-        # so one curve can serve a whole metro area.
-        return round(lat, 1), round(lon, 1)
+        """Centre of the CLIMATE_CELL_DEG cell containing (lat, lon)."""
+        return (
+            round(round(lat / CLIMATE_CELL_DEG) * CLIMATE_CELL_DEG, 4),
+            round(round(lon / CLIMATE_CELL_DEG) * CLIMATE_CELL_DEG, 4),
+        )
 
     def _key(self, lat: float, lon: float) -> str:
         return TTLCache.make_key(
@@ -240,6 +272,25 @@ class ClimatologyService:
 # ---------------------------------------------------------------------------
 # Ranking helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_ranges(today: date) -> list[tuple[date, date]]:
+    """The two date ranges a build fetches: exactly what the seasonal rank
+    needs for as long as the curve is cached.
+
+    The rank takes evenings within SEASON_WINDOW_DAYS of today's day-of-year,
+    one year each — the days just gone from THIS year, the days ahead from
+    LAST year. As the cached curve ages by k days the window slides forward:
+    the days it newly needs lie further into last year's range, so that range
+    runs SEASON_WINDOW_DAYS + the cache lifetime past today's date. Days the
+    window slides off are simply filtered out by _seasonal_window.
+    """
+    ttl_days = CLIMATOLOGY_TTL_SECONDS // 86_400
+    yesterday = today - timedelta(days=1)
+    recent = (today - timedelta(days=SEASON_WINDOW_DAYS), yesterday)
+    a_year_ago = today - timedelta(days=365)
+    last_year = (a_year_ago, a_year_ago + timedelta(days=SEASON_WINDOW_DAYS + ttl_days))
+    return [last_year, recent]
 
 
 # A seasonal window thinner than this is not worth ranking against.
