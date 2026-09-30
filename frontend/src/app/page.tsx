@@ -21,6 +21,7 @@ import DatePicker from "@/components/DatePicker";
 import ErrorAlert from "@/components/ErrorAlert";
 import EvidenceDrawer from "@/components/EvidenceDrawer";
 import FirstRun from "@/components/FirstRun";
+import InstallPrompt from "@/components/InstallPrompt";
 import LoadingState from "@/components/LoadingState";
 import LocationSheet from "@/components/LocationSheet";
 import SubmitPhotoModal from "@/components/SubmitPhotoModal";
@@ -45,6 +46,8 @@ function HomeContent() {
   const [error, setError] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [photoOpen, setPhotoOpen] = useState(false);
+  /** Bumped when alerts are switched on, so the location sheet re-reads its bells. */
+  const [alertsVersion, setAlertsVersion] = useState(0);
 
   /** Guards against a slow response for a place the user has already left. */
   const requestRef = useRef(0);
@@ -198,6 +201,11 @@ function HomeContent() {
       {prediction && (
         <div className="flex flex-col gap-4 animate-fade-in">
           <VerdictCard prediction={prediction} targetDate={selectedDate} />
+
+          <InstallPrompt
+            location={location}
+            onAlertsChanged={() => setAlertsVersion((v) => v + 1)}
+          />
 
           {/* Ratings are ground truth for the scoring engine, so they're only
               offered once the evening has actually happened. */}
