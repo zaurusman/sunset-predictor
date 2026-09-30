@@ -82,6 +82,11 @@ function HomeContent() {
       const cached = loadCachedPrediction(loc, date);
       setPrediction(cached?.prediction ?? null);
       setCachedAt(cached?.cachedAt ?? null);
+      // Once this evening's viewing window is over, the answer is final: keep
+      // the reading we have rather than asking again. The sky it described
+      // has happened, and a refresh would only let the number drift.
+      const windowEnd = cached ? Date.parse(cached.prediction.best_viewing_window_end) : NaN;
+      if (cached && Number.isFinite(windowEnd) && windowEnd < Date.now()) return;
       void fetchPrediction(loc, date);
     },
     [fetchPrediction]

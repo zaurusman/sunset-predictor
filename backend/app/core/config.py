@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     HTTP_BACKOFF_BASE: float = 0.5      # seconds; delay = BASE * 2**attempt (+jitter)
     HTTP_MAX_RETRY_DELAY: float = 8.0   # seconds; ceiling for any single backoff wait
 
+    # Most Open-Meteo requests in flight at once. More than a handful gets
+    # 429 "Too many concurrent requests" on the free API.
+    OPEN_METEO_MAX_CONCURRENCY: int = 3
+
     # ── Email / photo submission ──────────────────────────────────────────────
     # Resend API key for sending photo submissions to the developer.
     # Leave RESEND_API_KEY empty to disable the /submit-photo endpoint entirely.
