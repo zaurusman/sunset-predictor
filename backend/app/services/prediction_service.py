@@ -61,7 +61,9 @@ class PredictionService:
     # Single prediction
     # ------------------------------------------------------------------
 
-    async def predict(self, request: PredictRequest) -> PredictResponse:
+    async def predict(
+        self, request: PredictRequest, *, warm_climatology: bool = True
+    ) -> PredictResponse:
         """
         Run a full prediction for one location + date.
 
@@ -147,7 +149,9 @@ class PredictionService:
         if ml_score is not None:
            ml_adjustment = round(raw_score - window_result.final_score, 2)
 
-        final_score, percentile, is_local = self._calibrate(raw_score, lat, lon)
+        final_score, percentile, is_local = self._calibrate(
+            raw_score, lat, lon, warm=warm_climatology
+        )
         category = self._scoring.score_to_category(final_score)
 
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
@@ -208,7 +212,7 @@ class PredictionService:
     # ------------------------------------------------------------------
 
     def _calibrate(
-        self, raw_score: float, lat: float, lon: float
+        self, raw_score: float, lat: float, lon: float, *, warm: bool = True
     ) -> tuple[float, Optional[float], bool]:
         """Return ``(displayed, percentile, is_local)``.
 
@@ -230,6 +234,8 @@ class PredictionService:
         ClimatologyService.percentile_of — that rank is seasonal.
 
         A cold location is warmed in the background; this never blocks.
+        Alert runs pass warm=False: a background push check must not spend
+        archive fetches building a curve nobody is looking at.
         """
         if self._climatology is None:
             return raw_score, None, False
@@ -237,7 +243,7 @@ class PredictionService:
         percentile, is_local = self._climatology.percentile_of(
             lat, lon, raw_score, on_date=self._today_for(lat, lon)
         )
-        if not is_local:
+        if not is_local and warm:
             self._climatology.warm_in_background(lat, lon)
         return raw_score, percentile, is_local
 

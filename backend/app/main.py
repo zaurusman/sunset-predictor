@@ -14,19 +14,23 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health, predict, forecast, heatmap, model_info, geocode, submit, rate
+from app.api import health, predict, forecast, heatmap, model_info, geocode, submit, rate, push
 from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
 from app.models.ml_model import MLModel
 from app.models.model_registry import ModelRegistry
+from app.services.alert_service import AlertService, prediction_predictor
 from app.services.astronomy_service import AstronomyService
 from app.services.climatology_service import ClimatologyService
 from app.services.explanation_engine import ExplanationEngine
 from app.services.prediction_service import PredictionService
+from app.services.push_sender import WebPushSender
 from app.services.rating_store import RatingStore
 from app.services.scoring_engine import ScoringEngine
+from app.services.subscription_store import PostgresSubscriptionStore
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
+from app.utils.time_utils import local_sunset_date
 
 setup_logging()
 logger = get_logger(__name__)
@@ -102,11 +106,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         climatology=climatology,
     )
 
+    # Epic-sunset push alerts — optional. Without a database or VAPID key the
+    # app runs exactly as before and the /push endpoints answer 503.
+    subscription_store = None
+    alert_service = None
+    if settings.DATABASE_URL:
+        try:
+            subscription_store = await PostgresSubscriptionStore.connect(settings.DATABASE_URL)
+        except Exception as exc:
+            logger.error("Push alerts disabled — could not connect to DATABASE_URL: %s", exc)
+    if subscription_store is not None and settings.VAPID_PRIVATE_KEY:
+        alert_service = AlertService(
+            store=subscription_store,
+            predictor=prediction_predictor(prediction_service),
+            sunset_for=astro_service.get_sunset_time,
+            local_date_for=local_sunset_date,
+            sender=WebPushSender(settings.VAPID_PRIVATE_KEY, settings.VAPID_SUBJECT),
+            lead_min_hours=settings.ALERT_LEAD_MIN_HOURS,
+            lead_max_hours=settings.ALERT_LEAD_MAX_HOURS,
+            decimals=settings.CACHE_COORD_DECIMALS,
+        )
+    logger.info(
+        "Push alerts: store=%s, sender=%s",
+        "postgres" if subscription_store else "off",
+        "on" if alert_service else "off",
+    )
+
     # Attach to app state for injection via Request
     app.state.settings = settings
     app.state.prediction_service = prediction_service
     app.state.ml_model = ml_model
     app.state.rating_store = rating_store
+    app.state.subscription_store = subscription_store
+    app.state.alert_service = alert_service
 
     logger.info(
         "All services initialised. ML model loaded: %s. Ratings: %d stored at %s",
@@ -117,6 +149,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("Shutting down…")
     await http_client.aclose()
+    if subscription_store is not None:
+        await subscription_store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +188,7 @@ def create_app() -> FastAPI:
     app.include_router(geocode.router)
     app.include_router(submit.router)
     app.include_router(rate.router)
+    app.include_router(push.router)
 
     return app
 
