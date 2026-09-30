@@ -259,3 +259,86 @@ def test_thin_season_falls_back_to_the_full_year():
     percentile, is_local = svc.percentile_of(32.08, 34.78, 5.0, on_date=date(2026, 7, 20))
     assert is_local is True
     assert 0.0 <= percentile <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Build cost: seasonal-only fetch, no corridor, shared cells, retry cooldown
+# ---------------------------------------------------------------------------
+
+
+def test_build_ranges_cover_the_seasonal_window_for_the_whole_cache_life():
+    """The curve is cached for CLIMATOLOGY_TTL; on EVERY day of that life the
+    ±SEASON_WINDOW_DAYS window around the day's date must be fully covered."""
+    from datetime import timedelta
+    from app.services import climatology_service as cs
+
+    built_on = date(2026, 9, 30)
+    fetched: set[int] = set()
+    total = 0
+    for start, end in cs._build_ranges(built_on):
+        total += (end - start).days + 1
+        d = start
+        while d <= end:
+            fetched.add(d.timetuple().tm_yday)
+            d += timedelta(days=1)
+
+    assert total < 150, "should fetch a season, not a year"
+    for k in range(cs.CLIMATOLOGY_TTL_SECONDS // 86_400 + 1):
+        doy = (built_on + timedelta(days=k)).timetuple().tm_yday
+        for off in range(-cs.SEASON_WINDOW_DAYS, cs.SEASON_WINDOW_DAYS + 1):
+            want = (doy - 1 + off) % 365 + 1
+            assert want in fetched or want == 366, (k, off)
+
+
+def test_climate_cells_are_shared_and_centred():
+    from app.services.climatology_service import ClimatologyService as C
+    # Two Tel Aviv spots ~5 km apart → one cell; its centre stays coastal.
+    assert C._coords(32.08, 34.78) == C._coords(32.05, 34.76) == (32.0, 34.75)
+
+
+class _FakeWeather:
+    def __init__(self, fail: bool = False):
+        self.ranges: list[tuple[date, date]] = []
+        self.fail = fail
+
+    async def get_historical_range_windows(self, lat, lon, start, end):
+        self.ranges.append((start, end))
+        if self.fail:
+            raise RuntimeError("Open-Meteo 429")
+        return []
+
+    async def get_corridor_samples_map(self, *a, **k):
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_build_fetches_only_seasonal_ranges():
+    from app.services.climatology_service import ClimatologyService, _build_ranges
+    from app.utils.cache import TTLCache
+
+    weather = _FakeWeather()
+    svc = ClimatologyService(weather, None, engine, TTLCache(ttl_seconds=60))
+    await svc.build(32.08, 34.78)
+    assert weather.ranges == _build_ranges(date.today())
+
+
+@pytest.mark.asyncio
+async def test_failed_build_is_not_relaunched_by_every_request():
+    """A build failing on a rate limit must not be retried on the very next
+    prediction — that loop is what kept hammering Open-Meteo."""
+    import asyncio
+    from app.services.climatology_service import ClimatologyService
+    from app.utils.cache import TTLCache
+
+    weather = _FakeWeather(fail=True)
+    svc = ClimatologyService(weather, None, engine, TTLCache(ttl_seconds=60))
+
+    svc.warm_in_background(32.08, 34.78)
+    await asyncio.sleep(0.01)           # let the background build fail
+    calls = len(weather.ranges)
+    assert calls >= 1
+
+    for _ in range(5):
+        svc.warm_in_background(32.08, 34.78)
+    await asyncio.sleep(0.01)
+    assert len(weather.ranges) == calls  # cooling down, no new fetches

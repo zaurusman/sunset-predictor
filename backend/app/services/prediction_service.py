@@ -300,11 +300,24 @@ class PredictionService:
             lat, lon, [d for d, _ in daily_window_snaps]
         )
 
+        # ONE ensemble request for every day in range. Fetching it per day (as
+        # _score_day used to) cost up to 8 requests per forecast, because each
+        # day's lookup had a different cache key.
+        try:
+            spread_map = await self._weather.get_ensemble_cloud_spread_map(
+                lat, lon,
+                [(d, self._astro.get_sunset_time(lat, lon, d)) for d, _ in daily_window_snaps],
+            )
+        except Exception as exc:
+            logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
+            spread_map = {}
+
         # Score each day concurrently using the same window algorithm as predict()
         tasks = [
             self._score_day(
                 lat, lon, d, window_snaps, horizon_deg,
                 corridor_samples=corridor_map.get(d, []),
+                ensemble_spread=spread_map.get(d),
             )
             for d, window_snaps in daily_window_snaps
         ]
@@ -403,6 +416,7 @@ class PredictionService:
         window_snaps: list[WeatherSnapshot],
         horizon_deg: float,
         corridor_samples: Optional[list[tuple[float, float, float]]] = None,
+        ensemble_spread: Optional[float] = None,
     ) -> DayForecast:
         sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
         window_start, window_end = self._astro.get_best_viewing_window(sunset_time)
@@ -433,13 +447,6 @@ class PredictionService:
         final_score, percentile, _is_local = self._calibrate(raw_score, lat, lon)
         category = self._scoring.score_to_category(final_score)
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
-        try:
-            ensemble_spread = await self._weather.get_ensemble_cloud_spread(
-                lat, lon, target_date, sunset_time
-            )
-        except Exception as exc:
-            logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
-            ensemble_spread = None
         confidence = self._scoring.compute_confidence(
             weather=primary_weather,
             component_scores={
