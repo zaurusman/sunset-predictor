@@ -7,6 +7,7 @@ import type { HeatmapDay, HeatmapResponse, LocationState } from "@/lib/types";
 import { loadLocation } from "@/lib/storage";
 
 import AppNav from "@/components/AppNav";
+import SupportFooter from "@/components/SupportFooter";
 import HeatmapGrid from "@/components/HeatmapGrid";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
@@ -245,6 +246,7 @@ export default function HeatmapPage() {
       <Suspense fallback={<LoadingState message="Loading sunset history…" />}>
         <HeatmapContent />
       </Suspense>
+      <SupportFooter />
     </main>
   );
 }

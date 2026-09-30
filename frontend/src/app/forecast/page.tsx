@@ -8,6 +8,7 @@ import type { DayForecast, ForecastResponse, LocationState } from "@/lib/types";
 import { loadLocation } from "@/lib/storage";
 
 import AppNav from "@/components/AppNav";
+import SupportFooter from "@/components/SupportFooter";
 import SunsetCard from "@/components/SunsetCard";
 import ForecastChart from "@/components/ForecastChart";
 import LoadingState from "@/components/LoadingState";
@@ -128,6 +129,7 @@ export default function ForecastPage() {
       <Suspense fallback={<LoadingState message="Loading forecast…" />}>
         <ForecastContent />
       </Suspense>
+      <SupportFooter />
     </main>
   );
 }
