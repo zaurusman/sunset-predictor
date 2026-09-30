@@ -11,6 +11,7 @@ import type {
   GeocodingResult,
   HeatmapResponse,
   HealthResponse,
+  LocationState,
   PredictRequest,
   PredictResponse,
   RatingRequest,
@@ -165,4 +166,44 @@ export async function rateSunset(body: RatingRequest): Promise<RatingResponse> {
 /** Aggregate stats over collected ratings, including rank correlation vs. the model. */
 export async function getRatingStats(): Promise<RatingStats> {
   return request<RatingStats>(`${API_BASE}/ratings/stats`);
+}
+
+// ---------------------------------------------------------------------------
+// Push alerts
+// ---------------------------------------------------------------------------
+
+async function send(url: string, options: RequestInit): Promise<void> {
+  const res = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) throw new Error(`API error ${res.status}`);
+}
+
+/** Public VAPID key; throws (503) when alerts aren't configured on the server. */
+export async function getVapidKey(): Promise<string> {
+  const { public_key } = await request<{ public_key: string }>(`${API_BASE}/push/vapid-key`);
+  return public_key;
+}
+
+export async function subscribePush(body: {
+  subscription: PushSubscriptionJSON;
+  places: LocationState[];
+  tz: string;
+}): Promise<void> {
+  await send(`${API_BASE}/push/subscribe`, {
+    method: "POST",
+    body: JSON.stringify({
+      subscription: body.subscription,
+      places: body.places.map(({ latitude, longitude, name }) => ({ latitude, longitude, name })),
+      tz: body.tz,
+    }),
+  });
+}
+
+export async function unsubscribePush(endpoint: string): Promise<void> {
+  await send(`${API_BASE}/push/subscribe`, {
+    method: "DELETE",
+    body: JSON.stringify({ endpoint }),
+  });
 }
