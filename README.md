@@ -307,3 +307,21 @@ Tests cover:
 | Weather | Open-Meteo (free, no key required) |
 | Frontend | Next.js 15, TypeScript, Tailwind CSS, Recharts, Lucide |
 | Infra | Docker, docker-compose |
+
+## Sunset alerts (Home Screen + push)
+
+Afterglow can be added to the Home Screen and ping users ~4 h before an Epic
+(≥ 80) sunset at places they belled. iOS requires the app to be installed to
+the Home Screen (iOS 16.4+).
+
+Setup:
+1. Create a Neon Postgres database → set `DATABASE_URL` on Render.
+2. `python backend/scripts/generate_vapid_keys.py` → set `VAPID_PUBLIC_KEY`,
+   `VAPID_PRIVATE_KEY` (and optionally `VAPID_SUBJECT`) on Render.
+3. Pick a long random `ALERTS_SECRET` → set it on Render.
+4. GitHub repo secrets: `ALERTS_API_URL` (the Render URL) and `ALERTS_SECRET`.
+5. Test: Actions → "Sunset alerts" → Run workflow with *force* ticked.
+
+Cost: one prediction per 0.1° cell per day, only for belled places, at ~4 h
+before local sunset — independent of subscriber count. Alert checks never
+start a climatology build.
