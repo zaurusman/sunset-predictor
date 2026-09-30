@@ -26,7 +26,7 @@ from app.services.climatology_service import ClimatologyService
 from app.services.explanation_engine import ExplanationEngine
 from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.weather_service import WeatherService
-from app.utils.math_utils import clamp
+from app.utils.math_utils import clamp, round_half_up
 from app.utils.time_utils import local_sunset_date, utcnow
 
 logger = get_logger(__name__)
@@ -148,7 +148,7 @@ class PredictionService:
            ml_adjustment = round(raw_score - window_result.final_score, 2)
 
         final_score, percentile, is_local = self._calibrate(raw_score, lat, lon)
-        category = self._scoring.score_to_category(final_score)
+        category = self._scoring.score_to_category(round_half_up(final_score))
 
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
         confidence = self._scoring.compute_confidence(
@@ -382,7 +382,7 @@ class PredictionService:
             result_days.append(HeatmapDay(
                 date=d,
                 score=final_score,
-                category=self._scoring.score_to_category(final_score),
+                category=self._scoring.score_to_category(round_half_up(final_score)),
             ))
 
         return HeatmapResponse(
@@ -431,7 +431,7 @@ class PredictionService:
 
         raw_score = self._ml.blend(window_result.final_score, ml_score)
         final_score, percentile, _is_local = self._calibrate(raw_score, lat, lon)
-        category = self._scoring.score_to_category(final_score)
+        category = self._scoring.score_to_category(round_half_up(final_score))
         lead_time_hours = (sunset_time - utcnow()).total_seconds() / 3600.0
         try:
             ensemble_spread = await self._weather.get_ensemble_cloud_spread(
