@@ -16,6 +16,7 @@ import {
 import { freshnessLabel } from "@/lib/utils";
 
 import AppNav from "@/components/AppNav";
+import SupportFooter from "@/components/SupportFooter";
 import DatePicker from "@/components/DatePicker";
 import ErrorAlert from "@/components/ErrorAlert";
 import EvidenceDrawer from "@/components/EvidenceDrawer";
@@ -250,6 +251,7 @@ export default function HomePage() {
       <Suspense fallback={<div className="min-h-screen" aria-hidden="true" />}>
         <HomeContent />
       </Suspense>
+      <SupportFooter />
     </main>
   );
 }
