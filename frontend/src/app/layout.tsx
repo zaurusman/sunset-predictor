@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import ThemeProvider from "@/components/ThemeProvider";
+import ServiceWorkerRegistrar from "@/components/ServiceWorkerRegistrar";
 
 export const metadata: Metadata = {
   title: "Afterglow",
@@ -8,6 +9,7 @@ export const metadata: Metadata = {
   keywords: ["sunset", "weather", "forecast", "beauty score"],
   appleWebApp: {
     title: "Afterglow",
+    capable: true,
     statusBarStyle: "black-translucent",
   },
 };
@@ -25,6 +27,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="min-h-screen antialiased">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+          <ServiceWorkerRegistrar />
           {/* Subtle ambient gradient overlay */}
           <div
             className="fixed inset-0 pointer-events-none z-0"
