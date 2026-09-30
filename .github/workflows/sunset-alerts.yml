@@ -1,0 +1,28 @@
+name: Sunset alerts
+
+# Hourly nudge to the backend. Each cell is only checked when its sunset is
+# ~4 h away, and at most once per day, so most runs cost zero Open-Meteo calls.
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force: ignore window, threshold and dedupe (testing only)"
+        type: boolean
+        default: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger alert run
+        env:
+          API: ${{ secrets.ALERTS_API_URL }}
+          SECRET: ${{ secrets.ALERTS_SECRET }}
+          FORCE: ${{ inputs.force && '1' || '0' }}
+        run: |
+          curl -fsS --retry 3 --retry-delay 20 --max-time 120 \
+            -X POST -H "X-Alerts-Secret: $SECRET" \
+            "$API/internal/alerts/run?force=$FORCE"
