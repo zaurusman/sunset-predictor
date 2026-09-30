@@ -24,7 +24,7 @@ COST AND COLD START
 -------------------
 Only the evenings the seasonal rank can actually use are fetched — the last
 SEASON_WINDOW_DAYS, plus last year's same date forward through the window and
-the cache lifetime (see _build_ranges) — about 120 days rather than a year.
+the cache lifetime (see _build_ranges) — about 90 days rather than a year.
 Scored exactly as before, light corridor included, so the percentile means
 what it always did; the build just no longer pays for the ~245 evenings the
 seasonal rank never looks at.
@@ -60,8 +60,8 @@ logger = get_logger(__name__)
 CLIMATOLOGY_TTL_SECONDS = 30 * 86_400
 
 # Below this many scored days the distribution is too thin to rank against.
-# A full build yields ~120 (see _build_ranges); this tolerates a partial one.
-MIN_USABLE_DAYS = 60
+# A full build yields ~91 (see _build_ranges); this tolerates a partial one.
+MIN_USABLE_DAYS = 50
 
 # Side length of the grid cell one curve serves, in degrees (~25 km). The
 # archive is ERA5, whose native grid is 0.25°, so a finer cell buys nothing but
@@ -82,9 +82,11 @@ CLIMATOLOGY_RETRY_COOLDOWN_SECONDS = 1800
 # read the same, which tells a daily-glance user nothing. Ranked seasonally the
 # app can say "good for August" instead.
 #
-# 45 days each side gives ~91 samples: wide enough that the rank is stable,
-# narrow enough that late August is not being compared with November.
-SEASON_WINDOW_DAYS = 45
+# 30 days each side gives ~61 samples: enough for a stable rank, and tight
+# enough that late August is compared with August–September, not November.
+# (Was 45; narrowed to track the season more closely and to shrink the build
+# fetch, which is sized off this window — see _build_ranges.)
+SEASON_WINDOW_DAYS = 30
 
 # BUMP THIS whenever a change moves the raw score scale — a component curve, a
 # weight, a gate, anything score() touches.
