@@ -129,6 +129,19 @@ class WeatherService:
         decimals = self._settings.CACHE_COORD_DECIMALS
         return round(lat, decimals), round(lon, decimals)
 
+    def _stale_or_raise(self, cache_key: str, exc: WeatherUnavailableError, what: str) -> Any:
+        """Fallback when Open-Meteo is unavailable: return the last good
+        (expired but within the grace period) cached value, or re-raise.
+
+        A daily-glance user re-checking their usual spot is far better served
+        by a forecast a few hours old than by an error page.
+        """
+        stale = self._cache.get_stale(cache_key)
+        if stale is None:
+            raise exc
+        logger.warning("Serving STALE %s — Open-Meteo unavailable: %s", what, exc)
+        return stale
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -184,15 +197,21 @@ class WeatherService:
         today = datetime.now(UTC).date()
         days_ago = (today - target_date).days
 
-        if target_date < today:
-            if days_ago <= 7:
-                # Use forecast + past_days for very recent dates — the archive
-                # has a ~5-day lag so it may not have data yet.
-                snapshot = await self._fetch_recent_past_snapshot(lat, lon, target_date, sunset_time, days_ago)
+        try:
+            if target_date < today:
+                if days_ago <= 7:
+                    # Use forecast + past_days for very recent dates — the archive
+                    # has a ~5-day lag so it may not have data yet.
+                    snapshot = await self._fetch_recent_past_snapshot(lat, lon, target_date, sunset_time, days_ago)
+                else:
+                    snapshot = await self._fetch_archive_snapshot(lat, lon, target_date, sunset_time)
             else:
-                snapshot = await self._fetch_archive_snapshot(lat, lon, target_date, sunset_time)
-        else:
-            snapshot = await self._fetch_forecast_snapshot(lat, lon, target_date, sunset_time)
+                snapshot = await self._fetch_forecast_snapshot(lat, lon, target_date, sunset_time)
+        except WeatherUnavailableError as exc:
+            snapshot = self._stale_or_raise(cache_key, exc, "snapshot")
+            # Never re-cache stale data: that would reset its TTL and pass it
+            # off as fresh for another full cycle.
+            return self._apply_override(snapshot, override) if override is not None else snapshot
 
         if override is not None:
             snapshot = self._apply_override(snapshot, override)
@@ -220,9 +239,13 @@ class WeatherService:
             return cached
 
         today = datetime.now(UTC).date()
-        end_date = today + timedelta(days=days - 1)
 
-        weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+        try:
+            weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+        except WeatherUnavailableError as exc:
+            stale = self._stale_or_raise(cache_key, exc, "forecast range")
+            # A stale range may have been built before midnight.
+            return [(d, s) for d, s in stale if d >= today]
         aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
 
         results: list[tuple[date, WeatherSnapshot]] = []
@@ -281,22 +304,25 @@ class WeatherService:
         days_ago = (today - target_date).days
 
         # Single raw fetch for all window points
-        if target_date < today:
-            if days_ago <= 7:
-                weather_data = await self._fetch_forecast_raw(lat, lon, days=1, past_days=days_ago + 1)
-                aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
-                data_source = "forecast"
+        try:
+            if target_date < today:
+                if days_ago <= 7:
+                    weather_data = await self._fetch_forecast_raw(lat, lon, days=1, past_days=days_ago + 1)
+                    aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
+                    data_source = "forecast"
+                else:
+                    weather_data = await self._fetch_archive_raw(lat, lon, target_date)
+                    aq_data = await self._fetch_air_quality_range_raw(
+                        lat, lon, target_date, target_date
+                    )
+                    data_source = "archive"
             else:
-                weather_data = await self._fetch_archive_raw(lat, lon, target_date)
-                aq_data = await self._fetch_air_quality_range_raw(
-                    lat, lon, target_date, target_date
-                )
-                data_source = "archive"
-        else:
-            days_ahead = (target_date - today).days + 1
-            weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
-            aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
-            data_source = "forecast"
+                days_ahead = (target_date - today).days + 1
+                weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
+                aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
+                data_source = "forecast"
+        except WeatherUnavailableError as exc:
+            return self._stale_or_raise(cache_key, exc, "window snapshots")
 
         snapshots = self._extract_window_snapshots_from_raw(
             weather_data, aq_data, lat, lon, sunset_time, data_source
@@ -324,7 +350,12 @@ class WeatherService:
             return cached
 
         today = datetime.now(UTC).date()
-        weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+        try:
+            weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+        except WeatherUnavailableError as exc:
+            stale = self._stale_or_raise(cache_key, exc, "forecast range windows")
+            # A stale range may have been built before midnight.
+            return [(d, w) for d, w in stale if d >= today]
         aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
 
         # Pre-parse timestamps once so the per-day extraction loop doesn't
@@ -636,17 +667,20 @@ class WeatherService:
         # prediction rather than with the humidity proxy.
         archive_data: Optional[dict] = None
         archive_aq: Optional[dict] = None
-        if start_date <= archive_boundary:
-            archive_end = min(end_date, archive_boundary)
-            archive_data = await self._fetch_archive_range_raw(lat, lon, start_date, archive_end)
-            archive_aq = await self._fetch_air_quality_range_raw(lat, lon, start_date, archive_end)
-
-        # One forecast fetch covers all of the recent 7 days
         recent_weather: Optional[dict] = None
         recent_aq: Optional[dict] = None
-        if end_date > archive_boundary:
-            recent_weather = await self._fetch_forecast_raw(lat, lon, days=1, past_days=7)
-            recent_aq = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=7)
+        try:
+            if start_date <= archive_boundary:
+                archive_end = min(end_date, archive_boundary)
+                archive_data = await self._fetch_archive_range_raw(lat, lon, start_date, archive_end)
+                archive_aq = await self._fetch_air_quality_range_raw(lat, lon, start_date, archive_end)
+
+            # One forecast fetch covers all of the recent 7 days
+            if end_date > archive_boundary:
+                recent_weather = await self._fetch_forecast_raw(lat, lon, days=1, past_days=7)
+                recent_aq = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=7)
+        except WeatherUnavailableError as exc:
+            return self._stale_or_raise(cache_key, exc, "historical range windows")
 
         # Pre-parse timestamps once so the per-day loop doesn't re-parse the
         # same 8760-entry list on every _extract_snapshot_for_hour / _extract_trends call.
@@ -913,6 +947,7 @@ class WeatherService:
         """
         max_retries = self._settings.HTTP_MAX_RETRIES
         last_exc: Exception | None = None
+        reason = ""
 
         for attempt in range(max_retries + 1):
             try:
@@ -924,16 +959,18 @@ class WeatherService:
                 if status not in _RETRYABLE_STATUS and status < 500:
                     raise  # genuine client error — retrying won't help
                 last_exc = exc
+                reason = _error_reason(exc.response)
                 if attempt >= max_retries:
                     break
                 delay = self._retry_delay(exc.response, attempt)
                 logger.warning(
-                    "Open-Meteo %s for %s (attempt %d/%d) — retrying in %.1fs",
-                    status, url, attempt + 1, max_retries + 1, delay,
+                    "Open-Meteo %s for %s (attempt %d/%d): %s — retrying in %.1fs",
+                    status, url, attempt + 1, max_retries + 1, reason, delay,
                 )
             except httpx.TransportError as exc:
                 # Connection reset, timeout, DNS failure — transient.
                 last_exc = exc
+                reason = f"{type(exc).__name__}: {exc}"
                 if attempt >= max_retries:
                     break
                 delay = self._backoff_delay(attempt)
@@ -944,8 +981,15 @@ class WeatherService:
 
             await asyncio.sleep(delay)
 
+        # ERROR, not WARNING: this is the line that becomes a user-facing 503
+        # (unless a stale fallback covers it), so it should be easy to find in
+        # the Render logs — and the reason says WHICH limit was hit.
+        logger.error(
+            "Open-Meteo gave up after %d attempt(s) for %s: %s",
+            max_retries + 1, url, reason or last_exc,
+        )
         raise WeatherUnavailableError(
-            f"Weather provider unavailable after {max_retries + 1} attempt(s): {last_exc}"
+            f"Weather provider unavailable after {max_retries + 1} attempt(s): {reason or last_exc}"
         ) from last_exc
 
     def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
@@ -1221,6 +1265,23 @@ _REQUIRED_OVERRIDE_FIELDS = {
     "cloud_low", "cloud_mid", "cloud_high", "cloud_total",
     "visibility_m", "relative_humidity", "precipitation_mm",
 }
+
+
+def _error_reason(response: httpx.Response) -> str:
+    """Open-Meteo's own explanation of a failed request.
+
+    Error bodies look like ``{"error": true, "reason": "Minutely API request
+    limit exceeded. ..."}`` — the reason is what tells a per-minute burst apart
+    from an exhausted daily quota. Falls back to a short raw-body excerpt.
+    """
+    try:
+        body = response.json()
+        if isinstance(body, dict) and body.get("reason"):
+            return str(body["reason"])
+    except Exception:
+        pass
+    text = (response.text or "").strip().replace("\n", " ")
+    return text[:200] or f"HTTP {response.status_code} (empty body)"
 
 
 def _prepopulate_parsed_times(data: dict) -> None:

@@ -65,3 +65,38 @@ def test_clear_empties_persisted_store(tmp_path):
 
     b = TTLCache(ttl_seconds=900, persist_path=path)
     assert b.get("key") is None
+
+
+def test_get_stale_returns_expired_entry_within_grace():
+    """An expired entry is hidden from get() but still offered as a fallback."""
+    c = TTLCache(ttl_seconds=900, stale_grace_seconds=3600)
+    c.set("k", "v", ttl_override=-1)  # already expired
+
+    assert c.get("k") is None          # never served as fresh
+    assert c.get_stale("k") == "v"     # but still there for a fallback
+
+
+def test_get_stale_drops_entry_past_grace():
+    c = TTLCache(ttl_seconds=900, stale_grace_seconds=10)
+    c.set("k", "v", ttl_override=-60)  # expired a minute ago, grace is 10s
+
+    assert c.get_stale("k") is None
+    assert c.size() == 0
+
+
+def test_no_grace_means_no_stale_fallback():
+    """Default grace of 0 keeps the old behaviour: expired means gone."""
+    c = TTLCache(ttl_seconds=900)
+    c.set("k", "v", ttl_override=-1)
+
+    assert c.get_stale("k") is None
+
+
+def test_stale_entries_survive_reload_within_grace(tmp_path):
+    path = str(tmp_path / "cache.pkl")
+    a = TTLCache(ttl_seconds=900, persist_path=path, stale_grace_seconds=3600)
+    a.set("k", "v", ttl_override=-1)
+
+    b = TTLCache(ttl_seconds=900, persist_path=path, stale_grace_seconds=3600)
+    assert b.get("k") is None
+    assert b.get_stale("k") == "v"
