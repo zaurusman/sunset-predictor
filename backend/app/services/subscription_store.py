@@ -107,6 +107,11 @@ class PostgresSubscriptionStore:
         await pool.execute(_SCHEMA)
         return cls(pool)
 
+    @property
+    def pool(self):
+        """Shared with the durable weather-cache tier — one pool per process."""
+        return self._pool
+
     async def close(self) -> None:
         await self._pool.close()
 
