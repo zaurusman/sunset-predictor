@@ -114,6 +114,21 @@ class Settings(BaseSettings):
     RESEND_FROM_EMAIL: str = "Afterglow <onboarding@resend.dev>"  # verified sender
     DEVELOPER_EMAIL: str = ""      # where submissions are sent
 
+    # ── Push alerts (Epic sunset notifications) ──────────────────────────────
+    # All empty → push is disabled and the app behaves exactly as without it.
+    # Neon/Postgres DSN. Render's disk is ephemeral, so subscriptions can't live
+    # in a local file.
+    DATABASE_URL: str = ""
+    # Generate with: python scripts/generate_vapid_keys.py
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    # Contact claim push services require (mailto: or https:).
+    VAPID_SUBJECT: str = "https://sunset-predictor-henna.vercel.app"
+    # Shared secret the hourly GitHub Actions cron sends in X-Alerts-Secret.
+    ALERTS_SECRET: str = ""
+    # A cell is checked once, when its sunset is this many hours away.
+    ALERT_LEAD_MIN_HOURS: float = 3.5
+    ALERT_LEAD_MAX_HOURS: float = 4.5
 
 # Module-level singleton — import this everywhere
 settings = Settings()

@@ -26,6 +26,8 @@ praw==7.7.1
 python-dotenv==1.0.1
 python-multipart==0.0.20  # multipart/form-data for file uploads
 resend==2.7.0             # transactional email API
+asyncpg==0.30.0           # Postgres driver for push subscriptions
+pywebpush==2.0.3          # Web Push (VAPID) sender
 
 # ── Testing ──────────────────────────────────────────────────────────────────
 pytest==8.3.4
