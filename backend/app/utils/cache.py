@@ -20,14 +20,24 @@ class TTLCache:
     Thread-safe via a reentrant lock. Expired entries are evicted lazily
     on access and proactively on every 100th set() call.
 
+    An expired entry is not dropped straight away: it is kept for a further
+    *stale_grace_seconds* so :meth:`get_stale` can hand it back when a fresh
+    fetch fails. ``get()`` never returns stale data.
+
     When *persist_path* is provided the store is mirrored to disk so cached
     weather survives process restarts (e.g. ``uvicorn --reload``), avoiding a
     full re-fetch — and the Open-Meteo rate-limit pressure that comes with it.
     Expiry uses wall-clock time so TTLs remain meaningful across restarts.
     """
 
-    def __init__(self, ttl_seconds: int = 900, persist_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        ttl_seconds: int = 900,
+        persist_path: Optional[str] = None,
+        stale_grace_seconds: int = 0,
+    ) -> None:
         self._ttl = ttl_seconds
+        self._grace = stale_grace_seconds
         self._store: dict[str, tuple[Any, float]] = {}  # key -> (value, expires_at)
         self._lock = threading.RLock()
         self._set_count = 0
@@ -46,7 +56,22 @@ class TTLCache:
             if entry is None:
                 return None
             value, expires_at = entry
-            if time.time() > expires_at:
+            now = time.time()
+            if now > expires_at:
+                if now > expires_at + self._grace:
+                    del self._store[key]
+                return None
+            return value
+
+    def get_stale(self, key: str) -> Optional[Any]:
+        """Return the value even if expired, as long as it is within the
+        stale grace period. For fallback use only, when a fresh fetch failed."""
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            value, expires_at = entry
+            if time.time() > expires_at + self._grace:
                 del self._store[key]
                 return None
             return value
@@ -97,7 +122,7 @@ class TTLCache:
 
     def _evict_expired(self) -> None:
         now = time.time()
-        expired = [k for k, (_, exp) in self._store.items() if now > exp]
+        expired = [k for k, (_, exp) in self._store.items() if now > exp + self._grace]
         for k in expired:
             del self._store[k]
 
@@ -116,7 +141,7 @@ class TTLCache:
             logger.warning("Could not load weather cache from %s: %s", self._persist_path, exc)
             return
         now = time.time()
-        self._store = {k: (v, exp) for k, (v, exp) in data.items() if exp > now}
+        self._store = {k: (v, exp) for k, (v, exp) in data.items() if exp + self._grace > now}
         logger.info("Loaded %d cached weather entries from %s", len(self._store), self._persist_path)
 
     def _persist(self) -> None:

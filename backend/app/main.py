@@ -55,10 +55,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cache = TTLCache(
         ttl_seconds=settings.CACHE_TTL_SECONDS,
         persist_path=settings.CACHE_PERSIST_PATH or None,
+        stale_grace_seconds=settings.CACHE_STALE_GRACE_SECONDS,
     )
     logger.info(
-        "Weather cache: ttl=%ss, persist=%s",
+        "Weather cache: ttl=%ss, stale_grace=%ss, persist=%s",
         settings.CACHE_TTL_SECONDS,
+        settings.CACHE_STALE_GRACE_SECONDS,
         settings.CACHE_PERSIST_PATH or "disabled",
     )
     registry = ModelRegistry(settings=settings)

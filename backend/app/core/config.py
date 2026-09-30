@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # calls while staying within one model-run of fresh data.
     CACHE_TTL_SECONDS: int = 7200
 
+    # How long an EXPIRED cache entry is kept as a fallback. When Open-Meteo
+    # is rate-limiting or down, a weather lookup serves the last good data
+    # (up to CACHE_TTL_SECONDS + this old) instead of failing with a 503.
+    # 0 disables the fallback.
+    CACHE_STALE_GRACE_SECONDS: int = 43200
+
     # Persist the weather cache to disk so it survives process restarts
     # (notably `uvicorn --reload`, which otherwise wipes the in-memory cache on
     # every code change and forces a full re-fetch). Defaults to a temp-dir file;
