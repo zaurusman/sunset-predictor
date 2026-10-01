@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # calls while staying within one model-run of fresh data.
     CACHE_TTL_SECONDS: int = 7200
 
+    # Forecasts from icon_seamless (weather, corridor), its ensemble and CAMS
+    # aerosol are re-fetched when their model publishes a new run rather than
+    # on CACHE_TTL (app/services/model_runs.py). This caps how long one is
+    # kept regardless; without readable run metadata, CACHE_TTL applies.
+    MODEL_RUN_TRACKING: bool = True
+    FORECAST_MAX_AGE_SECONDS: int = 6 * 3600
+
     # How long an EXPIRED cache entry is kept as a fallback. When Open-Meteo
     # is rate-limiting or down, a weather lookup serves the last good data
     # (up to CACHE_TTL_SECONDS + this old) instead of failing with a 503.

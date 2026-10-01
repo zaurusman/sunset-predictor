@@ -72,6 +72,10 @@ class TTLCache:
         self._store: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._bytes = 0
         self._hot: OrderedDict[str, Any] = OrderedDict()  # decoded values
+        # When each entry was set in this process (see get_fresh). Not
+        # persisted: an entry loaded from disk or the durable tier has no
+        # known age, so get_fresh treats it as outdated.
+        self._stored_at: dict[str, float] = {}
         self._lock = threading.RLock()
         self._set_count = 0
         self._persist_path = persist_path or None
@@ -120,6 +124,15 @@ class TTLCache:
                 return None
             return self._value(key, packed)
 
+    def get_fresh(self, key: str, since: float) -> Optional[Any]:
+        """Like get(), but only an entry set at or after *since* — e.g. after
+        the latest weather-model run became available (see model_runs)."""
+        with self._lock:
+            stored = self._stored_at.get(key)
+            if stored is None or stored < since:
+                return None
+            return self.get(key)
+
     def set(self, key: str, value: Any, ttl_override: Optional[int] = None) -> None:
         """Store *value* under *key* for TTL seconds (or ttl_override if given)."""
         ttl = ttl_override if ttl_override is not None else self._ttl
@@ -132,6 +145,7 @@ class TTLCache:
             expires_at = time.time() + ttl
             self._drop(key)
             self._store[key] = (packed, expires_at)
+            self._stored_at[key] = expires_at - ttl
             self._bytes += _size(packed)
             self._remember(key, value)
             self._set_count += 1
@@ -151,6 +165,7 @@ class TTLCache:
         with self._lock:
             self._store.clear()
             self._hot.clear()
+            self._stored_at.clear()
             self._bytes = 0
             self._mark_dirty()
 
@@ -336,6 +351,7 @@ class TTLCache:
         if entry is not None:
             self._bytes -= _size(entry[0])
         self._hot.pop(key, None)
+        self._stored_at.pop(key, None)
 
     def _enforce_budget(self) -> None:
         """Drop least recently used entries until within the memory budget."""

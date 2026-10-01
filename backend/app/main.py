@@ -23,6 +23,7 @@ from app.models.model_registry import ModelRegistry
 from app.services.alert_service import AlertService, prediction_predictor
 from app.services.astronomy_service import AstronomyService
 from app.services.climatology_service import ClimatologyService
+from app.services.model_runs import ModelRunClock
 from app.services.explanation_engine import ExplanationEngine
 from app.services.prediction_service import PredictionService
 from app.services.push_sender import WebPushSender
@@ -88,6 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         cache=cache,
         settings=settings,
         budget=budget,
+        runs=ModelRunClock(http_client, settings) if settings.MODEL_RUN_TRACKING else None,
     )
     scoring_engine = ScoringEngine()
     explanation_engine = ExplanationEngine()
