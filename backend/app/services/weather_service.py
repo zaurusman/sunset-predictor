@@ -1514,20 +1514,6 @@ def _copy_raw(data: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     return {**data, "hourly": dict(data.get("hourly", {}))}
 
 
-def _complete_months(start: date, end: date, archive_boundary: date) -> list[date]:
-    """First days of the calendar months lying wholly inside [start, end]
-    and ending on or before *archive_boundary* — i.e. immutable archive months."""
-    out: list[date] = []
-    first = date(start.year, start.month, 1)
-    while first <= end:
-        nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
-        last = nxt - timedelta(days=1)
-        if first >= start and last <= end and last <= archive_boundary:
-            out.append(first)
-        first = nxt
-    return out
-
-
 def _prepopulate_parsed_times(data: dict) -> None:
     """
     Parse the hourly time strings in *data* once and store the result under
@@ -1541,6 +1527,20 @@ def _prepopulate_parsed_times(data: dict) -> None:
         hourly["_times_parsed"] = [
             datetime.fromisoformat(t).replace(tzinfo=UTC) for t in hourly["time"]
         ]
+
+
+def _complete_months(start: date, end: date, archive_boundary: date) -> list[date]:
+    """First days of the calendar months lying wholly inside [start, end]
+    and ending on or before *archive_boundary* — i.e. immutable archive months."""
+    out: list[date] = []
+    first = date(start.year, start.month, 1)
+    while first <= end:
+        nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+        last = nxt - timedelta(days=1)
+        if first >= start and last <= end and last <= archive_boundary:
+            out.append(first)
+        first = nxt
+    return out
 
 
 def _override_is_complete(override: WeatherOverride) -> bool:
