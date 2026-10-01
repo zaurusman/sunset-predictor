@@ -12,7 +12,7 @@ import HeatmapGrid from "@/components/HeatmapGrid";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
 
-const MONTHS_OPTIONS = [6, 12, 24] as const;
+const MONTHS_OPTIONS = [6, 12] as const;
 type MonthsOption = (typeof MONTHS_OPTIONS)[number];
 
 function computeBestMonths(days: HeatmapDay[]): { month: string; avg: number }[] {

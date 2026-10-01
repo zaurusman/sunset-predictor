@@ -16,7 +16,7 @@ async def get_heatmap(
     request: Request,
     lat: float = Query(..., ge=-90, le=90, description="Latitude"),
     lon: float = Query(..., ge=-180, le=180, description="Longitude"),
-    months: int = Query(default=12, ge=1, le=24, description="How many months of history to return"),
+    months: int = Query(default=12, ge=1, le=12, description="How many months of history to return (at most 12: a cold location already costs ~234 weighted Open-Meteo calls)"),
 ) -> HeatmapResponse:
     """
     Return historical sunset scores for the past *months* months.

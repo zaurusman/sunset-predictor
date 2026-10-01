@@ -193,3 +193,10 @@ def test_model_info_endpoint(client):
     data = resp.json()
     assert "blend_alpha" in data
     assert "algorithm_version" in data
+
+
+def test_heatmap_refuses_more_than_12_months(client):
+    """24 months was removed: a cold location would cost ~450 weighted calls,
+    most of Open-Meteo's 600-per-minute limit in one request."""
+    r = client.get("/heatmap", params={"lat": 32.08, "lon": 34.78, "months": 24})
+    assert r.status_code == 422
