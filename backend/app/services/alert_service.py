@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from app.core.logging import get_logger
 from app.schemas.prediction import PredictRequest, PredictResponse
+from app.utils.call_budget import TONIGHT, priority
 from app.schemas.push import AlertRunSummary
 from app.services.subscription_store import StoredSubscription, SubscriptionStore, cell_key
 from app.services.weather_service import WeatherUnavailableError
@@ -44,10 +45,12 @@ class Sender(Protocol):
 
 def prediction_predictor(prediction_service) -> Predictor:
     async def predict(lat: float, lon: float, day: date) -> PredictResponse:
-        return await prediction_service.predict(
-            PredictRequest(latitude=lat, longitude=lon, target_date=day),
-            warm_climatology=False,
-        )
+        # Alerts are about tonight's sunset: tonight's priority.
+        with priority(TONIGHT):
+            return await prediction_service.predict(
+                PredictRequest(latitude=lat, longitude=lon, target_date=day),
+                warm_climatology=False,
+            )
     return predict
 
 

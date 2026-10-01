@@ -49,6 +49,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from app.core.logging import get_logger
+from app.utils.call_budget import background_work
 from app.services.astronomy_service import AstronomyService
 from app.services.scoring_engine import ScoringEngine
 from app.services.weather_service import WeatherService
@@ -179,14 +180,14 @@ class ClimatologyService:
         key = self._coords(lat, lon)
         if self.is_warm(lat, lon) or key in self._in_flight:
             return
-        budget = getattr(self._weather, "budget", None)
-        if budget is not None and not budget.optional_work_allowed():
-            return  # near the daily Open-Meteo quota: keep it for predictions
         if time.monotonic() < self._retry_after.get(key, 0.0):
             return
         self._in_flight.add(key)
         try:
-            asyncio.get_running_loop().create_task(self._warm(lat, lon, key))
+            # A task copies the caller's context: built from tonight's
+            # prediction, it would otherwise inherit tonight's priority.
+            with background_work():
+                asyncio.get_running_loop().create_task(self._warm(lat, lon, key))
         except RuntimeError:
             # No running loop (e.g. called from sync test code) — drop the
             # request rather than crash; the fallback curve still works.

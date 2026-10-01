@@ -7,6 +7,8 @@ cleanly shut down on exit.
 """
 from __future__ import annotations
 
+import time
+
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -32,7 +34,7 @@ from app.services.scoring_engine import ScoringEngine
 from app.services.subscription_store import PostgresSubscriptionStore
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
-from app.utils.call_budget import CallBudget, client_key, current_client
+from app.utils.call_budget import CallBudget, client_key, current_client, request_deadline
 from app.utils.durable_cache import PostgresCacheTier
 from app.utils.time_utils import local_sunset_date
 
@@ -77,6 +79,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     budget = CallBudget(
         client_hourly_limit=settings.RATE_LIMIT_CLIENT_HOURLY_CALLS,
         daily_soft_cap=settings.OPEN_METEO_DAILY_SOFT_CAP,
+        other_minute_cap=settings.OPEN_METEO_OTHER_MINUTE_CAP,
+        other_hour_cap=settings.OPEN_METEO_OTHER_HOURLY_CAP,
     )
     registry = ModelRegistry(settings=settings)
     rating_store = RatingStore(path=settings.RATINGS_PATH)
@@ -227,6 +231,11 @@ def create_app() -> FastAPI:
 _BUDGETED_PATHS = ("/predict", "/forecast", "/heatmap", "/geocode", "/rate")
 
 
+# Longest a request's non-tonight calls may wait for Open-Meteo's per-minute
+# share before it answers 503 "busy" — under Cloudflare's ~100 s timeout.
+_OTHER_WAIT_PER_REQUEST = 85.0
+
+
 class CallBudgetMiddleware:
     """Tags each request with its client (so Open-Meteo calls it causes are
     charged to it) and refuses it up front, with 429, once that client is over
@@ -265,9 +274,11 @@ class CallBudgetMiddleware:
                 return
 
         token = current_client.set(client)
+        deadline = request_deadline.set(time.time() + _OTHER_WAIT_PER_REQUEST)
         try:
             await self.app(scope, receive, send)
         finally:
+            request_deadline.reset(deadline)
             current_client.reset(token)
 
 
