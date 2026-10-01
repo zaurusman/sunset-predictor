@@ -179,6 +179,9 @@ class ClimatologyService:
         key = self._coords(lat, lon)
         if self.is_warm(lat, lon) or key in self._in_flight:
             return
+        budget = getattr(self._weather, "budget", None)
+        if budget is not None and not budget.optional_work_allowed():
+            return  # near the daily Open-Meteo quota: keep it for predictions
         if time.monotonic() < self._retry_after.get(key, 0.0):
             return
         self._in_flight.add(key)

@@ -24,6 +24,15 @@ async def get_heatmap(
     Data is fetched from the Open-Meteo archive API in a single batch call
     and cached for 24 hours (historical data never changes).
     """
+    budget = getattr(request.app.state, "call_budget", None)
+    if budget is not None and not budget.optional_work_allowed():
+        # Near the daily Open-Meteo quota: the remainder is kept for tonight's
+        # predictions. Refused up front so no heatmap is ever half-built.
+        raise HTTPException(
+            status_code=503,
+            detail="History is busy right now — tonight's forecast still works. Try the heatmap again later.",
+            headers={"Retry-After": "3600"},
+        )
     svc = request.app.state.prediction_service
     try:
         return await svc.heatmap(lat=lat, lon=lon, months=months)

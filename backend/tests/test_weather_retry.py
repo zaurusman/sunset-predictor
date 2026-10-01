@@ -109,9 +109,12 @@ async def test_nearby_coordinates_reuse_one_fetch(monkeypatch):
 
     fetches = {"n": 0}
 
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    hours = [(start + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in range(7 * 24)]
+
     async def fake_forecast(*args, **kwargs):
         fetches["n"] += 1
-        return {"hourly": {}}
+        return {"hourly": {"time": hours}}
 
     async def fake_aq(*args, **kwargs):
         return None

@@ -15,7 +15,12 @@ from datetime import date, datetime, timezone
 import pytest
 
 from app.utils.cache import TTLCache
-from app.utils.durable_cache import DURABLE_MIN_TTL_SECONDS, PostgresCacheTier
+from app.utils.durable_cache import (
+    DURABLE_MIN_TTL_SECONDS,
+    PostgresCacheTier,
+    decode_value,
+    encode_value,
+)
 
 DAY = 86_400
 
@@ -30,10 +35,21 @@ class FakeTier:
         self.loads = 0
         self.fail_writes = fail_writes
 
-    async def load_all(self, grace):
+    async def load_all(self, grace, budget_bytes=None):
+        """Latest expiry first, stopping at the budget — as the real tier does."""
         self.loads += 1
         now = time.time()
-        return [(k, v, exp) for k, (v, exp) in self.rows.items() if exp + grace > now]
+        live = sorted(
+            ((k, v, exp) for k, (v, exp) in self.rows.items() if exp + grace > now),
+            key=lambda r: -r[2],
+        )
+        out, total = [], 0
+        for row in live:
+            if budget_bytes is not None and total + len(row[1]) > budget_bytes:
+                break
+            total += len(row[1])
+            out.append(row)
+        return out
 
     async def write_many(self, rows):
         self.write_calls.append(list(rows))
@@ -71,7 +87,7 @@ def test_only_long_lived_entries_are_written_through():
 
     _run(go())
     assert set(tier.rows) == {"frozen", "climatology"}
-    assert pickle.loads(tier.rows["climatology"][0]) == [4.0, 5.0]
+    assert decode_value(tier.rows["climatology"][0]) == [4.0, 5.0]
 
 
 def test_a_burst_of_sets_is_flushed_in_one_write():
@@ -90,7 +106,7 @@ def test_a_burst_of_sets_is_flushed_in_one_write():
     assert len(tier.write_calls) == 1
     batch = tier.write_calls[0]
     assert len(batch) == 50, "duplicate keys in one burst collapse to the latest value"
-    assert pickle.loads(tier.rows["archive_month_0"][0]) == {"i": "again"}
+    assert decode_value(tier.rows["archive_month_0"][0]) == {"i": "again"}
 
 
 def test_failed_write_is_logged_not_raised():
@@ -152,6 +168,7 @@ def test_attach_keeps_later_expiry_when_pickle_also_has_key(tmp_path):
     local = TTLCache(persist_path=path)
     local.set("newer_local", "local", ttl_override=20 * DAY)
     local.set("newer_db", "local", ttl_override=2 * DAY)
+    local.flush()
 
     now = time.time()
     tier = FakeTier(rows={
@@ -183,8 +200,11 @@ def test_undecodable_row_is_skipped():
         await cache.close_durable()
         return cache, loaded
 
-    cache, loaded = _run(go())
-    assert loaded == 1 and cache.get("good") == 1 and cache.get("bad") is None
+    cache, _ = _run(go())
+    # Rows load compressed and are decoded on first read; a bad one is dropped then.
+    assert cache.get("good") == 1
+    assert cache.get("bad") is None
+    assert cache.size() == 1
 
 
 def test_attach_purges_expired_rows():
@@ -201,7 +221,7 @@ def test_attach_purges_expired_rows():
 
 def test_database_outage_at_attach_leaves_cache_working():
     class DownTier(FakeTier):
-        async def load_all(self, grace):
+        async def load_all(self, grace, budget_bytes=None):
             raise ConnectionError("down")
 
     async def go():
@@ -272,6 +292,10 @@ def test_postgres_cache_tier_contract():
             assert set(rows) == {"live", "stale"}
             assert rows["live"][0] == b"\x02"
             assert abs(rows["live"][1] - (now + 2 * DAY)) < 1
+            # Budget: latest expiry first, stop before going over.
+            capped = await tier.load_all(grace=12 * 3600, budget_bytes=1)
+            assert [k for k, _, _ in capped] == ["live"]
+            assert await tier.load_all(grace=12 * 3600, budget_bytes=0) == []
             await tier.purge_expired(grace=12 * 3600)
             left = await pool.fetch("SELECT key FROM cache_entries ORDER BY key")
             assert [r["key"] for r in left] == ["live", "stale"]
@@ -296,3 +320,37 @@ def test_expires_at_is_timezone_aware():
 
     ts = _to_ts(0.0)
     assert ts == datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def test_rows_are_written_compressed_and_legacy_rows_still_load():
+    tier = FakeTier(rows={"legacy": (pickle.dumps([9.0]), time.time() + DAY)})
+    value = {"hourly": {"cloud_cover": [float(i % 50) for i in range(2000)]}}
+
+    async def go():
+        cache = TTLCache()
+        await cache.attach_durable(tier, linger_seconds=0)
+        cache.set("clim", value, ttl_override=30 * DAY)
+        await cache.close_durable()
+        return cache
+
+    cache = _run(go())
+    assert len(tier.rows["clim"][0]) < len(pickle.dumps(value)) / 3
+    assert decode_value(tier.rows["clim"][0]) == value
+    assert cache.get("legacy") == [9.0]
+
+
+def test_attach_loads_only_up_to_the_memory_budget():
+    """An OOM restart must not reload more than fits: newest expiry wins."""
+    now = time.time()
+    blob = encode_value([float(i) for i in range(500)])
+    tier = FakeTier(rows={f"k{i}": (blob, now + (i + 1) * DAY) for i in range(10)})
+
+    async def go():
+        cache = TTLCache(memory_budget_bytes=len(blob) * 3)
+        await cache.attach_durable(tier, linger_seconds=0)
+        await cache.close_durable()
+        return cache
+
+    cache = _run(go())
+    assert cache.size() == 3
+    assert {k for k in ("k7", "k8", "k9") if cache.get(k) is not None} == {"k7", "k8", "k9"}

@@ -5,8 +5,9 @@ import asyncio
 import bisect
 import math
 import random
+import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
@@ -16,6 +17,10 @@ from app.schemas.weather import WeatherOverride, WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.utils.geo import destination_point
 from app.utils.cache import TTLCache
+from app.utils.call_budget import CallBudget, weighted_cost
+
+if TYPE_CHECKING:
+    from app.services.model_runs import ModelRunClock
 
 logger = get_logger(__name__)
 UTC = timezone.utc
@@ -56,6 +61,18 @@ def _share_whole_month(needed_days: int, month_days: int) -> bool:
     six-point corridor that is ~14 weighted calls instead of ~6."""
     return 2 * needed_days >= month_days
 
+
+# One weather + aerosol forecast fetch per location per refresh, shared by
+# every reader of a date in this range: tonight, another date and the 7-day
+# forecast used to fetch the same hours separately. Readings are identical —
+# same model, same hours; a fetch of its own only had a shorter tail. Kept
+# within icon_seamless's horizon (see ICON_SEAMLESS_MAX_DAYS): dates whose own
+# fetch would have fallen back to `auto` still fetch alone. (The corridor is
+# NOT shared: each date's points follow that date's sunset azimuth.)
+_BUNDLE_DAYS = ICON_SEAMLESS_MAX_DAYS
+
+# Hours before sunset the window extraction reads for its 3-hour trends.
+_TREND_LOOKBACK = timedelta(hours=3)
 
 # Ensemble spread caches longer than the 900s default — it changes on model
 # run cadence (~every 6h for icon_seamless), not on every poll, and the
@@ -137,8 +154,13 @@ class WeatherService:
         astro_service: AstronomyService,
         cache: TTLCache,
         settings: Settings,
+        budget: Optional[CallBudget] = None,
+        runs: Optional["ModelRunClock"] = None,
     ) -> None:
         self._http = http_client
+        self.budget = budget
+        # Model-run awareness (see model_runs and _since). None: fixed TTLs.
+        self._runs = runs
         self._astro = astro_service
         self._cache = cache
         self._settings = settings
@@ -147,6 +169,8 @@ class WeatherService:
         # cap for the whole process, so user requests and a background
         # climatology build cannot pile up against it either.
         self._concurrency = asyncio.Semaphore(settings.OPEN_METEO_MAX_CONCURRENCY)
+        # Shared fetches in progress, by cache key (see _shared_fetch).
+        self._inflight: dict[str, asyncio.Future] = {}
 
     def _ckey_coords(self, lat: float, lon: float) -> tuple[float, float]:
         """Round (lat, lon) for the cache key (not for the actual fetch).
@@ -182,6 +206,99 @@ class WeatherService:
             raise exc
         logger.warning("Serving STALE %s — Open-Meteo unavailable: %s", what, exc)
         return stale
+
+    # ------------------------------------------------------------------
+    # Freshness: a cached forecast is current until its model publishes
+    # ------------------------------------------------------------------
+
+    async def _since(
+        self, families: tuple[str, ...], lat: float, lon: float,
+        fallback_ttl: Optional[float] = None,
+    ) -> float:
+        """Oldest acceptable store time for a cached forecast from *families*:
+        when the newest covering model run became available — anything stored
+        before that is a superseded run. Capped at FORECAST_MAX_AGE_SECONDS.
+
+        When run times aren't reliably known (metadata unreadable, tracking
+        off) this is exactly the old fixed-TTL rule: stored within the TTL.
+        """
+        now = time.time()
+        fallback = now - (fallback_ttl or self._settings.CACHE_TTL_SECONDS)
+        if self._runs is None:
+            return fallback
+        latest = []
+        for family in families:
+            try:
+                run = await self._runs.latest_run(family, lat, lon)
+            except Exception as exc:
+                logger.warning("Model run lookup failed for %s: %s", family, exc)
+                run = None
+            if run is None:
+                return fallback
+            latest.append(run)
+        return max(max(latest), now - self._settings.FORECAST_MAX_AGE_SECONDS)
+
+    def _current_ttl(self, fallback_ttl: Optional[int] = None) -> Optional[int]:
+        """TTL for an entry read back through _since: long enough for the
+        model-run check to decide, or the old fixed TTL without tracking."""
+        if self._runs is None:
+            return fallback_ttl
+        return max(int(self._settings.FORECAST_MAX_AGE_SECONDS), fallback_ttl or 0)
+
+    async def _shared_fetch(self, cache_key: str, build, since: Optional[float] = None) -> Any:
+        """Cached value for *cache_key*, built by *build()* on a miss.
+
+        Concurrent misses for the same key wait on one build rather than each
+        fetching: a cold location opened by several people at once — say,
+        after an Epic alert — costs one set of Open-Meteo calls.
+        *build* stores its result in the cache itself. With *since*, only an
+        entry stored at or after it counts (see _since).
+        """
+        if since is None:
+            cached = self._cache.get(cache_key)
+        else:
+            cached = self._cache.get_fresh(cache_key, since)
+        if cached is not None:
+            return cached
+        task = self._inflight.get(cache_key)
+        if task is None:
+            task = asyncio.ensure_future(build())
+            self._inflight[cache_key] = task
+            task.add_done_callback(lambda _: self._inflight.pop(cache_key, None))
+        return await asyncio.shield(task)
+
+    async def _forecast_bundle(
+        self, lat: float, lon: float
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+        """(weather, aerosol) raw forecast for the next _BUNDLE_DAYS — one
+        fetch per location per model run, sliced by every forecast reader.
+
+        Weather and aerosol are cached apart: their models publish on
+        different schedules (ICON-EU every 3 h, CAMS every 12-24 h). A failed
+        aerosol fetch (None) is not cached, so the next reader retries it.
+        """
+        coords = self._ckey_coords(lat, lon)
+        weather_key = TTLCache.make_key("forecast_bundle", *coords, _BUNDLE_DAYS)
+        aq_key = TTLCache.make_key("aq_bundle", *coords, _BUNDLE_DAYS)
+
+        async def build_weather():
+            weather = await self._fetch_forecast_raw(lat, lon, days=_BUNDLE_DAYS)
+            self._cache.set(weather_key, weather, ttl_override=self._current_ttl())
+            return weather
+
+        async def build_aq():
+            aq = await self._fetch_air_quality_raw(lat, lon, days=_BUNDLE_DAYS)
+            if aq is not None:
+                self._cache.set(aq_key, aq, ttl_override=self._current_ttl())
+            return aq
+
+        weather = await self._shared_fetch(
+            weather_key, build_weather, since=await self._since(("forecast",), lat, lon)
+        )
+        aq = await self._shared_fetch(
+            aq_key, build_aq, since=await self._since(("aq",), lat, lon)
+        )
+        return weather, aq
 
     # ------------------------------------------------------------------
     # Public API
@@ -337,13 +454,18 @@ class WeatherService:
         """
         cache_key = TTLCache.make_key("window_snaps", *self._ckey_coords(lat, lon), str(target_date))
         window_over = sunset_time + _WINDOW_END_AFTER_SUNSET < datetime.now(UTC)
-        cached = self._frozen_get(cache_key, window_over)
+        today = datetime.now(UTC).date()
+        days_ago = (today - target_date).days
+        # An icon_seamless forecast (see the fetch below) is current until a
+        # newer run publishes. After the window it is frozen, as before.
+        on_icon = target_date >= today and max((target_date - today).days + 2, 2) <= _BUNDLE_DAYS
+        if on_icon and not window_over:
+            cached = self._cache.get_fresh(cache_key, await self._since(("forecast", "aq"), lat, lon))
+        else:
+            cached = self._frozen_get(cache_key, window_over)
         if cached is not None:
             logger.debug("Cache hit for window_snaps lat=%.4f lon=%.4f date=%s", lat, lon, target_date)
             return cached
-
-        today = datetime.now(UTC).date()
-        days_ago = (today - target_date).days
 
         # Single raw fetch for all window points
         try:
@@ -360,8 +482,22 @@ class WeatherService:
                     data_source = "archive"
             else:
                 days_ahead = (target_date - today).days + 1
-                weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
-                aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
+                fetch_days = max(days_ahead + 1, 2)
+                shared = None
+                if fetch_days <= _BUNDLE_DAYS:
+                    # Same model and hours as a fetch of its own (a shorter
+                    # forecast_days only trims the tail), so the same reading.
+                    shared = await self._forecast_bundle(lat, lon)
+                    if not _covers(shared[0], sunset_time - _TREND_LOOKBACK,
+                                   sunset_time + _WINDOW_END_AFTER_SUNSET):
+                        shared = None
+                if shared is not None:
+                    weather_data, aq_data = shared
+                else:
+                    # Beyond icon_seamless's horizon the fetch falls back to
+                    # `auto` (see _fetch_forecast_raw): keep that model.
+                    weather_data = await self._fetch_forecast_raw(lat, lon, days=fetch_days)
+                    aq_data = await self._fetch_air_quality_raw(lat, lon, days=fetch_days)
                 data_source = "forecast"
         except WeatherUnavailableError as exc:
             return self._stale_or_raise(cache_key, exc, "window snapshots")
@@ -371,7 +507,8 @@ class WeatherService:
         )
         self._cache.set(
             cache_key, snapshots,
-            ttl_override=_FROZEN_TTL_SECONDS if window_over else None,
+            ttl_override=_FROZEN_TTL_SECONDS if window_over
+            else self._current_ttl() if on_icon else None,
         )
         return snapshots
 
@@ -390,18 +527,25 @@ class WeatherService:
         Results are cached for the configured TTL.
         """
         cache_key = TTLCache.make_key("forecast_range_windows", *self._ckey_coords(lat, lon), days)
-        cached = self._cache.get(cache_key)
+        on_icon = days <= _BUNDLE_DAYS
+        if on_icon:
+            cached = self._cache.get_fresh(cache_key, await self._since(("forecast", "aq"), lat, lon))
+        else:
+            cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
 
         today = datetime.now(UTC).date()
         try:
-            weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+            if on_icon:
+                weather_data, aq_data = await self._forecast_bundle(lat, lon)
+            else:
+                weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+                aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
         except WeatherUnavailableError as exc:
             stale = self._stale_or_raise(cache_key, exc, "forecast range windows")
             # A stale range may have been built before midnight.
             return [(d, w) for d, w in stale if d >= today]
-        aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
 
         # Pre-parse timestamps once so the per-day extraction loop doesn't
         # re-parse the same list on every call to _extract_snapshot_for_hour.
@@ -421,7 +565,7 @@ class WeatherService:
             except Exception as exc:
                 logger.warning("Failed to build window snapshots for %s: %s", d, exc)
 
-        self._cache.set(cache_key, results)
+        self._cache.set(cache_key, results, ttl_override=self._current_ttl() if on_icon else None)
         return results
 
     # ------------------------------------------------------------------
@@ -460,7 +604,13 @@ class WeatherService:
             "corridor", *self._ckey_coords(lat, lon), str(target_date)
         )
         window_over = sunset_time + _WINDOW_END_AFTER_SUNSET < datetime.now(UTC)
-        cached = self._frozen_get(cache_key, window_over)
+        today_utc = datetime.now(UTC).date()
+        # Same model rule as the fetch below: icon_seamless within its horizon.
+        on_icon = target_date >= today_utc and max((target_date - today_utc).days + 2, 2) <= ICON_SEAMLESS_MAX_DAYS
+        if on_icon and not window_over:
+            cached = self._cache.get_fresh(cache_key, await self._since(("forecast",), lat, lon))
+        else:
+            cached = self._frozen_get(cache_key, window_over)
         if cached is not None:
             return cached
 
@@ -500,7 +650,8 @@ class WeatherService:
 
             self._cache.set(
                 cache_key, samples,
-                ttl_override=_FROZEN_TTL_SECONDS if window_over else None,
+                ttl_override=_FROZEN_TTL_SECONDS if window_over
+                else self._current_ttl() if on_icon else None,
             )
             return samples
 
@@ -533,11 +684,11 @@ class WeatherService:
         if not dates:
             return {}
 
+        today = datetime.now(UTC).date()
+
         by_month: dict[tuple[int, int], list[date]] = {}
         for d in dates:
             by_month.setdefault((d.year, d.month), []).append(d)
-
-        today = datetime.now(UTC).date()
 
         async def one_month(year: int, month: int, group: list[date]) -> dict:
             group.sort()
@@ -923,19 +1074,30 @@ class WeatherService:
         if not in_range:
             return out
 
-        max_days_ahead = max((d - datetime.now(UTC).date()).days for d, _ in in_range)
+        # Always the whole horizon under one key: tonight's /predict, another
+        # date and the 7-day forecast share a single ensemble fetch (the key
+        # used to include the furthest day asked for, so each paid again).
         cache_key = TTLCache.make_key(
-            "ensemble_spread_map", *self._ckey_coords(lat, lon), max_days_ahead
+            "ensemble_spread_map", *self._ckey_coords(lat, lon), "horizon"
         )
-        hourly = self._cache.get(cache_key)
-        if hourly is None:
-            try:
-                data = await self._fetch_ensemble_raw(lat, lon, days=max_days_ahead + 1)
-            except WeatherUnavailableError:
-                logger.warning("Ensemble fetch failed for (%.4f, %.4f) — no spread signal", lat, lon)
-                return out
+
+        async def build():
+            data = await self._fetch_ensemble_raw(lat, lon, days=ICON_SEAMLESS_MAX_DAYS + 1)
             hourly = data.get("hourly", {})
-            self._cache.set(cache_key, hourly, ttl_override=_ENSEMBLE_CACHE_TTL_SECONDS)
+            self._cache.set(
+                cache_key, hourly,
+                ttl_override=self._current_ttl(_ENSEMBLE_CACHE_TTL_SECONDS),
+            )
+            return hourly
+
+        try:
+            since = await self._since(
+                ("ensemble",), lat, lon, fallback_ttl=_ENSEMBLE_CACHE_TTL_SECONDS
+            )
+            hourly = await self._shared_fetch(cache_key, build, since=since)
+        except WeatherUnavailableError:
+            logger.warning("Ensemble fetch failed for (%.4f, %.4f) — no spread signal", lat, lon)
+            return out
 
         time_strs: list[str] = hourly.get("time", [])
         if not time_strs:
@@ -1145,6 +1307,8 @@ class WeatherService:
         max_retries = self._settings.HTTP_MAX_RETRIES
         last_exc: Exception | None = None
         reason = ""
+        if self.budget is not None:
+            self.budget.charge(weighted_cost(params))
 
         for attempt in range(max_retries + 1):
             try:
@@ -1524,6 +1688,17 @@ def _nearest_hour_index(times: list[datetime], target: datetime) -> int:
     if i == len(times):
         return len(times) - 1
     return i - 1 if target - times[i - 1] <= times[i] - target else i
+
+
+def _covers(raw: Optional[dict[str, Any]], start: datetime, end: datetime) -> bool:
+    """True if *raw*'s hourly series spans [start, end] — nearest-hour lookup
+    would otherwise silently clamp a time past the end to the last row."""
+    times = ((raw or {}).get("hourly") or {}).get("time") or []
+    if not times:
+        return False
+    first = datetime.fromisoformat(times[0]).replace(tzinfo=UTC)
+    last = datetime.fromisoformat(times[-1]).replace(tzinfo=UTC)
+    return first <= start and end <= last
 
 
 def _prepopulate_parsed_times(data: dict) -> None:

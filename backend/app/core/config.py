@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # calls while staying within one model-run of fresh data.
     CACHE_TTL_SECONDS: int = 7200
 
+    # Forecasts from icon_seamless (weather, corridor), its ensemble and CAMS
+    # aerosol are re-fetched when their model publishes a new run rather than
+    # on CACHE_TTL (app/services/model_runs.py). This caps how long one is
+    # kept regardless; without readable run metadata, CACHE_TTL applies.
+    MODEL_RUN_TRACKING: bool = True
+    FORECAST_MAX_AGE_SECONDS: int = 6 * 3600
+
     # How long an EXPIRED cache entry is kept as a fallback. When Open-Meteo
     # is rate-limiting or down, a weather lookup serves the last good data
     # (up to CACHE_TTL_SECONDS + this old) instead of failing with a 503.
@@ -80,6 +87,16 @@ class Settings(BaseSettings):
     CACHE_PERSIST_PATH: str = os.path.join(
         tempfile.gettempdir(), "afterglow_weather_cache.pkl"
     )
+
+    # Disk writes of the cache are batched: at most one per this many seconds.
+    CACHE_PERSIST_INTERVAL_SECONDS: float = 30.0
+
+    # Ceiling on the cache's compressed size in memory; least recently used
+    # entries are dropped beyond it (long-lived ones stay in the durable tier
+    # until they expire). Values are held compressed, ~0.07 MB per location
+    # for /predict and ~0.2 MB with a heatmap, so 120 MB holds ~600+
+    # locations — and leaves room on Render's 512 MB instance.
+    CACHE_MEMORY_BUDGET_MB: float = 120.0
 
     # Decimal places used to round coordinates in cache keys, so nearby lookups
     # (different users, jittery geolocation) share one Open-Meteo fetch:
@@ -107,6 +124,15 @@ class Settings(BaseSettings):
     # 429 "Too many concurrent requests" on the free API.
     OPEN_METEO_MAX_CONCURRENCY: int = 3
 
+    # ── Open-Meteo call budget (app/utils/call_budget.py) ────────────────────
+    # Weighted Open-Meteo calls one client may cause per rolling hour before
+    # its requests get 429. A heavy legitimate session — five new places,
+    # each with a heatmap — is ~800; cached requests cost nothing. 0 = off.
+    RATE_LIMIT_CLIENT_HOURLY_CALLS: float = 1000
+    # Past this many weighted calls in 24 h (free limit: 10,000/day), new
+    # heatmaps and climatology builds pause so predictions keep working. 0 = off.
+    OPEN_METEO_DAILY_SOFT_CAP: float = 8500
+
     # ── Email / photo submission ──────────────────────────────────────────────
     # Resend API key for sending photo submissions to the developer.
     # Leave RESEND_API_KEY empty to disable the /submit-photo endpoint entirely.
@@ -126,9 +152,15 @@ class Settings(BaseSettings):
     VAPID_SUBJECT: str = "https://sunset-predictor-henna.vercel.app"
     # Shared secret the hourly GitHub Actions cron sends in X-Alerts-Secret.
     ALERTS_SECRET: str = ""
-    # A cell is checked once, when its sunset is this many hours away.
-    ALERT_LEAD_MIN_HOURS: float = 3.5
+    # A cell is checked once, when its sunset is this many hours away. The
+    # hourly cron first sees a cell at 3.5-4.5 h; the lower edge leaves room
+    # for cells carried over by pacing (below) to be checked a bit later.
+    ALERT_LEAD_MIN_HOURS: float = 2.5
     ALERT_LEAD_MAX_HOURS: float = 4.5
+    # Cells checked per alert call. The cron re-calls a minute later while any
+    # remain, keeping alert traffic to ~10 refreshes (~95 weighted Open-Meteo
+    # calls) a minute — well under the 600/min limit users share. 0 = no limit.
+    ALERT_CELLS_PER_CALL: int = 10
 
 # Module-level singleton — import this everywhere
 settings = Settings()

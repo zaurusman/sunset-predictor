@@ -33,7 +33,7 @@ class FakeSender:
         return self.result
 
 
-def make_service(store, sender, *, score=85.0, category="Epic", lead_hours=4.0, fail=False):
+def make_service(store, sender, *, score=85.0, category="Epic", lead_hours=4.0, fail=False, leads=None):
     calls: list[tuple[float, float, date]] = []
 
     async def predictor(lat, lon, day):
@@ -45,7 +45,7 @@ def make_service(store, sender, *, score=85.0, category="Epic", lead_hours=4.0, 
     svc = AlertService(
         store=store,
         predictor=predictor,
-        sunset_for=lambda lat, lon, d: NOW + timedelta(hours=lead_hours),
+        sunset_for=lambda lat, lon, d: NOW + timedelta(hours=(leads or {}).get(round(lat, 1), lead_hours)),
         local_date_for=lambda lat, lon: DAY,
         sender=sender,
         clock=lambda: NOW,
@@ -87,7 +87,7 @@ def test_same_subscriber_two_places_in_one_cell_gets_one_push():
 def test_outside_window_is_not_checked():
     store = InMemorySubscriptionStore()
     seed(store, ("https://p/1", [TLV]))
-    for lead in (5.0, 3.0, -1.0):
+    for lead in (5.0, 2.0, -1.0):
         svc, calls = make_service(store, FakeSender(), lead_hours=lead)
         run(svc.run())
         assert calls == [], f"lead {lead}h must not be due"
@@ -157,3 +157,29 @@ def test_payload_falls_back_to_utc_for_unknown_tz():
     pred = fake_prediction(80.0, "Epic")
     p = build_payload(TLV, pred, "Not/AZone", "32.1,34.8", DAY)
     assert p["body"].endswith("Best around 15:15.")
+
+
+def test_paced_run_checks_closest_to_sunset_first_and_reports_the_rest():
+    store = InMemorySubscriptionStore()
+    places = [{"latitude": 31.0 + i / 10, "longitude": 34.8, "name": f"P{i}"} for i in range(5)]
+    seed(store, *((f"https://p/{i}", [p]) for i, p in enumerate(places)))
+    leads = {round(p["latitude"], 1): 4.4 - i / 10 for i, p in enumerate(places)}
+    svc, calls = make_service(store, FakeSender(), leads=leads)
+
+    first = run(svc.run(max_cells=2))
+    assert first.cells_checked == 2 and first.remaining == 3
+    assert [round(c[0], 1) for c in calls] == [31.4, 31.3], "closest to sunset first"
+
+    second = run(svc.run(max_cells=2))
+    assert second.cells_checked == 2 and second.remaining == 1
+    third = run(svc.run(max_cells=2))
+    assert third.cells_checked == 1 and third.remaining == 0
+    assert len(calls) == 5 and len(set(calls)) == 5
+
+
+def test_cell_carried_over_is_still_checked_a_bit_later():
+    store = InMemorySubscriptionStore()
+    seed(store, ("https://p/1", [TLV]))
+    svc, calls = make_service(store, FakeSender(), lead_hours=3.0)
+    run(svc.run())
+    assert len(calls) == 1

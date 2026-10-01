@@ -40,3 +40,4 @@ class AlertRunSummary(BaseModel):
     cells_checked: int = 0
     notifications_sent: int = 0
     pruned: int = 0
+    remaining: int = 0   # due cells left for the next paced call

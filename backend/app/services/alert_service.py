@@ -6,13 +6,21 @@ Belled places are grouped into the same 0.1° cells as the weather cache. Each
 cell is predicted at most once per local day, when its sunset is ~4 h away —
 so Open-Meteo usage scales with distinct places, not with subscribers, and a
 cell a user already looked at today is served from cache.
+
+PACING
+------
+One run checks at most ``max_cells`` cells, the closest to sunset first, and
+reports how many are still due. The cron calls again a minute later until none
+remain, so a busy hour costs ~1 forecast refresh per cell spread over several
+minutes instead of one burst against Open-Meteo's per-minute limit. The lead
+window reaches below 4 h so cells carried over still get checked.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Optional, Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -75,7 +83,7 @@ class AlertService:
         sunset_for: Callable[[float, float, date], datetime],
         local_date_for: Callable[[float, float], date],
         sender: Sender,
-        lead_min_hours: float = 3.5,
+        lead_min_hours: float = 2.5,
         lead_max_hours: float = 4.5,
         decimals: int = 1,
         clock: Callable[[], datetime] = utcnow,
@@ -103,21 +111,29 @@ class AlertService:
                 cell.members.append((sub, place))
         return cells
 
-    async def run(self, force: bool = False) -> AlertRunSummary:
+    async def run(self, force: bool = False, max_cells: Optional[int] = None) -> AlertRunSummary:
         summary = AlertRunSummary()
         cells = self._group(await self._store.all())
         summary.cells = len(cells)
         now = self._clock()
         gone: set[str] = set()
 
+        due: list[tuple[float, str, _Cell, date]] = []
         for key, cell in cells.items():
             day = self._local_date_for(cell.lat, cell.lon)
+            lead = (self._sunset_for(cell.lat, cell.lon, day) - now).total_seconds() / 3600
             if not force:
-                lead = (self._sunset_for(cell.lat, cell.lon, day) - now).total_seconds() / 3600
                 if not (self._lead_min <= lead < self._lead_max):
                     continue
                 if await self._store.cell_checked(key, day):
                     continue
+            due.append((lead, key, cell, day))
+        due.sort(key=lambda d: d[0])   # closest to sunset first
+        if max_cells is not None and not force:
+            summary.remaining = max(0, len(due) - max_cells)
+            due = due[:max_cells]
+
+        for _, key, cell, day in due:
             summary.cells_due += 1
 
             try:

@@ -21,7 +21,8 @@ class FakeAlertService:
     def __init__(self):
         self.forced: list[bool] = []
 
-    async def run(self, force=False):
+    async def run(self, force=False, max_cells=None):
+        self.max_cells = max_cells
         self.forced.append(force)
         return AlertRunSummary(cells=1, cells_due=1, cells_checked=1, notifications_sent=1)
 
@@ -88,6 +89,8 @@ def test_alert_run_with_secret(api):
     r = client.post("/internal/alerts/run?force=1", headers={"X-Alerts-Secret": "s3cret"})
     assert r.status_code == 200 and r.json()["notifications_sent"] == 1
     assert alerts.forced == [True]
+    assert alerts.max_cells == settings.ALERT_CELLS_PER_CALL
+    assert "remaining" in r.json()
 
 
 def test_alert_run_refuses_when_secret_unset(api, monkeypatch):
