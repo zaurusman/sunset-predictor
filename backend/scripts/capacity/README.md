@@ -64,7 +64,7 @@ each limit first breaks:
 | Render CPU (over 60 minutes a month overloaded) | **~50** | not reached up to 10,000 |
 | Open-Meteo 10k/day on the busiest day | ~800 | **~1,200** |
 | Open-Meteo 10k/day on an average day | ~1,200 | ~1,500 |
-| Open-Meteo 600/min (peak at 14:07, the alert run) | ~2,000 | ~800–2,000 (it hovers right at the line) |
+| Open-Meteo 600/min (v1 peak at 14:07, the alert run) | ~2,000 | not reached up to 6,000 (alert run paced at 10 cells a minute; busiest minute 251 calls at 800 users, 582 at 6,000) |
 | Vercel 1M edge requests a month | ~5,000 | ~5,000 |
 | Neon 100 CU-hours | not reached | not reached |
 

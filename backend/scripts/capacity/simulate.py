@@ -92,7 +92,7 @@ BEHAVIOUR = dict(
     explore_world=0.5,       # half of explored places are abroad
     israel_cells=150, world_places=5000, zipf_s=1.05,
     p_subscribe=0.12, bells=1.3,
-    epic_days=(4, 11, 19, 26), epic_cell_share=0.6, push_tap=0.45,
+    alert_cells_per_call=10, epic_days=(4, 11, 19, 26), epic_cell_share=0.6, push_tap=0.45,
     sunset_min=18 * 60 + 15,  # Israel, early October (local)
 )
 
@@ -282,8 +282,11 @@ def simulate(dau, days=30, seed=1, arch=None):
             if tod % 60 == 7:                                   # hourly alert cron
                 neon_touch.append(now)
                 if tod == alert_min:
-                    for cell in sub_cells:
-                        predict(now, cell, 0, warm=False)
+                    # v1: every due cell in one burst. v2: ALERT_CELLS_PER_CALL
+                    # cells per call, the cron re-calling once a minute.
+                    per = len(sub_cells) if not v2 else B["alert_cells_per_call"]
+                    for i, cell in enumerate(sub_cells):
+                        predict(now + i // max(per, 1), cell, 0, warm=False)
                     if epic:
                         sent = int(len(subs) * B["epic_cell_share"] * B["bells"])
                         cpu_min[now] += sent * CPU["push_send"]

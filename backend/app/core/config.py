@@ -152,9 +152,15 @@ class Settings(BaseSettings):
     VAPID_SUBJECT: str = "https://sunset-predictor-henna.vercel.app"
     # Shared secret the hourly GitHub Actions cron sends in X-Alerts-Secret.
     ALERTS_SECRET: str = ""
-    # A cell is checked once, when its sunset is this many hours away.
-    ALERT_LEAD_MIN_HOURS: float = 3.5
+    # A cell is checked once, when its sunset is this many hours away. The
+    # hourly cron first sees a cell at 3.5-4.5 h; the lower edge leaves room
+    # for cells carried over by pacing (below) to be checked a bit later.
+    ALERT_LEAD_MIN_HOURS: float = 2.5
     ALERT_LEAD_MAX_HOURS: float = 4.5
+    # Cells checked per alert call. The cron re-calls a minute later while any
+    # remain, keeping alert traffic to ~10 refreshes (~95 weighted Open-Meteo
+    # calls) a minute — well under the 600/min limit users share. 0 = no limit.
+    ALERT_CELLS_PER_CALL: int = 10
 
 # Module-level singleton — import this everywhere
 settings = Settings()
