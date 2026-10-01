@@ -49,12 +49,17 @@ from datetime import date, timedelta
 from typing import Optional
 
 from app.core.logging import get_logger
+from app.utils.call_budget import background_work
 from app.services.astronomy_service import AstronomyService
 from app.services.scoring_engine import ScoringEngine
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
 
 logger = get_logger(__name__)
+
+# What a climatology build may cost (weighted Open-Meteo calls, cold location),
+# so it is refused up front rather than cut off half-way.
+_BUILD_HEADROOM = 250.0
 
 # A climate does not change month to month; re-deriving it more often is waste.
 CLIMATOLOGY_TTL_SECONDS = 30 * 86_400
@@ -180,13 +185,16 @@ class ClimatologyService:
         if self.is_warm(lat, lon) or key in self._in_flight:
             return
         budget = getattr(self._weather, "budget", None)
-        if budget is not None and not budget.optional_work_allowed():
-            return  # near the daily Open-Meteo quota: keep it for predictions
+        if budget is not None and not budget.optional_work_allowed(headroom=_BUILD_HEADROOM):
+            return  # near Open-Meteo's limits: keep them for tonight
         if time.monotonic() < self._retry_after.get(key, 0.0):
             return
         self._in_flight.add(key)
         try:
-            asyncio.get_running_loop().create_task(self._warm(lat, lon, key))
+            # A task copies the caller's context: built from tonight's
+            # prediction, it would otherwise inherit tonight's priority.
+            with background_work():
+                asyncio.get_running_loop().create_task(self._warm(lat, lon, key))
         except RuntimeError:
             # No running loop (e.g. called from sync test code) — drop the
             # request rather than crash; the fallback curve still works.

@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Request
 from app.schemas.prediction import PredictRequest, PredictResponse
 from app.services.weather_service import WeatherUnavailableError
 from app.core.logging import get_logger
+from app.utils.call_budget import OTHER, TONIGHT, priority
+from app.utils.time_utils import local_sunset_date
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["prediction"])
@@ -25,8 +27,22 @@ async def predict_sunset(
     - Supply `weather_override` to inject custom weather values (useful for testing).
     """
     svc = request.app.state.prediction_service
+    tonight = body.target_date is None or body.target_date == local_sunset_date(
+        body.latitude, body.longitude
+    )
+    if not tonight:
+        budget = getattr(request.app.state, "call_budget", None)
+        if budget is not None and not budget.optional_work_allowed(headroom=20.0):
+            # Another date: Open-Meteo's remaining share is kept for tonight.
+            raise HTTPException(
+                status_code=503,
+                detail="Other dates are busy right now — tonight's forecast still works. Try again later.",
+                headers={"Retry-After": "600"},
+            )
     try:
-        return await svc.predict(body)
+        # Tonight's calls go first and are never held back (see call_budget).
+        with priority(TONIGHT if tonight else OTHER):
+            return await svc.predict(body)
     except WeatherUnavailableError as exc:
         logger.warning("Weather provider unavailable: %s", exc)
         raise HTTPException(

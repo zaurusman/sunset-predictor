@@ -22,6 +22,15 @@ async def forecast_sunset(
     Returns one `DayForecast` entry per day, each with a score, category,
     confidence, sunset time, best viewing window, and explanations.
     """
+    budget = getattr(request.app.state, "call_budget", None)
+    if budget is not None and not budget.optional_work_allowed(headroom=50.0):
+        # Open-Meteo's remaining share is kept for tonight's prediction. The
+        # page keeps showing its last saved week under a "busy" notice.
+        raise HTTPException(
+            status_code=503,
+            detail="The 7-day forecast is busy right now — tonight's forecast still works. Try again later.",
+            headers={"Retry-After": "600"},
+        )
     svc = request.app.state.prediction_service
     try:
         return await svc.forecast(body)

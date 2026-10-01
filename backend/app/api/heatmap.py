@@ -25,9 +25,10 @@ async def get_heatmap(
     and cached for 24 hours (historical data never changes).
     """
     budget = getattr(request.app.state, "call_budget", None)
-    if budget is not None and not budget.optional_work_allowed():
-        # Near the daily Open-Meteo quota: the remainder is kept for tonight's
-        # predictions. Refused up front so no heatmap is ever half-built.
+    if budget is not None and not budget.optional_work_allowed(headroom=250.0):
+        # Near Open-Meteo's limits: the remainder is kept for tonight's
+        # predictions. Refused up front (a cold 12-month heatmap costs ~234
+        # weighted calls) so no heatmap is ever half-built.
         raise HTTPException(
             status_code=503,
             detail="History is busy right now — tonight's forecast still works. Try the heatmap again later.",

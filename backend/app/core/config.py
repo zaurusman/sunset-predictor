@@ -132,6 +132,12 @@ class Settings(BaseSettings):
     # Past this many weighted calls in 24 h (free limit: 10,000/day), new
     # heatmaps and climatology builds pause so predictions keep working. 0 = off.
     OPEN_METEO_DAILY_SOFT_CAP: float = 8500
+    # Open-Meteo's free tier also allows 600 calls/minute and 5,000/hour.
+    # Everything except tonight (the 7-day forecast, other dates, heatmaps,
+    # climatology) is held to these shares — waiting for the minute, refused
+    # for the hour — so tonight always has the rest. 0 = off.
+    OPEN_METEO_OTHER_MINUTE_CAP: float = 480
+    OPEN_METEO_OTHER_HOURLY_CAP: float = 4000
 
     # ── Email / photo submission ──────────────────────────────────────────────
     # Resend API key for sending photo submissions to the developer.

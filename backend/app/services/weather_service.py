@@ -17,7 +17,16 @@ from app.schemas.weather import WeatherOverride, WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.utils.geo import destination_point
 from app.utils.cache import TTLCache
-from app.utils.call_budget import CallBudget, weighted_cost
+from app.utils.time_utils import local_sunset_date
+from app.utils.call_budget import (
+    TONIGHT,
+    BudgetExhausted,
+    CallBudget,
+    PrioritySlots,
+    call_priority,
+    priority,
+    weighted_cost,
+)
 
 if TYPE_CHECKING:
     from app.services.model_runs import ModelRunClock
@@ -116,6 +125,15 @@ class WeatherUnavailableError(Exception):
     """
 
 
+class WeatherBusyError(WeatherUnavailableError):
+    """Non-tonight work held back to keep tonight's share of Open-Meteo's
+    limits (see call_budget). Unlike an outage, it is never papered over
+    with a partial answer — no corridor, proxy aerosol — because it is not a
+    reason to show a different score: the request fails as a whole (503,
+    "busy") and the page keeps its last good data.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Open-Meteo variable lists
 # ---------------------------------------------------------------------------
@@ -195,7 +213,8 @@ class WeatherService:
         # (seen live when a heatmap's months were fetched all at once). One
         # cap for the whole process, so user requests and a background
         # climatology build cannot pile up against it either.
-        self._concurrency = asyncio.Semaphore(settings.OPEN_METEO_MAX_CONCURRENCY)
+        # Free slots go to tonight's calls first (see PrioritySlots).
+        self._concurrency = PrioritySlots(settings.OPEN_METEO_MAX_CONCURRENCY)
         # Shared fetches in progress, by cache key (see _shared_fetch).
         self._inflight: dict[str, asyncio.Future] = {}
 
@@ -326,13 +345,17 @@ class WeatherService:
         weather_key = TTLCache.make_key("forecast_bundle", *coords, _BUNDLE_DAYS, str(today))
         aq_key = TTLCache.make_key("aq_bundle", *coords, _BUNDLE_DAYS, str(today))
 
+        # Tonight reads this bundle, so it is fetched at tonight's priority
+        # whoever asks first — the 7-day page included.
         async def build_weather():
-            weather = await self._fetch_forecast_raw(lat, lon, days=_BUNDLE_DAYS)
+            with priority(TONIGHT):
+                weather = await self._fetch_forecast_raw(lat, lon, days=_BUNDLE_DAYS)
             self._cache.set(weather_key, weather, ttl_override=self._current_ttl())
             return weather
 
         async def build_aq():
-            aq = await self._fetch_air_quality_raw(lat, lon, days=_BUNDLE_DAYS)
+            with priority(TONIGHT):
+                aq = await self._fetch_air_quality_raw(lat, lon, days=_BUNDLE_DAYS)
             if aq is not None:
                 self._cache.set(aq_key, aq, ttl_override=self._current_ttl())
             return aq
@@ -657,6 +680,7 @@ class WeatherService:
             and _forecast_fetch_days(sunset_time, today_utc) == ICON_SEAMLESS_MAX_DAYS
         )
         daily = on_icon and (target_date - today_utc).days > _CORRIDOR_LIVE_DAYS
+        tonight = target_date in (today_utc, local_sunset_date(lat, lon))
         since = 0.0
         if on_icon:
             since = (
@@ -698,9 +722,11 @@ class WeatherService:
                 ttl = _DAILY_TTL_SECONDS if daily else self._current_ttl()
 
                 async def build():
-                    fetched = await self._fetch_forecast_raw_multi(
-                        lats, lons, days=ICON_SEAMLESS_MAX_DAYS
-                    )
+                    # Tonight's corridor at tonight's priority, whoever asks.
+                    with priority(TONIGHT if tonight else call_priority.get()):
+                        fetched = await self._fetch_forecast_raw_multi(
+                            lats, lons, days=ICON_SEAMLESS_MAX_DAYS
+                        )
                     for entry in fetched if isinstance(fetched, list) else [fetched]:
                         _prepopulate_parsed_times(entry)
                     self._cache.set(raw_key, fetched, ttl_override=ttl)
@@ -753,6 +779,8 @@ class WeatherService:
             # corridor drops its penalty, so an outage would RAISE tonight's
             # score (seen live: 62.7 → 72.6) while the 7-day list kept it.
             stale = self._cache.get_stale(cache_key)
+            if stale is None and isinstance(exc, WeatherBusyError):
+                raise  # busy is not an outage: fail whole, never score without it
             logger.warning(
                 "Light-corridor sampling failed for lat=%.3f lon=%.3f date=%s: %s "
                 "— %s.",
@@ -831,6 +859,8 @@ class WeatherService:
             except Exception as exc:
                 # Last good samples first, as in get_corridor_samples.
                 stale = self._cache.get_stale(cache_key)
+                if stale is None and isinstance(exc, WeatherBusyError):
+                    raise  # see WeatherBusyError
                 logger.warning(
                     "Corridor batch failed for %04d-%02d at lat=%.3f lon=%.3f: %s "
                     "— %s.",
@@ -1217,7 +1247,8 @@ class WeatherService:
         )
 
         async def build():
-            data = await self._fetch_ensemble_raw(lat, lon, days=ICON_SEAMLESS_MAX_DAYS + 1)
+            with priority(TONIGHT):  # tonight's confidence reads it
+                data = await self._fetch_ensemble_raw(lat, lon, days=ICON_SEAMLESS_MAX_DAYS + 1)
             hourly = data.get("hourly", {})
             self._cache.set(
                 cache_key, hourly,
@@ -1414,6 +1445,8 @@ class WeatherService:
             params["past_days"] = past_days
         try:
             return await self._get_json(url, params)
+        except WeatherBusyError:
+            raise  # see WeatherBusyError: not a reason for the proxy
         except Exception as exc:
             logger.debug("Air quality API unavailable: %s — using proxy", exc)
             return None
@@ -1441,6 +1474,8 @@ class WeatherService:
         }
         try:
             return await self._get_json(url, params)
+        except WeatherBusyError:
+            raise  # see WeatherBusyError
         except Exception as exc:
             logger.debug("Air quality range unavailable: %s — using proxy", exc)
             return None
@@ -1460,13 +1495,28 @@ class WeatherService:
         max_retries = self._settings.HTTP_MAX_RETRIES
         last_exc: Exception | None = None
         reason = ""
+        level = call_priority.get()
         if self.budget is not None:
-            self.budget.charge(weighted_cost(params))
+            if level == TONIGHT:
+                self.budget.charge(weighted_cost(params))
+            else:
+                # Paced and capped below Open-Meteo's limits so that tonight
+                # always has its share left (see call_budget).
+                try:
+                    await self.budget.acquire_other(weighted_cost(params))
+                except BudgetExhausted as exc:
+                    # One WARNING per refused request is logged where it
+                    # becomes a 503 ("Busy: ..."); per call it is noise.
+                    logger.debug("Open-Meteo call held back to keep tonight working: %s (%s)", exc, url)
+                    raise WeatherBusyError(f"Busy: {exc}") from exc
 
         for attempt in range(max_retries + 1):
             try:
-                async with self._concurrency:
+                await self._concurrency.acquire(level)
+                try:
                     response = await self._http.get(url, params=params)
+                finally:
+                    self._concurrency.release()
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as exc:
@@ -1475,9 +1525,15 @@ class WeatherService:
                     raise  # genuine client error — retrying won't help
                 last_exc = exc
                 reason = _error_reason(exc.response)
+                if status == 429 and self.budget is not None:
+                    self.budget.note_rate_limited(reason)
                 if attempt >= max_retries or _quota_exhausted(reason):
                     break
                 delay = self._retry_delay(exc.response, attempt)
+                if level != TONIGHT and self.budget is not None:
+                    # Not tonight: wait the minute window out rather than
+                    # retrying into it alongside tonight's calls.
+                    delay = max(delay, self.budget.other_wait_remaining())
                 logger.warning(
                     "Open-Meteo %s for %s (attempt %d/%d): %s — retrying in %.1fs",
                     status, url, attempt + 1, max_retries + 1, reason, delay,
