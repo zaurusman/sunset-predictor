@@ -41,6 +41,10 @@ _ARCHIVE_MONTH_TTL_SECONDS = 30 * 86_400
 # day instead of being re-fetched every CACHE_TTL. Tonight's answer should not
 # drift after the sun has set, and refreshing it would only spend quota.
 _FROZEN_TTL_SECONDS = 86_400
+
+# Part of the per-month window cache key (see _month_windows_key).
+_WINDOWS_CACHE_VERSION = 1
+
 # How long after sunset the viewing window runs (matches the "+30m" point).
 _WINDOW_END_AFTER_SUNSET = timedelta(minutes=30)
 
@@ -728,6 +732,26 @@ class WeatherService:
         # dates with days_ago > 7 are safely in the archive; ≤7 use forecast+past_days
         archive_boundary = today - timedelta(days=8)
 
+        # Complete archive months never change, so their windows are cached
+        # per calendar month for _ARCHIVE_MONTH_TTL_SECONDS — long enough for
+        # the durable tier, so a restart doesn't re-extract every past day.
+        # Only the days not covered by a cached month are built below.
+        days = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
+        months = _complete_months(start_date, end_date, archive_boundary)
+        by_day: dict[date, list[WeatherSnapshot]] = {}
+        cached_months: set[date] = set()
+        for first in months:
+            hit = self._cache.get(self._month_windows_key(lat, lon, first))
+            if hit is not None:
+                by_day.update(hit)
+                cached_months.add(first)
+        missing = [d for d in days if d not in by_day]
+        if not missing:
+            results = [(d, by_day[d]) for d in days]
+            self._cache.set(cache_key, results, ttl_override=86400 if end_date <= archive_boundary else None)
+            return results
+        fetch_start, fetch_end = missing[0], missing[-1]
+
         # One bulk archive fetch for the old portion, plus one bulk aerosol
         # fetch covering the same span — measured AOD for historical days, so
         # the climatology is built with the same atmosphere term as a live
@@ -737,15 +761,15 @@ class WeatherService:
         recent_weather: Optional[dict] = None
         recent_aq: Optional[dict] = None
         try:
-            if start_date <= archive_boundary:
-                archive_end = min(end_date, archive_boundary)
+            if fetch_start <= archive_boundary:
+                archive_end = min(fetch_end, archive_boundary)
                 archive_data, archive_aq = await self._archive_months_raw(
-                    lat, lon, start_date, archive_end, archive_boundary
+                    lat, lon, fetch_start, archive_end, archive_boundary
                 )
 
             # One forecast fetch covers all of the recent 7 days — cached, since
             # the heatmap and the climatology build make the identical request.
-            if end_date > archive_boundary:
+            if fetch_end > archive_boundary:
                 recent_key = TTLCache.make_key("recent_past7", *self._ckey_coords(lat, lon))
                 recent = self._cache.get(recent_key)
                 if recent is None:
@@ -766,9 +790,7 @@ class WeatherService:
             if _d is not None:
                 _prepopulate_parsed_times(_d)
 
-        results: list[tuple[date, list[WeatherSnapshot]]] = []
-        current = start_date
-        while current <= end_date:
+        for current in missing:
             try:
                 days_ago = (today - current).days
                 if days_ago <= 7:
@@ -780,17 +802,34 @@ class WeatherService:
 
                 if weather_data is None:
                     logger.warning("No weather data source available for %s, skipping", current)
-                    current += timedelta(days=1)
                     continue
 
                 sunset_time = self._astro.get_sunset_time(lat, lon, current)
-                window_snaps = self._extract_window_snapshots_from_raw(
+                by_day[current] = self._extract_window_snapshots_from_raw(
                     weather_data, aq_data, lat, lon, sunset_time, data_source
                 )
-                results.append((current, window_snaps))
             except Exception as exc:
                 logger.warning("Failed to build window snapshots for %s: %s", current, exc)
-            current += timedelta(days=1)
+
+        for first in months:
+            if first in cached_months:
+                continue
+            nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+            month_days = [first + timedelta(days=i) for i in range((nxt - first).days)]
+            snaps = {d: by_day[d] for d in month_days if d in by_day}
+            # Skip a month with a gap (a day failed) or with proxy aerosol (the
+            # AQ fetch failed): pinning either for 30 days would hide the real
+            # data long after Open-Meteo recovers.
+            if len(snaps) < len(month_days) or any(
+                s.aerosol_is_estimated for v in snaps.values() for s in v
+            ):
+                continue
+            self._cache.set(
+                self._month_windows_key(lat, lon, first), snaps,
+                ttl_override=_ARCHIVE_MONTH_TTL_SECONDS,
+            )
+
+        results = [(d, by_day[d]) for d in days if d in by_day]
 
         # Archive data never changes; recent forecast data can be refreshed — use default TTL
         ttl = 86400 if end_date <= archive_boundary else None
@@ -1173,6 +1212,13 @@ class WeatherService:
         delay = base * (2 ** attempt) + random.uniform(0.0, base)
         return min(delay, self._settings.HTTP_MAX_RETRY_DELAY)
 
+    def _month_windows_key(self, lat: float, lon: float, first: date) -> str:
+        # Bump _WINDOWS_CACHE_VERSION when window extraction changes, so cached
+        # months built by the old code aren't served for another 30 days.
+        return TTLCache.make_key(
+            "archive_month_windows", _WINDOWS_CACHE_VERSION, *self._ckey_coords(lat, lon), str(first)
+        )
+
     # ------------------------------------------------------------------
     # Internal: data extraction
     # ------------------------------------------------------------------
@@ -1466,6 +1512,20 @@ def _copy_raw(data: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if data is None:
         return None
     return {**data, "hourly": dict(data.get("hourly", {}))}
+
+
+def _complete_months(start: date, end: date, archive_boundary: date) -> list[date]:
+    """First days of the calendar months lying wholly inside [start, end]
+    and ending on or before *archive_boundary* — i.e. immutable archive months."""
+    out: list[date] = []
+    first = date(start.year, start.month, 1)
+    while first <= end:
+        nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+        last = nxt - timedelta(days=1)
+        if first >= start and last <= end and last <= archive_boundary:
+            out.append(first)
+        first = nxt
+    return out
 
 
 def _prepopulate_parsed_times(data: dict) -> None:
