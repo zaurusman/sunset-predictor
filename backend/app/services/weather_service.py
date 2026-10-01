@@ -740,15 +740,17 @@ class WeatherService:
         months = _complete_months(start_date, end_date, archive_boundary)
         by_day: dict[date, list[WeatherSnapshot]] = {}
         cached_months: set[date] = set()
-        for first in months:
+        for first, _ in months:
             hit = self._cache.get(self._month_windows_key(lat, lon, first))
             if hit is not None:
                 by_day.update(hit)
                 cached_months.add(first)
+        # Archive data never changes; recent forecast data can be refreshed — use default TTL
+        range_ttl = 86400 if end_date <= archive_boundary else None
         missing = [d for d in days if d not in by_day]
         if not missing:
             results = [(d, by_day[d]) for d in days]
-            self._cache.set(cache_key, results, ttl_override=86400 if end_date <= archive_boundary else None)
+            self._cache.set(cache_key, results, ttl_override=range_ttl)
             return results
         fetch_start, fetch_end = missing[0], missing[-1]
 
@@ -811,11 +813,10 @@ class WeatherService:
             except Exception as exc:
                 logger.warning("Failed to build window snapshots for %s: %s", current, exc)
 
-        for first in months:
+        for first, last in months:
             if first in cached_months:
                 continue
-            nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
-            month_days = [first + timedelta(days=i) for i in range((nxt - first).days)]
+            month_days = [first + timedelta(days=i) for i in range(last.day)]
             snaps = {d: by_day[d] for d in month_days if d in by_day}
             # Skip a month with a gap (a day failed) or with proxy aerosol (the
             # AQ fetch failed): pinning either for 30 days would hide the real
@@ -830,10 +831,7 @@ class WeatherService:
             )
 
         results = [(d, by_day[d]) for d in days if d in by_day]
-
-        # Archive data never changes; recent forecast data can be refreshed — use default TTL
-        ttl = 86400 if end_date <= archive_boundary else None
-        self._cache.set(cache_key, results, ttl_override=ttl)
+        self._cache.set(cache_key, results, ttl_override=range_ttl)
         return results
 
     # ------------------------------------------------------------------
@@ -1529,16 +1527,17 @@ def _prepopulate_parsed_times(data: dict) -> None:
         ]
 
 
-def _complete_months(start: date, end: date, archive_boundary: date) -> list[date]:
-    """First days of the calendar months lying wholly inside [start, end]
-    and ending on or before *archive_boundary* — i.e. immutable archive months."""
-    out: list[date] = []
+def _complete_months(start: date, end: date, archive_boundary: date) -> list[tuple[date, date]]:
+    """(first, last) day of each calendar month lying wholly inside
+    [start, end] and ending on or before *archive_boundary* — i.e. the
+    immutable archive months."""
+    out: list[tuple[date, date]] = []
     first = date(start.year, start.month, 1)
     while first <= end:
         nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
         last = nxt - timedelta(days=1)
         if first >= start and last <= end and last <= archive_boundary:
-            out.append(first)
+            out.append((first, last))
         first = nxt
     return out
 
