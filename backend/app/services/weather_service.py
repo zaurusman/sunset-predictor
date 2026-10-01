@@ -78,6 +78,12 @@ _WINDOWS_CACHE_VERSION = 1
 # How long after sunset the viewing window runs (matches the "+30m" point).
 _WINDOW_END_AFTER_SUNSET = timedelta(minutes=30)
 
+# A past day's data stops changing once the last model run that can still
+# revise it is out: the runs initialised in its final hours publish ~3 h after
+# init, and an evening late in the UTC day has its window run past midnight.
+# After this margin past the end of a day, data up to that day is settled.
+_PAST_SETTLED_AFTER = timedelta(hours=4)
+
 def _share_whole_month(needed_days: int, month_days: int) -> bool:
     """Fetch a complete archive month WHOLE (a shared cache entry) only when at
     least half of it is needed. A range that merely clips a month — say the
@@ -838,7 +844,8 @@ class WeatherService:
             is_past = group[-1] < today - timedelta(days=8)
             self._cache.set(
                 cache_key, month_map,
-                ttl_override=_ARCHIVE_MONTH_TTL_SECONDS if is_past else None,
+                ttl_override=_ARCHIVE_MONTH_TTL_SECONDS if is_past
+                else _settled_ttl(group[-1]),
             )
             return {d: v for d, v in month_map.items() if d in wanted}
 
@@ -1008,8 +1015,8 @@ class WeatherService:
             if hit is not None:
                 by_day.update(hit)
                 cached_months.add(first)
-        # Archive data never changes; recent forecast data can be refreshed — use default TTL
-        range_ttl = 86400 if end_date <= archive_boundary else None
+        # Archive data never changes; recent forecast data only until it settles.
+        range_ttl = 86400 if end_date <= archive_boundary else _settled_ttl(end_date)
         missing = [d for d in days if d not in by_day]
         if not missing:
             results = [(d, by_day[d]) for d in days]
@@ -1035,14 +1042,26 @@ class WeatherService:
             # One forecast fetch covers all of the recent 7 days — cached, since
             # the heatmap and the climatology build make the identical request.
             if fetch_end > archive_boundary:
-                recent_key = TTLCache.make_key("recent_past7", *self._ckey_coords(lat, lon))
+                # Kept until the next day settles once fetch_end has settled;
+                # an entry fetched before then is its own (short-lived) key,
+                # so it is never stretched over a whole day.
+                recent_ttl = _settled_ttl(fetch_end)
+                recent_key = TTLCache.make_key(
+                    "recent_past7", *self._ckey_coords(lat, lon), str(today),
+                    str(fetch_end), "settled" if recent_ttl else "live",
+                )
                 recent = self._cache.get(recent_key)
                 if recent is None:
                     recent = (
                         await self._fetch_forecast_raw(lat, lon, days=1, past_days=7),
                         await self._fetch_air_quality_raw(lat, lon, days=1, past_days=7),
                     )
-                    self._cache.set(recent_key, recent)
+                    # A failed aerosol fetch (None) is retried at the default
+                    # TTL rather than pinned for the day as the humidity proxy.
+                    self._cache.set(
+                        recent_key, recent,
+                        ttl_override=recent_ttl if recent[1] is not None else None,
+                    )
                 # Copies: the pre-parse below adds keys, and must not write
                 # them into the cached object.
                 recent_weather, recent_aq = (_copy_raw(r) for r in recent)
@@ -1094,6 +1113,11 @@ class WeatherService:
             )
 
         results = [(d, by_day[d]) for d in days if d in by_day]
+        if len(results) < len(days) or any(
+            s.aerosol_is_estimated for _, snaps in results for s in snaps
+        ):
+            # A gap or proxy aerosol: never pin it beyond the default TTL.
+            range_ttl = None
         self._cache.set(cache_key, results, ttl_override=range_ttl)
         return results
 
@@ -1311,7 +1335,10 @@ class WeatherService:
                 (need_end - need_start).days + 1, month_last.day
             )
             fetch_start, fetch_end = (month, month_last) if whole else (need_start, need_end)
-            ttl = _ARCHIVE_MONTH_TTL_SECONDS if month_last <= archive_boundary else None
+            ttl = (
+                _ARCHIVE_MONTH_TTL_SECONDS if month_last <= archive_boundary
+                else _settled_ttl(fetch_end)
+            )
             plan.append((fetch_start, fetch_end, ttl))
             month = next_month
 
@@ -1821,6 +1848,23 @@ def _nearest_hour_index(times: list[datetime], target: datetime) -> int:
     if i == len(times):
         return len(times) - 1
     return i - 1 if target - times[i - 1] <= times[i] - target else i
+
+
+def _settled_ttl(newest_day: date) -> Optional[int]:
+    """TTL for fetched data covering past days up to *newest_day*.
+
+    Settled data (see _PAST_SETTLED_AFTER) is kept until the next day settles
+    — the history page used to re-download the same past days every
+    CACHE_TTL. Data that can still change gets None: the default TTL.
+    """
+    now = datetime.now(UTC)
+    day_end = datetime(newest_day.year, newest_day.month, newest_day.day, tzinfo=UTC) + timedelta(days=1)
+    if now < day_end + _PAST_SETTLED_AFTER:
+        return None
+    next_settle = datetime(now.year, now.month, now.day, tzinfo=UTC) + _PAST_SETTLED_AFTER
+    if next_settle <= now:
+        next_settle += timedelta(days=1)
+    return max(int((next_settle - now).total_seconds()), 60)
 
 
 def _forecast_fetch_days(sunset_time: datetime, today: date) -> int:
