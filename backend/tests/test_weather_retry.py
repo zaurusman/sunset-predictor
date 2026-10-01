@@ -352,3 +352,92 @@ async def test_ensemble_spread_is_frozen_after_the_window(monkeypatch):
 
     sunset = datetime.now(UTC) - timedelta(hours=1)
     assert await svc.get_ensemble_cloud_spread(32.1, 34.8, today, sunset) == 12.5
+
+
+# ---------------------------------------------------------------------------
+# Exhausted quotas and the light corridor during an outage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [
+    "Daily API request limit exceeded. Please try again tomorrow.",
+    "Hourly API request limit exceeded. Please try again in the next hour.",
+])
+async def test_exhausted_quota_is_not_retried(reason):
+    """A used-up daily/hourly quota won't recover within the backoff — retrying
+    only adds seconds to every request (and calls to the count)."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, json={"error": True, "reason": reason})
+
+    svc = _make_service(handler, HTTP_MAX_RETRIES=3)
+
+    with pytest.raises(WeatherUnavailableError, match="limit exceeded"):
+        await svc._get_json("https://api.open-meteo.com/v1/forecast", {})
+
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_minutely_limit_is_still_retried():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={
+                "error": True, "reason": "Minutely API request limit exceeded. Please try again in one minute.",
+            })
+        return httpx.Response(200, json={"ok": True})
+
+    svc = _make_service(handler)
+    assert await svc._get_json("https://api.open-meteo.com/v1/forecast", {}) == {"ok": True}
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_corridor_falls_back_to_stale_when_provider_down(monkeypatch):
+    """Dropping the corridor in an outage removes its penalty and inflates the
+    score (seen live: 62.7 → 72.6). The last good samples must be used instead."""
+    svc = _stale_capable(_make_service(lambda request: httpx.Response(429)))
+
+    async def down(*args, **kwargs):
+        raise WeatherUnavailableError("Daily API request limit exceeded")
+
+    monkeypatch.setattr(svc, "_fetch_forecast_raw_multi", down)
+
+    now = datetime.now(UTC)
+    today = now.date()
+    sunset = now + timedelta(hours=3)
+    key = TTLCache.make_key("corridor", *svc._ckey_coords(32.1, 34.8), str(today))
+    old = [(100.0, 80.0, 0.0)]
+    svc._cache.set(key, old, ttl_override=-1)  # expired
+
+    assert await svc.get_corridor_samples(32.1, 34.8, today, sunset) == old
+    assert svc._cache.get(key) is None  # still stale, not refreshed
+
+
+@pytest.mark.asyncio
+async def test_corridor_map_falls_back_to_stale_when_provider_down(monkeypatch):
+    svc = _stale_capable(_make_service(lambda request: httpx.Response(429)))
+
+    async def down(*args, **kwargs):
+        raise WeatherUnavailableError("Daily API request limit exceeded")
+
+    monkeypatch.setattr(svc, "_fetch_corridor_month", down)
+
+    today = datetime.now(UTC).date()
+    tomorrow = today + timedelta(days=1)
+    if tomorrow.month != today.month:  # keep both dates in one month's batch
+        today, tomorrow = today - timedelta(days=1), today
+    key = TTLCache.make_key(
+        "corridor_month", *svc._ckey_coords(32.1, 34.8), today.year, today.month,
+        str(today), str(tomorrow),
+    )
+    old = {today: [(100.0, 80.0, 0.0)], tomorrow: [(100.0, 10.0, 0.0)]}
+    svc._cache.set(key, old, ttl_override=-1)  # expired
+
+    assert await svc.get_corridor_samples_map(32.1, 34.8, [today, tomorrow]) == old

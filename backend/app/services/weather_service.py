@@ -657,13 +657,18 @@ class WeatherService:
 
         except Exception as exc:
             # Never let the corridor break a prediction — it is an enhancement
-            # to the score, not a prerequisite for producing one.
+            # to the score, not a prerequisite for producing one. But serve the
+            # last good samples when there are any: scoring without the
+            # corridor drops its penalty, so an outage would RAISE tonight's
+            # score (seen live: 62.7 → 72.6) while the 7-day list kept it.
+            stale = self._cache.get_stale(cache_key)
             logger.warning(
                 "Light-corridor sampling failed for lat=%.3f lon=%.3f date=%s: %s "
-                "— scoring without it.",
+                "— %s.",
                 lat, lon, target_date, exc,
+                "using the last good samples" if stale is not None else "scoring without it",
             )
-            return []
+            return stale if stale is not None else []
 
     async def get_corridor_samples_map(
         self, lat: float, lon: float, dates: list[date]
@@ -715,12 +720,16 @@ class WeatherService:
             try:
                 month_map = await self._fetch_corridor_month(lat, lon, group)
             except Exception as exc:
+                # Last good samples first, as in get_corridor_samples.
+                stale = self._cache.get_stale(cache_key)
                 logger.warning(
                     "Corridor batch failed for %04d-%02d at lat=%.3f lon=%.3f: %s "
-                    "— those days score without it.",
+                    "— %s.",
                     year, month, lat, lon, exc,
+                    "using the last good samples" if stale is not None
+                    else "those days score without it",
                 )
-                return {}
+                return {d: v for d, v in (stale or {}).items() if d in wanted}
 
             # Archive months are immutable; give them a long TTL.
             is_past = group[-1] < today - timedelta(days=8)
@@ -1322,7 +1331,7 @@ class WeatherService:
                     raise  # genuine client error — retrying won't help
                 last_exc = exc
                 reason = _error_reason(exc.response)
-                if attempt >= max_retries:
+                if attempt >= max_retries or _quota_exhausted(reason):
                     break
                 delay = self._retry_delay(exc.response, attempt)
                 logger.warning(
@@ -1348,10 +1357,10 @@ class WeatherService:
         # the Render logs — and the reason says WHICH limit was hit.
         logger.error(
             "Open-Meteo gave up after %d attempt(s) for %s: %s",
-            max_retries + 1, url, reason or last_exc,
+            attempt + 1, url, reason or last_exc,
         )
         raise WeatherUnavailableError(
-            f"Weather provider unavailable after {max_retries + 1} attempt(s): {reason or last_exc}"
+            f"Weather provider unavailable after {attempt + 1} attempt(s): {reason or last_exc}"
         ) from last_exc
 
     def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
@@ -1631,6 +1640,13 @@ _REQUIRED_OVERRIDE_FIELDS = {
     "cloud_low", "cloud_mid", "cloud_high", "cloud_total",
     "visibility_m", "relative_humidity", "precipitation_mm",
 }
+
+
+def _quota_exhausted(reason: str) -> bool:
+    """True when Open-Meteo says the daily or hourly quota is used up — it
+    won't come back within any retry backoff (unlike the minutely limit or
+    "Too many concurrent requests")."""
+    return reason.startswith(("Daily API request limit", "Hourly API request limit"))
 
 
 def _error_reason(response: httpx.Response) -> str:
