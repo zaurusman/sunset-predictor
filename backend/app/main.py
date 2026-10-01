@@ -61,11 +61,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ttl_seconds=settings.CACHE_TTL_SECONDS,
         persist_path=settings.CACHE_PERSIST_PATH or None,
         stale_grace_seconds=settings.CACHE_STALE_GRACE_SECONDS,
+        memory_budget_bytes=int(settings.CACHE_MEMORY_BUDGET_MB * 1e6),
+        persist_interval=settings.CACHE_PERSIST_INTERVAL_SECONDS,
     )
     logger.info(
-        "Weather cache: ttl=%ss, stale_grace=%ss, persist=%s",
+        "Weather cache: ttl=%ss, stale_grace=%ss, budget=%.0f MB, persist=%s",
         settings.CACHE_TTL_SECONDS,
         settings.CACHE_STALE_GRACE_SECONDS,
+        settings.CACHE_MEMORY_BUDGET_MB,
         settings.CACHE_PERSIST_PATH or "disabled",
     )
     registry = ModelRegistry(settings=settings)
@@ -162,6 +165,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Shutting down…")
     await http_client.aclose()
     await cache.close_durable()
+    cache.close()
     if subscription_store is not None:
         await subscription_store.close()
 

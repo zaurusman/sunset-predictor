@@ -78,9 +78,9 @@ def _restarted(cache: TTLCache) -> TTLCache:
     whose TTL was at least a day (approximated by remaining lifetime)."""
     fresh = TTLCache()
     now = time.time()
-    fresh._store = {
-        k: v for k, v in cache._store.items() if v[1] - now >= 0.9 * DURABLE_MIN_TTL_SECONDS
-    }
+    for k, (packed, exp) in cache._store.items():
+        if exp - now >= 0.9 * DURABLE_MIN_TTL_SECONDS:
+            fresh._store[k] = (packed, exp)
     return fresh
 
 

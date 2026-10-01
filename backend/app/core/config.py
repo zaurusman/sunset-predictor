@@ -81,6 +81,16 @@ class Settings(BaseSettings):
         tempfile.gettempdir(), "afterglow_weather_cache.pkl"
     )
 
+    # Disk writes of the cache are batched: at most one per this many seconds.
+    CACHE_PERSIST_INTERVAL_SECONDS: float = 30.0
+
+    # Ceiling on the cache's compressed size in memory; least recently used
+    # entries are dropped beyond it (long-lived ones stay in the durable tier
+    # until they expire). Values are held compressed, ~0.07 MB per location
+    # for /predict and ~0.2 MB with a heatmap, so 120 MB holds ~600+
+    # locations — and leaves room on Render's 512 MB instance.
+    CACHE_MEMORY_BUDGET_MB: float = 120.0
+
     # Decimal places used to round coordinates in cache keys, so nearby lookups
     # (different users, jittery geolocation) share one Open-Meteo fetch:
     #   2 → ~1 km (lossless on Open-Meteo's grid)

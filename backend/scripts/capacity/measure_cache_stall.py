@@ -7,11 +7,16 @@ from _paths import OUT
 P=str(OUT / "big.pkl")
 os.environ.update(CACHE_PERSIST_PATH=P, DATABASE_URL="", VAPID_PRIVATE_KEY="")
 N=int(sys.argv[1]) if len(sys.argv) > 1 else 15
-blob=open(OUT / "cache.pkl","rb").read()
-big={}
-for i in range(N):
-    big.update({f"{k}#{i}":v for k,v in pickle.loads(blob).items()})
-with open(P,"wb") as f: pickle.dump(big,f,protocol=pickle.HIGHEST_PROTOCOL)
+src = pickle.load(open(OUT / "cache.pkl", "rb"))
+fmt2 = isinstance(src, dict) and src.get("format") == 2
+entries = src["entries"] if fmt2 else src
+# bytes(bytearray(b)): a distinct object per copy, or pickle would store it once.
+big = {f"{k}#{i}": (bytes(bytearray(b)), e) for i in range(N) for k, (b, e) in entries.items()}
+if not fmt2:  # the pre-fix layout held live objects, so give each copy its own
+    blob = pickle.dumps(entries)
+    big = {f"{k}#{i}": v for i in range(N) for k, v in pickle.loads(blob).items()}
+with open(P, "wb") as f:
+    pickle.dump({"format": 2, "entries": big} if fmt2 else big, f, protocol=pickle.HIGHEST_PROTOCOL)
 del big
 print(f"preloaded pickle {os.path.getsize(P)/1e6:.0f} MB", flush=True)
 import httpx
