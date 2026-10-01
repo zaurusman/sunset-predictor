@@ -157,18 +157,22 @@ def test_heatmap_refused_up_front_past_soft_cap():
         assert "tonight" in r.json()["detail"]
 
 
-def test_climatology_build_paused_past_soft_cap():
+def test_climatology_build_spends_nothing_past_soft_cap():
+    """Past the daily soft cap a build may still run from cached data, but it
+    can't send a single Open-Meteo request (see tests/test_tonight_first.py):
+    it fails as "busy" and is retried after its cooldown."""
+
     from app.services.climatology_service import ClimatologyService
-    from app.utils.cache import TTLCache
+    from app.services.scoring_engine import ScoringEngine
+    from app.services.weather_service import WeatherBusyError
+    from tests.test_shared_forecast_fetch import CountingOpenMeteo, _service
 
-    class Weather:
-        budget = CallBudget(client_hourly_limit=0, daily_soft_cap=1)
+    fake = CountingOpenMeteo()
+    weather = _service(fake)
+    weather.budget = CallBudget(client_hourly_limit=0, daily_soft_cap=1)
+    weather.budget.charge(1)
+    svc = ClimatologyService(weather, weather._astro, ScoringEngine(), weather._cache)
 
-    Weather.budget.charge(1)
-    svc = ClimatologyService(Weather(), None, None, TTLCache())
-
-    async def go():
-        svc.warm_in_background(32.08, 34.78)
-        return set(svc._in_flight)
-
-    assert asyncio.run(go()) == set()
+    with pytest.raises(WeatherBusyError):
+        asyncio.run(svc.build(32.08, 34.78))
+    assert sum(fake.calls.values()) == 0

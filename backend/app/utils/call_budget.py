@@ -18,7 +18,10 @@ Tonight first (see TONIGHT / OTHER below): everything except tonight's
 prediction is held to a share of Open-Meteo's per-minute, per-hour and per-day
 limits, so it can never spend what tonight needs. Over the minute share it
 WAITS (pacing, so a burst of heatmaps loads slower instead of failing); over
-the hour/day share new work is refused up front (optional_work_allowed).
+the hour/day share its calls are refused. Only calls are counted and refused,
+never requests: a page served from the cache or the durable tier costs
+nothing and always loads. A request that is refused a call fails whole
+(WeatherBusyError), never with a partial answer.
 """
 from __future__ import annotations
 

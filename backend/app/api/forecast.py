@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from app.schemas.forecast import ForecastRequest, ForecastResponse
-from app.services.weather_service import WeatherUnavailableError
+from app.services.weather_service import WeatherBusyError, WeatherUnavailableError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -22,18 +22,15 @@ async def forecast_sunset(
     Returns one `DayForecast` entry per day, each with a score, category,
     confidence, sunset time, best viewing window, and explanations.
     """
-    budget = getattr(request.app.state, "call_budget", None)
-    if budget is not None and not budget.optional_work_allowed(headroom=50.0):
-        # Open-Meteo's remaining share is kept for tonight's prediction. The
-        # page keeps showing its last saved week under a "busy" notice.
-        raise HTTPException(
-            status_code=503,
-            detail="The 7-day forecast is busy right now — tonight's forecast still works. Try again later.",
-            headers={"Retry-After": "600"},
-        )
     svc = request.app.state.prediction_service
     try:
         return await svc.forecast(body)
+    except WeatherBusyError as exc:
+        # Only reached when it actually needed Open-Meteo calls: whatever is
+        # cached (memory or the durable tier) is served even when the share
+        # for non-tonight work is used up.
+        logger.warning("%s held back to keep tonight working: %s", '7-day forecast', exc)
+        raise HTTPException(status_code=503, detail="The 7-day forecast is busy right now — tonight's forecast still works. Try again in a minute.", headers={"Retry-After": "60"}) from exc
     except WeatherUnavailableError as exc:
         logger.warning("Weather provider unavailable: %s", exc)
         raise HTTPException(

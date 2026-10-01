@@ -209,24 +209,34 @@ async def test_one_wait_deadline_for_the_whole_request():
 # Endpoints: refused up front, tonight unaffected
 # ---------------------------------------------------------------------------
 
-def test_7_day_and_other_dates_refused_up_front_tonight_still_served():
-    override = {
-        "cloud_low": 10, "cloud_mid": 20, "cloud_high": 30, "cloud_total": 40,
-        "visibility_m": 20000, "relative_humidity": 50, "precipitation_mm": 0,
-    }
+def test_cached_pages_still_load_when_the_share_is_used_up():
+    """Only calls are refused, never requests: a 7-day forecast or another
+    date already in the cache costs nothing and loads; one that would need
+    Open-Meteo gets 503 "busy"; tonight always loads."""
+    fake = CountingOpenMeteo()
     with TestClient(app) as client:
-        budget = app.state.call_budget
-        budget.note_rate_limited("Hourly API request limit exceeded.")
+        ws = app.state.prediction_service._weather
+        real_http, real_runs, real_budget = ws._http, ws._runs, ws.budget
+        ws._http = httpx.AsyncClient(transport=httpx.MockTransport(fake))
+        ws._runs = None
+        ws.budget = budget = CallBudget(client_hourly_limit=0, daily_soft_cap=0)
+        app.state.prediction_service._climatology = None
+        other = (datetime.now(UTC).date() + timedelta(days=3)).isoformat()
         try:
-            r = client.post("/forecast", json={"latitude": LAT, "longitude": LON, "days": 7})
+            week = {"latitude": LAT, "longitude": LON, "days": 7}
+            day3 = {"latitude": LAT, "longitude": LON, "target_date": other}
+            assert client.post("/forecast", json=week).status_code == 200
+            assert client.post("/predict", json=day3).status_code == 200
+
+            budget.note_rate_limited("Hourly API request limit exceeded.")
+            sent = sum(fake.calls.values())
+            assert client.post("/forecast", json=week).status_code == 200      # cached
+            assert client.post("/predict", json=day3).status_code == 200       # cached
+            assert sum(fake.calls.values()) == sent
+
+            r = client.post("/forecast", json={**week, "latitude": 31.0})       # not cached
             assert r.status_code == 503 and "tonight" in r.json()["detail"]
-            other = (date.today() + timedelta(days=3)).isoformat()
-            r = client.post("/predict", json={"latitude": LAT, "longitude": LON, "target_date": other})
-            assert r.status_code == 503
-            r = client.get("/heatmap", params={"lat": LAT, "lon": LON, "months": 6})
-            assert r.status_code == 503
-            r = client.post("/predict", json={"latitude": LAT, "longitude": LON,
-                                              "weather_override": override})
+            r = client.post("/predict", json={"latitude": 31.0, "longitude": LON})  # tonight
             assert r.status_code == 200
         finally:
-            budget._other_refuse_until = 0.0
+            ws._http, ws._runs, ws.budget = real_http, real_runs, real_budget

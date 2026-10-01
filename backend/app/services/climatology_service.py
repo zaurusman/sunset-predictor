@@ -57,10 +57,6 @@ from app.utils.cache import TTLCache
 
 logger = get_logger(__name__)
 
-# What a climatology build may cost (weighted Open-Meteo calls, cold location),
-# so it is refused up front rather than cut off half-way.
-_BUILD_HEADROOM = 250.0
-
 # A climate does not change month to month; re-deriving it more often is waste.
 CLIMATOLOGY_TTL_SECONDS = 30 * 86_400
 
@@ -184,9 +180,6 @@ class ClimatologyService:
         key = self._coords(lat, lon)
         if self.is_warm(lat, lon) or key in self._in_flight:
             return
-        budget = getattr(self._weather, "budget", None)
-        if budget is not None and not budget.optional_work_allowed(headroom=_BUILD_HEADROOM):
-            return  # near Open-Meteo's limits: keep them for tonight
         if time.monotonic() < self._retry_after.get(key, 0.0):
             return
         self._in_flight.add(key)
