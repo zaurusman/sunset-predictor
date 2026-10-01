@@ -239,3 +239,29 @@ async def test_day2_on_corridor_refreshes_once_a_day_tonight_and_tomorrow_every_
     await corridor(1)
     await corridor(3)
     assert fake.calls["api+multi"] == 5
+
+
+@pytest.mark.asyncio
+async def test_day2_on_corridor_survives_a_deploy_without_refetching():
+    """Day-long corridor entries are written to the durable tier with their
+    store time, so after a restart they are still current — not refetched."""
+    from app.utils.cache import TTLCache
+    from tests.test_durable_cache import FakeTier
+
+    tier = FakeTier()
+    fake = CountingOpenMeteo()
+    d = datetime.now(UTC).date() + timedelta(days=3)
+
+    async def corridor_after_start() -> list:
+        svc = _tracked_service(fake)
+        svc._cache = TTLCache()
+        await svc._cache.attach_durable(tier, linger_seconds=0)
+        try:
+            return await svc.get_corridor_samples(LAT, LON, d, svc._astro.get_sunset_time(LAT, LON, d))
+        finally:
+            await svc._cache.close_durable()
+
+    first = await corridor_after_start()
+    assert fake.calls["api+multi"] == 1
+    assert await corridor_after_start() == first   # "after the deploy"
+    assert fake.calls["api+multi"] == 1
