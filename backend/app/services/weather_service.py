@@ -44,14 +44,23 @@ ICON_SEAMLESS_MAX_DAYS = 7
 # /forecast, which asked for 7, got the measured one.
 _AQ_MAX_FORECAST_DAYS = 7
 
-# From day+2 on, a forecast date's corridor is fetched along its sunset
-# azimuth rounded to this step, so consecutive evenings whose azimuths round
-# alike share one fetch. At 1° the rounding moves the farthest point (400 km)
-# by at most ~3.5 km, under one ICON grid cell. Tonight and tomorrow keep
-# their exact azimuth: tonight is the reading people check daily, and must
-# not move because of a fetch-sharing optimisation.
+# Tonight and tomorrow (days ahead <= _CORRIDOR_LIVE_DAYS) get the corridor
+# along their exact sunset azimuth, refreshed with every model run: tonight
+# is the reading people check daily and must not move because of a
+# fetch-sharing optimisation.
+#
+# Day+2 on is the expensive part of a week (one 6-point fetch per azimuth),
+# so those corridors are cheaper on two counts:
+# - the azimuth is rounded to _CORRIDOR_AZIMUTH_STEP_DEG, so consecutive
+#   evenings whose azimuths round alike share one fetch. At 1° the farthest
+#   point (400 km) moves by at most ~3.5 km, under one ICON grid cell;
+# - they refresh once a day, when the day's 00 UTC ICON run (the longest,
+#   ~7.5 days) is out — ~03:30 UTC — instead of with every 3-hourly run.
+#   Their scores can lag the newest run by up to a day.
 _CORRIDOR_AZIMUTH_STEP_DEG = 1.0
-_CORRIDOR_EXACT_AZIMUTH_DAYS = 1
+_CORRIDOR_LIVE_DAYS = 1
+# Long enough for a daily entry to outlive a day (plus slack for a late run).
+_DAILY_TTL_SECONDS = 30 * 3600
 
 # A complete archive month never changes (ERA5 is final), so it is cached for
 # a month and shared by every caller — the heatmap and the climatology build
@@ -249,6 +258,21 @@ class WeatherService:
                 return fallback
             latest.append(run)
         return max(max(latest), now - self._settings.FORECAST_MAX_AGE_SECONDS)
+
+    async def _since_daily(self, lat: float, lon: float) -> float:
+        """Oldest acceptable store time for a once-a-day forecast entry: when
+        the day's 00 UTC ICON run became available (see ModelRunClock.daily_run).
+        Without run tracking: 00:00 UTC today."""
+        now = datetime.now(UTC)
+        fallback = datetime(now.year, now.month, now.day, tzinfo=UTC).timestamp()
+        if self._runs is None:
+            return fallback
+        try:
+            run = await self._runs.daily_run("forecast", lat, lon)
+        except Exception as exc:
+            logger.warning("Daily model run lookup failed: %s", exc)
+            run = None
+        return run if run is not None else fallback
 
     def _current_ttl(self, fallback_ttl: Optional[int] = None) -> Optional[int]:
         """TTL for an entry read back through _since: long enough for the
@@ -626,8 +650,15 @@ class WeatherService:
             target_date >= today_utc
             and _forecast_fetch_days(sunset_time, today_utc) == ICON_SEAMLESS_MAX_DAYS
         )
+        daily = on_icon and (target_date - today_utc).days > _CORRIDOR_LIVE_DAYS
+        since = 0.0
+        if on_icon:
+            since = (
+                await self._since_daily(lat, lon) if daily
+                else await self._since(("forecast",), lat, lon)
+            )
         if on_icon and not window_over:
-            cached = self._cache.get_fresh(cache_key, await self._since(("forecast",), lat, lon))
+            cached = self._cache.get_fresh(cache_key, since)
         else:
             cached = self._frozen_get(cache_key, window_over)
         if cached is not None:
@@ -641,7 +672,7 @@ class WeatherService:
                 target_date >= today
                 and _forecast_fetch_days(sunset_time, today) == ICON_SEAMLESS_MAX_DAYS
             )
-            if on_icon and (target_date - today).days > _CORRIDOR_EXACT_AZIMUTH_DAYS:
+            if daily:
                 azimuth = round(azimuth / _CORRIDOR_AZIMUTH_STEP_DEG) * _CORRIDOR_AZIMUTH_STEP_DEG
             points = [
                 (d, *destination_point(lat, lon, azimuth, d))
@@ -655,8 +686,10 @@ class WeatherService:
                 # /predict and /forecast, and by every date whose azimuth
                 # rounds alike.
                 raw_key = TTLCache.make_key(
-                    "corridor_az", *self._ckey_coords(lat, lon), azimuth, str(today)
+                    "corridor_az", *self._ckey_coords(lat, lon), azimuth,
+                    "daily" if daily else "live",
                 )
+                ttl = _DAILY_TTL_SECONDS if daily else self._current_ttl()
 
                 async def build():
                     fetched = await self._fetch_forecast_raw_multi(
@@ -664,12 +697,16 @@ class WeatherService:
                     )
                     for entry in fetched if isinstance(fetched, list) else [fetched]:
                         _prepopulate_parsed_times(entry)
-                    self._cache.set(raw_key, fetched, ttl_override=self._current_ttl())
+                    self._cache.set(raw_key, fetched, ttl_override=ttl)
                     return fetched
 
-                raw = await self._shared_fetch(
-                    raw_key, build, since=await self._since(("forecast",), lat, lon)
-                )
+                raw = self._cache.get_fresh(raw_key, since)
+                first = raw[0] if isinstance(raw, list) and raw else raw
+                if raw is None or not _covers(first, sunset_time):
+                    # Missing, superseded, or fetched on an earlier UTC day so
+                    # it ends before this evening: fetch it (once, however many
+                    # readers are waiting — an infinite `since` forces a miss).
+                    raw = await self._shared_fetch(raw_key, build, since=math.inf)
             elif target_date < today and days_ago > 7:
                 raw = await self._fetch_archive_raw_multi(lats, lons, target_date)
             elif target_date < today:
@@ -698,6 +735,7 @@ class WeatherService:
             self._cache.set(
                 cache_key, samples,
                 ttl_override=_FROZEN_TTL_SECONDS if window_over
+                else _DAILY_TTL_SECONDS if daily
                 else self._current_ttl() if on_icon else None,
             )
             return samples
@@ -1801,6 +1839,13 @@ def _forecast_fetch_days(sunset_time: datetime, today: date) -> int:
     needed = ((sunset_time + _WINDOW_END_AFTER_SUNSET).date() - today).days + 1
     return ICON_SEAMLESS_MAX_DAYS if needed <= ICON_SEAMLESS_MAX_DAYS else needed
 
+
+
+def _covers(raw: Optional[dict[str, Any]], at: datetime) -> bool:
+    """True if *raw*'s hourly series reaches *at* — nearest-hour lookup would
+    otherwise silently clamp a later time to the last row."""
+    times = ((raw or {}).get("hourly") or {}).get("time") or []
+    return bool(times) and at <= datetime.fromisoformat(times[-1]).replace(tzinfo=UTC)
 
 
 def _prepopulate_parsed_times(data: dict) -> None:
