@@ -37,6 +37,12 @@ defaults to `<tmp>/afterglow-capacity`.
 | `measure_footprint.py` | Cache bytes added per location by predict, forecast and heatmap | `MB`, `RAM_PER_PICKLED_MB` |
 | `measure_cache_stall.py N` | A cold /predict on a cache preloaded with N copies of the cache from `measure_costs.py`. Records CPU, `cache.set` count, the longest event-loop freeze and peak RSS. Run `measure_costs.py` first | Checks the RAM and freeze model |
 
+`compare_responses.py BASE_BACKEND NEW_BACKEND` checks that a change leaves
+every user-facing response identical (scores, categories, windows, reasons).
+It runs /predict, /forecast and /heatmap against live Open-Meteo for both
+backends, one after the other, and diffs the JSON. Run it before merging
+anything that touches fetching or caching.
+
 `RENDER_FACTOR` is the ratio between Render and local CPU time. To set it, time
 a few cached requests against the live backend, subtract the round trip to
 `/health`, and divide by the local CPU time for the same request:

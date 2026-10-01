@@ -57,6 +57,18 @@ def _share_whole_month(needed_days: int, month_days: int) -> bool:
     return 2 * needed_days >= month_days
 
 
+# One weather + aerosol forecast fetch per location per refresh, shared by
+# every reader of a date in this range: tonight, another date and the 7-day
+# forecast used to fetch the same hours separately. Readings are identical —
+# same model, same hours; a fetch of its own only had a shorter tail. Kept
+# within icon_seamless's horizon (see ICON_SEAMLESS_MAX_DAYS): dates whose own
+# fetch would have fallen back to `auto` still fetch alone. (The corridor is
+# NOT shared: each date's points follow that date's sunset azimuth.)
+_BUNDLE_DAYS = ICON_SEAMLESS_MAX_DAYS
+
+# Hours before sunset the window extraction reads for its 3-hour trends.
+_TREND_LOOKBACK = timedelta(hours=3)
+
 # Ensemble spread caches longer than the 900s default — it changes on model
 # run cadence (~every 6h for icon_seamless), not on every poll, and the
 # endpoint is heavier than the deterministic one.
@@ -147,6 +159,8 @@ class WeatherService:
         # cap for the whole process, so user requests and a background
         # climatology build cannot pile up against it either.
         self._concurrency = asyncio.Semaphore(settings.OPEN_METEO_MAX_CONCURRENCY)
+        # Shared fetches in progress, by cache key (see _shared_fetch).
+        self._inflight: dict[str, asyncio.Future] = {}
 
     def _ckey_coords(self, lat: float, lon: float) -> tuple[float, float]:
         """Round (lat, lon) for the cache key (not for the actual fetch).
@@ -182,6 +196,39 @@ class WeatherService:
             raise exc
         logger.warning("Serving STALE %s — Open-Meteo unavailable: %s", what, exc)
         return stale
+
+    async def _shared_fetch(self, cache_key: str, build) -> Any:
+        """Cached value for *cache_key*, built by *build()* on a miss.
+
+        Concurrent misses for the same key wait on one build rather than each
+        fetching: a cold location opened by several people at once — say,
+        after an Epic alert — costs one set of Open-Meteo calls.
+        *build* stores its result in the cache itself.
+        """
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        task = self._inflight.get(cache_key)
+        if task is None:
+            task = asyncio.ensure_future(build())
+            self._inflight[cache_key] = task
+            task.add_done_callback(lambda _: self._inflight.pop(cache_key, None))
+        return await asyncio.shield(task)
+
+    async def _forecast_bundle(
+        self, lat: float, lon: float
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+        """(weather, aerosol) raw forecast for the next _BUNDLE_DAYS — one
+        fetch per location per CACHE_TTL, sliced by every forecast reader."""
+        key = TTLCache.make_key("forecast_bundle", *self._ckey_coords(lat, lon), _BUNDLE_DAYS)
+
+        async def build():
+            weather = await self._fetch_forecast_raw(lat, lon, days=_BUNDLE_DAYS)
+            aq = await self._fetch_air_quality_raw(lat, lon, days=_BUNDLE_DAYS)
+            self._cache.set(key, (weather, aq))
+            return weather, aq
+
+        return await self._shared_fetch(key, build)
 
     # ------------------------------------------------------------------
     # Public API
@@ -360,8 +407,22 @@ class WeatherService:
                     data_source = "archive"
             else:
                 days_ahead = (target_date - today).days + 1
-                weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
-                aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
+                fetch_days = max(days_ahead + 1, 2)
+                shared = None
+                if fetch_days <= _BUNDLE_DAYS:
+                    # Same model and hours as a fetch of its own (a shorter
+                    # forecast_days only trims the tail), so the same reading.
+                    shared = await self._forecast_bundle(lat, lon)
+                    if not _covers(shared[0], sunset_time - _TREND_LOOKBACK,
+                                   sunset_time + _WINDOW_END_AFTER_SUNSET):
+                        shared = None
+                if shared is not None:
+                    weather_data, aq_data = shared
+                else:
+                    # Beyond icon_seamless's horizon the fetch falls back to
+                    # `auto` (see _fetch_forecast_raw): keep that model.
+                    weather_data = await self._fetch_forecast_raw(lat, lon, days=fetch_days)
+                    aq_data = await self._fetch_air_quality_raw(lat, lon, days=fetch_days)
                 data_source = "forecast"
         except WeatherUnavailableError as exc:
             return self._stale_or_raise(cache_key, exc, "window snapshots")
@@ -396,12 +457,15 @@ class WeatherService:
 
         today = datetime.now(UTC).date()
         try:
-            weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+            if days <= _BUNDLE_DAYS:
+                weather_data, aq_data = await self._forecast_bundle(lat, lon)
+            else:
+                weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+                aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
         except WeatherUnavailableError as exc:
             stale = self._stale_or_raise(cache_key, exc, "forecast range windows")
             # A stale range may have been built before midnight.
             return [(d, w) for d, w in stale if d >= today]
-        aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
 
         # Pre-parse timestamps once so the per-day extraction loop doesn't
         # re-parse the same list on every call to _extract_snapshot_for_hour.
@@ -533,11 +597,11 @@ class WeatherService:
         if not dates:
             return {}
 
+        today = datetime.now(UTC).date()
+
         by_month: dict[tuple[int, int], list[date]] = {}
         for d in dates:
             by_month.setdefault((d.year, d.month), []).append(d)
-
-        today = datetime.now(UTC).date()
 
         async def one_month(year: int, month: int, group: list[date]) -> dict:
             group.sort()
@@ -923,19 +987,24 @@ class WeatherService:
         if not in_range:
             return out
 
-        max_days_ahead = max((d - datetime.now(UTC).date()).days for d, _ in in_range)
+        # Always the whole horizon under one key: tonight's /predict, another
+        # date and the 7-day forecast share a single ensemble fetch (the key
+        # used to include the furthest day asked for, so each paid again).
         cache_key = TTLCache.make_key(
-            "ensemble_spread_map", *self._ckey_coords(lat, lon), max_days_ahead
+            "ensemble_spread_map", *self._ckey_coords(lat, lon), "horizon"
         )
-        hourly = self._cache.get(cache_key)
-        if hourly is None:
-            try:
-                data = await self._fetch_ensemble_raw(lat, lon, days=max_days_ahead + 1)
-            except WeatherUnavailableError:
-                logger.warning("Ensemble fetch failed for (%.4f, %.4f) — no spread signal", lat, lon)
-                return out
+
+        async def build():
+            data = await self._fetch_ensemble_raw(lat, lon, days=ICON_SEAMLESS_MAX_DAYS + 1)
             hourly = data.get("hourly", {})
             self._cache.set(cache_key, hourly, ttl_override=_ENSEMBLE_CACHE_TTL_SECONDS)
+            return hourly
+
+        try:
+            hourly = await self._shared_fetch(cache_key, build)
+        except WeatherUnavailableError:
+            logger.warning("Ensemble fetch failed for (%.4f, %.4f) — no spread signal", lat, lon)
+            return out
 
         time_strs: list[str] = hourly.get("time", [])
         if not time_strs:
@@ -1524,6 +1593,17 @@ def _nearest_hour_index(times: list[datetime], target: datetime) -> int:
     if i == len(times):
         return len(times) - 1
     return i - 1 if target - times[i - 1] <= times[i] - target else i
+
+
+def _covers(raw: Optional[dict[str, Any]], start: datetime, end: datetime) -> bool:
+    """True if *raw*'s hourly series spans [start, end] — nearest-hour lookup
+    would otherwise silently clamp a time past the end to the last row."""
+    times = ((raw or {}).get("hourly") or {}).get("time") or []
+    if not times:
+        return False
+    first = datetime.fromisoformat(times[0]).replace(tzinfo=UTC)
+    last = datetime.fromisoformat(times[-1]).replace(tzinfo=UTC)
+    return first <= start and end <= last
 
 
 def _prepopulate_parsed_times(data: dict) -> None:
