@@ -53,15 +53,37 @@ curl -s -o /dev/null -w "%{time_total}\n" -X POST -H 'Content-Type: application/
   -d '{"latitude":32.08,"longitude":34.78}' https://sunset-predictor-b8ig.onrender.com/predict
 ```
 
-## Results as of 2026-10-01 (before the cache fix)
+## Results (2026-10-01)
 
-| Limit | Breaks at about |
+`--arch v1` is main before PR #29; `--arch v2` is PR #29. Daily users at which
+each limit first breaks:
+
+| Limit | v1 | v2 |
+|---|---|---|
+| Render RAM 512 MB (out-of-memory crash) | **~35** | not reached (cache capped at about 265 MB) |
+| Render CPU (over 60 minutes a month overloaded) | **~50** | not reached up to 10,000 |
+| Open-Meteo 10k/day on the busiest day | ~800 | **~1,200** |
+| Open-Meteo 10k/day on an average day | ~1,200 | ~1,500 |
+| Open-Meteo 600/min (peak at 14:07, the alert run) | ~2,000 | ~800–2,000 (it hovers right at the line) |
+| Vercel 1M edge requests a month | ~5,000 | ~5,000 |
+| Neon 100 CU-hours | not reached | not reached |
+
+The real Open-Meteo limits come earlier than these numbers, because Render's
+outbound IP is shared with other tenants.
+
+Open-Meteo usage in v2, a month at 400 daily users:
+
+| Source | Share |
 |---|---|
-| Render RAM (cache keeps every location for 30 days, OOM) | 60–75 distinct locations a month, about 30–55 daily users |
-| Render CPU freezes (whole cache re-pickled on every write) | from about 25 daily users |
-| Open-Meteo 10k calls/day | about 350 daily users (Render's outbound IP is shared, so the real number is lower) |
-| Vercel 1M edge requests/month | about 5,000 daily users |
-| Neon 100 CU-hours | not reached |
+| Light corridor | 53% |
+| Weather, aerosol and ensemble refreshes | 18% |
+| Climatology for new places | 16% |
+| Heatmaps for new places | 9% |
+| Geocoding | 1% |
+
+The corridor is 6 points, billed as 6 calls. It is fetched separately for each
+date, because its points follow that date's sunset azimuth, so sharing it
+across dates would change scores.
 
 What drives memory and Open-Meteo usage is the number of **distinct
 0.1° cells** people look at, not the number of users. Users in the same cell
