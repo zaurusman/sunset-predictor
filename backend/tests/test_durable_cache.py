@@ -30,7 +30,8 @@ class FakeTier:
 
     def __init__(self, rows=None, fail_writes=False):
         self.rows: dict[str, tuple[bytes, float]] = dict(rows or {})
-        self.write_calls: list[list[tuple[str, bytes, float]]] = []
+        self.stored_at: dict[str, float] = {}
+        self.write_calls: list[list[tuple[str, bytes, float, float]]] = []
         self.purges = 0
         self.loads = 0
         self.fail_writes = fail_writes
@@ -40,7 +41,8 @@ class FakeTier:
         self.loads += 1
         now = time.time()
         live = sorted(
-            ((k, v, exp) for k, (v, exp) in self.rows.items() if exp + grace > now),
+            ((k, v, exp, self.stored_at.get(k)) for k, (v, exp) in self.rows.items()
+             if exp + grace > now),
             key=lambda r: -r[2],
         )
         out, total = [], 0
@@ -55,8 +57,9 @@ class FakeTier:
         self.write_calls.append(list(rows))
         if self.fail_writes:
             raise ConnectionError("neon is asleep")
-        for k, v, exp in rows:
+        for k, v, exp, st in rows:
             self.rows[k] = (v, exp)
+            self.stored_at[k] = st
 
     async def purge_expired(self, grace):
         self.purges += 1
@@ -283,18 +286,19 @@ def test_postgres_cache_tier_contract():
             await pool.execute("TRUNCATE cache_entries")
             now = time.time()
             await tier.write_many([
-                ("live", b"\x00\x01", now + DAY),
-                ("stale", b"s", now - 3600),
-                ("dead", b"d", now - 10 * DAY),
+                ("live", b"\x00\x01", now + DAY, now),
+                ("stale", b"s", now - 3600, now - DAY),
+                ("dead", b"d", now - 10 * DAY, now - 11 * DAY),
             ])
-            await tier.write_many([("live", b"\x02", now + 2 * DAY)])  # upsert
-            rows = {k: (v, exp) for k, v, exp in await tier.load_all(grace=12 * 3600)}
+            await tier.write_many([("live", b"\x02", now + 2 * DAY, now + 5)])  # upsert
+            rows = {k: (v, exp, st) for k, v, exp, st in await tier.load_all(grace=12 * 3600)}
             assert set(rows) == {"live", "stale"}
             assert rows["live"][0] == b"\x02"
             assert abs(rows["live"][1] - (now + 2 * DAY)) < 1
+            assert abs(rows["live"][2] - (now + 5)) < 1
             # Budget: latest expiry first, stop before going over.
             capped = await tier.load_all(grace=12 * 3600, budget_bytes=1)
-            assert [k for k, _, _ in capped] == ["live"]
+            assert [r[0] for r in capped] == ["live"]
             assert await tier.load_all(grace=12 * 3600, budget_bytes=0) == []
             await tier.purge_expired(grace=12 * 3600)
             left = await pool.fetch("SELECT key FROM cache_entries ORDER BY key")
@@ -354,3 +358,38 @@ def test_attach_loads_only_up_to_the_memory_budget():
     cache = _run(go())
     assert cache.size() == 3
     assert {k for k in ("k7", "k8", "k9") if cache.get(k) is not None} == {"k7", "k8", "k9"}
+
+
+def test_store_time_survives_a_restart_so_get_fresh_still_trusts_it():
+    """A day-long forecast entry read through get_fresh (e.g. the day+2..6
+    corridor) must still count as current after a deploy, not be refetched."""
+    tier = FakeTier()
+
+    async def go():
+        before = TTLCache()
+        await before.attach_durable(tier, linger_seconds=0)
+        stored = time.time()
+        before.set("corridor_daily", [1.0], ttl_override=DAY + 3600)
+        await before.close_durable()
+
+        after = TTLCache()
+        await after.attach_durable(tier, linger_seconds=0)
+        return after, stored
+
+    after, stored = _run(go())
+    assert after.get_fresh("corridor_daily", stored - 60) == [1.0]
+    assert after.get_fresh("corridor_daily", stored + 60) is None  # a newer run supersedes it
+
+
+def test_row_without_store_time_is_never_fresh_but_still_readable():
+    tier = FakeTier(rows={"legacy": (encode_value([2.0]), time.time() + DAY)})
+
+    async def go():
+        cache = TTLCache()
+        await cache.attach_durable(tier, linger_seconds=0)
+        await cache.close_durable()
+        return cache
+
+    cache = _run(go())
+    assert cache.get_fresh("legacy", 0.0) is None
+    assert cache.get("legacy") == [2.0]

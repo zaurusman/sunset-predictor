@@ -3,8 +3,9 @@
 Tonight's /predict, another date's /predict and the 7-day /forecast used to
 each fetch the same forecast hours for weather, aerosol and the ensemble.
 They now slice one cached fetch, which returns the same values (same model,
-same hours). The six-point corridor is still fetched per date / per month,
-because its points follow each date's own sunset azimuth.
+same hours). The six-point corridor follows each date's own sunset azimuth:
+exact for tonight and tomorrow, rounded to 1° after that so consecutive
+evenings share one fetch — and /predict and /forecast share them all.
 """
 from __future__ import annotations
 
@@ -101,11 +102,13 @@ async def test_tonight_other_date_and_forecast_share_one_fetch_per_endpoint():
     await _predict_reads(svc, today + timedelta(days=3))
     windows, corridor, spread = await _forecast_reads(svc)
 
-    forecast_months = len({(d.year, d.month) for d, _ in windows})
+    # Corridor: tonight, tomorrow, then one per distinct rounded azimuth
+    # (day+3's /predict fetch is one of those, reused by the forecast).
+    astro = AstronomyService()
+    buckets = {round(astro.get_sunset_azimuth(LAT, LON, today + timedelta(days=k))) for k in range(2, 7)}
     assert fake.calls == {
         "api": 1, "air-quality-api": 1, "ensemble-api": 1,
-        # unchanged: one per predicted date + one per month of the forecast
-        "api+multi": 2 + forecast_months,
+        "api+multi": 2 + len(buckets),
     }
     assert len(windows) == 7
     assert set(corridor) == {d for d, _ in windows}
@@ -153,9 +156,10 @@ async def test_date_past_the_bundle_falls_back_to_its_own_fetch():
 
 
 @pytest.mark.asyncio
-async def test_day_six_keeps_its_own_fetch_and_model():
-    """Day 6's own fetch asked for 8 days, past icon_seamless, so it used
-    `auto`. Sharing the 7-day icon bundle would change its reading."""
+async def test_day_six_reads_the_icon_bundle():
+    """Day 6's window ends inside the 7-day icon_seamless horizon, so it
+    reads the bundle /forecast reads. (Its own fetch used to ask for 8 days,
+    which fell back to `auto` and failed the 7-day aerosol API.)"""
     seen = []
     fake = CountingOpenMeteo()
 
@@ -168,4 +172,4 @@ async def test_day_six_keeps_its_own_fetch_and_model():
     today = datetime.now(UTC).date()
     await _predict_reads(svc, today + timedelta(days=5))
     await _predict_reads(svc, today + timedelta(days=6))
-    assert seen == ["icon_seamless", None]
+    assert seen == ["icon_seamless"]

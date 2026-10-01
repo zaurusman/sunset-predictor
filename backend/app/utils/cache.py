@@ -154,7 +154,7 @@ class TTLCache:
             self._enforce_budget()
             self._mark_dirty()
         if ttl >= DURABLE_MIN_TTL_SECONDS and isinstance(packed, bytes):
-            self._enqueue_durable(key, packed, expires_at)
+            self._enqueue_durable(key, packed, expires_at, expires_at - ttl)
 
     def delete(self, key: str) -> None:
         with self._lock:
@@ -219,13 +219,16 @@ class TTLCache:
             # Rows arrive latest-expiry first; insert in reverse so those end
             # up most recently used — the last to go if the budget is tight.
             # Values stay compressed: nothing is decoded until it is read.
-            for key, blob, expires_at in reversed(rows):
+            for key, blob, expires_at, stored_at in reversed(rows):
                 current = self._store.get(key)
                 if current is not None and current[1] >= expires_at:
                     continue
                 self._drop(key)
                 packed = normalize_blob(blob)
                 self._store[key] = (packed, expires_at)
+                if stored_at is not None:
+                    # Lets get_fresh judge it against model runs, as before the restart.
+                    self._stored_at[key] = stored_at
                 self._bytes += len(packed)
                 loaded += 1
             if loaded:
@@ -254,7 +257,7 @@ class TTLCache:
         finally:
             self._durable = self._durable_task = self._durable_queue = self._durable_loop = None
 
-    def _enqueue_durable(self, key: str, blob: bytes, expires_at: float) -> None:
+    def _enqueue_durable(self, key: str, blob: bytes, expires_at: float, stored_at: float) -> None:
         if self._durable_queue is None:
             return
         try:
@@ -262,7 +265,7 @@ class TTLCache:
                 return
         except RuntimeError:  # sync caller with no loop (scripts): memory only
             return
-        self._durable_queue.put_nowait((key, blob, expires_at))
+        self._durable_queue.put_nowait((key, blob, expires_at, stored_at))
 
     async def _durable_writer(self) -> None:
         """One background writer. A cold location sets its archive months and

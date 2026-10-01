@@ -28,7 +28,12 @@ CREATE TABLE IF NOT EXISTS cache_entries (
     value      bytea NOT NULL,
     expires_at timestamptz NOT NULL
 );
+ALTER TABLE cache_entries ADD COLUMN IF NOT EXISTS stored_at timestamptz;
 """
+# stored_at: when the entry was set. A forecast entry read through
+# TTLCache.get_fresh is only current if it was stored after the newest model
+# run; without the time, a restored entry could never count as current and
+# was re-downloaded after every deploy. NULL on rows written before it existed.
 
 
 # zlib level 1: cached weather (lists of floats, repeated dict keys) shrinks
@@ -71,21 +76,23 @@ class PostgresCacheTier:
 
     async def load_all(
         self, grace: float, budget_bytes: Optional[int] = None
-    ) -> list[tuple[str, bytes, float]]:
-        """Rows not yet past expiry + *grace* (kept for get_stale), latest
-        expiry first, stopping once *budget_bytes* of values are collected.
+    ) -> list[tuple[str, bytes, float, Optional[float]]]:
+        """``(key, value, expires_at, stored_at)`` rows not yet past expiry +
+        *grace* (kept for get_stale), latest expiry first, stopping once
+        *budget_bytes* of values are collected. stored_at is None for rows
+        written before it was recorded.
 
         Streamed through a cursor so the table can outgrow the instance's RAM
         without the startup load running it out of memory: before this, an
         OOM restart reloaded everything and ran out again.
         """
         since = datetime.now(timezone.utc) - timedelta(seconds=grace)
-        rows: list[tuple[str, bytes, float]] = []
+        rows: list[tuple[str, bytes, float, Optional[float]]] = []
         total = 0
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 async for r in conn.cursor(
-                    "SELECT key, value, expires_at FROM cache_entries"
+                    "SELECT key, value, expires_at, stored_at FROM cache_entries"
                     " WHERE expires_at > $1 ORDER BY expires_at DESC",
                     since, prefetch=50,
                 ):
@@ -93,17 +100,21 @@ class PostgresCacheTier:
                     if budget_bytes is not None and total + len(blob) > budget_bytes:
                         break
                     total += len(blob)
-                    rows.append((r["key"], blob, r["expires_at"].timestamp()))
+                    stored = r["stored_at"]
+                    rows.append((r["key"], blob, r["expires_at"].timestamp(),
+                                 stored.timestamp() if stored is not None else None))
         return rows
 
-    async def write_many(self, rows: list[tuple[str, bytes, float]]) -> None:
+    async def write_many(self, rows: list[tuple[str, bytes, float, float]]) -> None:
+        """Upsert ``(key, value, expires_at, stored_at)`` rows."""
         await self._pool.executemany(
             """
-            INSERT INTO cache_entries (key, value, expires_at) VALUES ($1, $2, $3)
+            INSERT INTO cache_entries (key, value, expires_at, stored_at) VALUES ($1, $2, $3, $4)
             ON CONFLICT (key) DO UPDATE
-               SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
+               SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at,
+                   stored_at = EXCLUDED.stored_at
             """,
-            [(k, v, _to_ts(exp)) for k, v, exp in rows],
+            [(k, v, _to_ts(exp), _to_ts(st)) for k, v, exp, st in rows],
         )
 
     async def purge_expired(self, grace: float) -> None:

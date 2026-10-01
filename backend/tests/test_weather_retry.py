@@ -429,7 +429,9 @@ async def test_corridor_map_falls_back_to_stale_when_provider_down(monkeypatch):
 
     monkeypatch.setattr(svc, "_fetch_corridor_month", down)
 
-    today = datetime.now(UTC).date()
+    # Past dates: forecast dates go through get_corridor_samples (and its own
+    # stale fallback); the month batch serves history.
+    today = datetime.now(UTC).date() - timedelta(days=20)
     tomorrow = today + timedelta(days=1)
     if tomorrow.month != today.month:  # keep both dates in one month's batch
         today, tomorrow = today - timedelta(days=1), today

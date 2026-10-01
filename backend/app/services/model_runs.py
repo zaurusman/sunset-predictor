@@ -48,12 +48,19 @@ _DUE_EARLY = 600.0      # ...starting 10 min before it is expected
 _FAIL_RETRY = 180.0     # after a failed read, try again in 3 min
 _TRUST_FOR = 2 * 3600.0  # stop trusting metadata not refreshed for this long
 
+# The model whose 00 UTC run is the day's longest forecast, per family: the
+# one a once-a-day refresh waits for (see ModelRunClock.daily_run).
+DAILY_MODEL: dict[str, str] = {"forecast": "dwd_icon"}
+
+_DAY = 86_400.0
+
 _BBOX = re.compile(r"BBOX\[([^\]]+)\]")
 
 
 @dataclass
 class _ModelState:
     available: float            # epoch seconds the latest run became available
+    initialised: float          # epoch seconds of that run's initialisation (model time)
     interval: float             # seconds between runs
     bbox: Optional[tuple[float, float, float, float]]  # lat_min, lon_min, lat_max, lon_max
     read_at: float              # last successful read
@@ -74,6 +81,7 @@ def _parse(meta: dict, now: float) -> _ModelState:
         bbox = (min(a, c), min(b, d), max(a, c), max(b, d))
     return _ModelState(
         available=float(meta["last_run_availability_time"]),
+        initialised=float(meta.get("last_run_initialisation_time") or meta["last_run_availability_time"]),
         interval=float(meta.get("update_interval_seconds") or 3600),
         bbox=bbox,
         read_at=now,
@@ -108,6 +116,25 @@ class ModelRunClock:
             if state.covers(lat, lon):
                 latest = state.available if latest is None else max(latest, state.available)
         return latest
+
+    async def daily_run(self, family: str, lat: float, lon: float) -> Optional[float]:
+        """When the newest 00 UTC run of the family's long-range model became
+        available (estimated), or None if that isn't reliably known.
+
+        Only the latest run is tracked, so the 00 UTC run's availability is
+        estimated from the latest run's: same publication delay, counted from
+        00 UTC of the day it belongs to. Exact when the latest run IS the
+        00 UTC one; otherwise off by however much the delay varies (minutes).
+        """
+        model = DAILY_MODEL.get(family)
+        if model is None:
+            return None
+        host_attr, _ = FAMILIES[family]
+        state = await self._current(host_attr, model)
+        if state is None or self._clock() - state.read_at > _TRUST_FOR or not state.covers(lat, lon):
+            return None
+        midnight = state.initialised - state.initialised % _DAY
+        return midnight + (state.available - state.initialised)
 
     async def _current(self, host_attr: str, model: str) -> Optional[_ModelState]:
         if self._due(model):

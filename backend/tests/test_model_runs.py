@@ -123,11 +123,21 @@ class FakeRuns:
         now = datetime.now(UTC).timestamp()
         self.latest = {"forecast": now - 3600, "aq": now - 3600, "ensemble": now - 3600}
 
+        self.daily = now - 3600
+
     async def latest_run(self, family, lat, lon):
         return self.latest[family]
 
+    async def daily_run(self, family, lat, lon):
+        return self.daily
+
     def publish(self, family: str) -> None:
         self.latest[family] = datetime.now(UTC).timestamp()
+
+    def publish_daily(self) -> None:
+        """The day's 00 UTC run: also a new run of the forecast family."""
+        self.daily = datetime.now(UTC).timestamp()
+        self.latest["forecast"] = self.daily
 
 
 def _tracked_service(fake):
@@ -186,3 +196,72 @@ async def test_tonight_stays_frozen_after_sunset_even_if_a_run_publishes():
     after = await svc.get_window_snapshots(LAT, LON, today, over)
     assert after == before
     assert fake.calls["api"] == 1
+
+
+@pytest.mark.asyncio
+async def test_daily_run_is_the_00utc_run_estimated_from_the_latest():
+    day = 1_790_208_000.0  # a 00:00 UTC
+    clock = Clock(day + 10 * 3600)
+
+    def meta(request: httpx.Request) -> httpx.Response:
+        # Latest ICON global run: 06 UTC, available 3 h 29 min later.
+        return httpx.Response(200, json={
+            "last_run_initialisation_time": int(day + 6 * 3600),
+            "last_run_availability_time": int(day + 9 * 3600 + 29 * 60),
+            "update_interval_seconds": 21600, "crs_wkt": "GEOGCRS[]",
+        })
+
+    runs = ModelRunClock(httpx.AsyncClient(transport=httpx.MockTransport(meta)), Settings(), clock=clock)
+    assert await runs.daily_run("forecast", 32.08, 34.78) == day + 3 * 3600 + 29 * 60
+    assert await runs.daily_run("aq", 32.08, 34.78) is None
+
+
+@pytest.mark.asyncio
+async def test_day2_on_corridor_refreshes_once_a_day_tonight_and_tomorrow_every_run():
+    fake = CountingOpenMeteo()
+    svc = _tracked_service(fake)
+    astro = svc._astro
+    today = datetime.now(UTC).date()
+
+    async def corridor(k: int):
+        d = today + timedelta(days=k)
+        return await svc.get_corridor_samples(LAT, LON, d, astro.get_sunset_time(LAT, LON, d))
+
+    assert await corridor(1) and await corridor(3)
+    assert fake.calls["api+multi"] == 2
+
+    svc._runs.publish("forecast")          # a 3-hourly run: tomorrow only
+    await corridor(1)
+    await corridor(3)
+    assert fake.calls["api+multi"] == 3
+
+    svc._runs.publish_daily()              # the day's 00 UTC run: both
+    await corridor(1)
+    await corridor(3)
+    assert fake.calls["api+multi"] == 5
+
+
+@pytest.mark.asyncio
+async def test_day2_on_corridor_survives_a_deploy_without_refetching():
+    """Day-long corridor entries are written to the durable tier with their
+    store time, so after a restart they are still current — not refetched."""
+    from app.utils.cache import TTLCache
+    from tests.test_durable_cache import FakeTier
+
+    tier = FakeTier()
+    fake = CountingOpenMeteo()
+    d = datetime.now(UTC).date() + timedelta(days=3)
+
+    async def corridor_after_start() -> list:
+        svc = _tracked_service(fake)
+        svc._cache = TTLCache()
+        await svc._cache.attach_durable(tier, linger_seconds=0)
+        try:
+            return await svc.get_corridor_samples(LAT, LON, d, svc._astro.get_sunset_time(LAT, LON, d))
+        finally:
+            await svc._cache.close_durable()
+
+    first = await corridor_after_start()
+    assert fake.calls["api+multi"] == 1
+    assert await corridor_after_start() == first   # "after the deploy"
+    assert fake.calls["api+multi"] == 1
