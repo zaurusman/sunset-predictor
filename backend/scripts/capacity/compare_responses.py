@@ -19,7 +19,8 @@ SNAPSHOT = r'''
 import asyncio, json, os, sys
 backend, out = sys.argv[1], sys.argv[2]
 sys.path.insert(0, backend)
-os.environ.update(CACHE_PERSIST_PATH="", DATABASE_URL="", VAPID_PRIVATE_KEY="")
+os.environ.update(CACHE_PERSIST_PATH="", DATABASE_URL="", VAPID_PRIVATE_KEY="",
+                  RATE_LIMIT_CLIENT_HOURLY_CALLS="0", OPEN_METEO_DAILY_SOFT_CAP="0")
 from datetime import date, timedelta
 import httpx
 from asgi_lifespan import LifespanManager

@@ -16,6 +16,7 @@ from app.schemas.weather import WeatherOverride, WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.utils.geo import destination_point
 from app.utils.cache import TTLCache
+from app.utils.call_budget import CallBudget, weighted_cost
 
 logger = get_logger(__name__)
 UTC = timezone.utc
@@ -149,8 +150,10 @@ class WeatherService:
         astro_service: AstronomyService,
         cache: TTLCache,
         settings: Settings,
+        budget: Optional[CallBudget] = None,
     ) -> None:
         self._http = http_client
+        self.budget = budget
         self._astro = astro_service
         self._cache = cache
         self._settings = settings
@@ -1214,6 +1217,8 @@ class WeatherService:
         max_retries = self._settings.HTTP_MAX_RETRIES
         last_exc: Exception | None = None
         reason = ""
+        if self.budget is not None:
+            self.budget.charge(weighted_cost(params))
 
         for attempt in range(max_retries + 1):
             try:

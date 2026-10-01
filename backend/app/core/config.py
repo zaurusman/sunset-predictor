@@ -117,6 +117,15 @@ class Settings(BaseSettings):
     # 429 "Too many concurrent requests" on the free API.
     OPEN_METEO_MAX_CONCURRENCY: int = 3
 
+    # ── Open-Meteo call budget (app/utils/call_budget.py) ────────────────────
+    # Weighted Open-Meteo calls one client may cause per rolling hour before
+    # its requests get 429. A heavy legitimate session — five new places,
+    # each with a heatmap — is ~800; cached requests cost nothing. 0 = off.
+    RATE_LIMIT_CLIENT_HOURLY_CALLS: float = 1000
+    # Past this many weighted calls in 24 h (free limit: 10,000/day), new
+    # heatmaps and climatology builds pause so predictions keep working. 0 = off.
+    OPEN_METEO_DAILY_SOFT_CAP: float = 8500
+
     # ── Email / photo submission ──────────────────────────────────────────────
     # Resend API key for sending photo submissions to the developer.
     # Leave RESEND_API_KEY empty to disable the /submit-photo endpoint entirely.
