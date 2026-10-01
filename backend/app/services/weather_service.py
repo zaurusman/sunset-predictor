@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import math
 import random
 from datetime import date, datetime, timedelta, timezone
@@ -651,7 +652,7 @@ class WeatherService:
         times = hourly.get("_times_parsed") or [
             datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs
         ]
-        idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+        idx = _nearest_hour_index(times, sunset_time)
 
         def get(key: str) -> float:
             vals = hourly.get(key, [])
@@ -906,7 +907,7 @@ class WeatherService:
         member_keys = [k for k in hourly if k.startswith("cloud_cover_member")]
 
         for d, sunset_time in in_range:
-            idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+            idx = _nearest_hour_index(times, sunset_time)
             members = [
                 hourly[k][idx] for k in member_keys
                 if idx < len(hourly[k]) and hourly[k][idx] is not None
@@ -1208,7 +1209,7 @@ class WeatherService:
         ]
 
         # Find index of the hour nearest to sunset
-        idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+        idx = _nearest_hour_index(times, sunset_time)
 
         def get(key: str, default: float = 0.0) -> float:
             values = hourly.get(key, [])
@@ -1249,13 +1250,10 @@ class WeatherService:
             aq_hourly = aq_data.get("hourly", {})
             aq_times_raw: list[str] = aq_hourly.get("time", [])
             if aq_times_raw:
-                aq_times = [
+                aq_times = aq_hourly.get("_times_parsed") or [
                     datetime.fromisoformat(t).replace(tzinfo=UTC) for t in aq_times_raw
                 ]
-                aq_idx = min(
-                    range(len(aq_times)),
-                    key=lambda i: abs((aq_times[i] - sunset_time).total_seconds()),
-                )
+                aq_idx = _nearest_hour_index(aq_times, sunset_time)
                 aod_vals = aq_hourly.get("aerosol_optical_depth", [])
                 if aq_idx < len(aod_vals) and aod_vals[aq_idx] is not None:
                     aerosol_od = float(aod_vals[aq_idx])
@@ -1364,7 +1362,7 @@ class WeatherService:
         times = hourly.get("_times_parsed") or [
             datetime.fromisoformat(t).replace(tzinfo=UTC) for t in time_strs
         ]
-        sunset_idx = min(range(len(times)), key=lambda i: abs((times[i] - sunset_time).total_seconds()))
+        sunset_idx = _nearest_hour_index(times, sunset_time)
         past_idx = max(0, sunset_idx - 3)
 
         def get(key: str, idx: int, default: float = 0.0) -> float:
@@ -1466,6 +1464,22 @@ def _copy_raw(data: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if data is None:
         return None
     return {**data, "hourly": dict(data.get("hourly", {}))}
+
+
+def _nearest_hour_index(times: list[datetime], target: datetime) -> int:
+    """Index of the row in *times* nearest *target* (the earlier on a tie).
+
+    *times* is ascending — Open-Meteo returns hours in order and
+    _merge_raw only concatenates time-ordered chunks — so a binary search
+    replaces the linear scan. The heatmap does ~856 lookups over a ~4,800-hour
+    series; scanning made that ~10 s of CPU (~50 s on Render) on the event loop.
+    """
+    i = bisect.bisect_left(times, target)
+    if i == 0:
+        return 0
+    if i == len(times):
+        return len(times) - 1
+    return i - 1 if target - times[i - 1] <= times[i] - target else i
 
 
 def _prepopulate_parsed_times(data: dict) -> None:
