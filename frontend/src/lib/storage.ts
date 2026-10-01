@@ -10,11 +10,12 @@
  * cookies) or hold data written by an older version of the app.
  */
 
-import type { LocationState, PredictResponse } from "./types";
+import type { ForecastResponse, LocationState, PredictResponse } from "./types";
 
 const LOCATION_KEY = "afterglow:location";
 const PLACES_KEY = "afterglow:places";
 const PREDICTION_KEY = "afterglow:lastPrediction";
+const FORECAST_KEY = "afterglow:lastForecast";
 
 /** How many saved places the location sheet will keep. */
 export const MAX_SAVED_PLACES = 5;
@@ -151,4 +152,41 @@ export function saveCachedPrediction(
     cachedAt: new Date().toISOString(),
   };
   writeJson(PREDICTION_KEY, entry);
+}
+
+// ---------------------------------------------------------------------------
+// Last 7-day forecast
+// ---------------------------------------------------------------------------
+
+export interface CachedForecast {
+  forecast: ForecastResponse;
+  location: LocationState;
+  /** ISO timestamp of when this forecast was fetched. */
+  cachedAt: string;
+}
+
+/**
+ * The most recent 7-day forecast for this location, minus days already past
+ * — shown while a new one loads, and kept on screen if the weather service
+ * is busy.
+ */
+export function loadCachedForecast(
+  location: LocationState | null,
+  today: string
+): CachedForecast | null {
+  const stored = readJson<CachedForecast>(FORECAST_KEY);
+  if (!Array.isArray(stored?.forecast?.days) || !isLocation(stored.location)) return null;
+  if (location && !sameLocation(stored.location, location)) return null;
+
+  const age = Date.now() - new Date(stored.cachedAt).getTime();
+  if (!Number.isFinite(age) || age > MAX_CACHE_AGE_MS) return null;
+
+  const days = stored.forecast.days.filter((d) => d.date >= today);
+  if (days.length === 0) return null;
+  return { ...stored, forecast: { ...stored.forecast, days } };
+}
+
+export function saveCachedForecast(location: LocationState, forecast: ForecastResponse): void {
+  const entry: CachedForecast = { forecast, location, cachedAt: new Date().toISOString() };
+  writeJson(FORECAST_KEY, entry);
 }

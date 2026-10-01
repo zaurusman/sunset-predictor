@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { heatmap as fetchHeatmap } from "@/lib/api";
+import { heatmap as fetchHeatmap, isServiceBusy } from "@/lib/api";
 import type { HeatmapDay, HeatmapResponse, LocationState } from "@/lib/types";
 import { loadLocation } from "@/lib/storage";
 
@@ -90,6 +90,8 @@ function HeatmapContent() {
   const [data, setData] = useState<HeatmapResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The last load failed only because the weather service is busy. */
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(
     async (loc: LocationState, m: MonthsOption, force = false) => {
@@ -104,6 +106,7 @@ function HeatmapContent() {
 
       setLoading(true);
       setError(null);
+      setBusy(false);
       try {
         const result = await fetchHeatmap({
           lat: loc.latitude,
@@ -113,6 +116,7 @@ function HeatmapContent() {
         dataCache.current.set(m, result);
         setData(result);
       } catch (err) {
+        setBusy(isServiceBusy(err));
         setError(err instanceof Error ? err.message : "Failed to load sunset history.");
       } finally {
         setLoading(false);
@@ -183,7 +187,12 @@ function HeatmapContent() {
       {error && (
         <div className="mb-5">
           <ErrorAlert
-            message={error}
+            variant={busy ? "busy" : "error"}
+            message={
+              busy
+                ? "The weather service is busy right now, so sunset history can't load yet. Tonight's forecast may still work. Try again in a little while."
+                : error
+            }
             onRetry={location ? () => load(location, months, true) : undefined}
           />
         </div>
