@@ -20,6 +20,10 @@ async def geocode(
     url = f"{settings.OPEN_METEO_GEOCODING_URL}/search"
     params = {"name": name, "count": count, "language": "en", "format": "json"}
 
+    budget = getattr(request.app.state, "call_budget", None)
+    if budget is not None:
+        budget.charge(1.0)
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(url, params=params)

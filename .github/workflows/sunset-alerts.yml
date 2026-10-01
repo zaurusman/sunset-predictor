@@ -5,6 +5,8 @@ name: Sunset alerts
 on:
   schedule:
     - cron: "7 * * * *"
+    # Weekly keepalive (job below). Keep this string in sync with the `if`s.
+    - cron: "37 3 * * 1"
   workflow_dispatch:
     inputs:
       force:
@@ -14,15 +16,44 @@ on:
 
 jobs:
   run:
+    if: github.event.schedule != '37 3 * * 1'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 40
+    concurrency: alert-run   # never two paced runs at once
     steps:
-      - name: Trigger alert run
+      # Each call checks at most ALERT_CELLS_PER_CALL places and reports how
+      # many are still due. Calling again a minute later spreads a busy hour's
+      # Open-Meteo traffic over several minutes instead of one burst, leaving
+      # the per-minute limit to people using the app.
+      - name: Trigger alert run (paced)
         env:
           API: ${{ secrets.ALERTS_API_URL }}
           SECRET: ${{ secrets.ALERTS_SECRET }}
           FORCE: ${{ inputs.force && '1' || '0' }}
         run: |
-          curl -fsS --retry 3 --retry-delay 20 --max-time 120 \
-            -X POST -H "X-Alerts-Secret: $SECRET" \
-            "$API/internal/alerts/run?force=$FORCE"
+          for i in $(seq 1 30); do
+            out=$(curl -fsS --retry 3 --retry-delay 20 --max-time 120 \
+              -X POST -H "X-Alerts-Secret: $SECRET" \
+              "$API/internal/alerts/run?force=$FORCE")
+            echo "$out"
+            remaining=$(echo "$out" | jq -r '.remaining // 0')
+            checked=$(echo "$out" | jq -r '.cells_checked // 0')
+            # Done, or no progress (Open-Meteo down): the next hour retries.
+            if [ "$remaining" -eq 0 ] || [ "$checked" -eq 0 ]; then break; fi
+            sleep 60
+          done
+
+  # GitHub silently disables scheduled workflows in a public repo after 60
+  # days without repository activity — the alerts would just stop. Re-enabling
+  # the workflow through the API resets that timer; no dummy commits needed.
+  keepalive:
+    if: github.event.schedule == '37 3 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Reset the 60-day inactivity timer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/sunset-alerts.yml/enable"

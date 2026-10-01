@@ -64,4 +64,5 @@ async def run_alerts(
     service = getattr(request.app.state, "alert_service", None)
     if service is None:
         raise HTTPException(status_code=503, detail=_DISABLED)
-    return await service.run(force=force)
+    per_call = request.app.state.settings.ALERT_CELLS_PER_CALL
+    return await service.run(force=force, max_cells=per_call or None)

@@ -13,6 +13,7 @@ from typing import AsyncIterator
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
 from app.api import health, predict, forecast, heatmap, model_info, geocode, submit, rate, push
 from app.core.config import settings
@@ -22,6 +23,7 @@ from app.models.model_registry import ModelRegistry
 from app.services.alert_service import AlertService, prediction_predictor
 from app.services.astronomy_service import AstronomyService
 from app.services.climatology_service import ClimatologyService
+from app.services.model_runs import ModelRunClock
 from app.services.explanation_engine import ExplanationEngine
 from app.services.prediction_service import PredictionService
 from app.services.push_sender import WebPushSender
@@ -30,6 +32,7 @@ from app.services.scoring_engine import ScoringEngine
 from app.services.subscription_store import PostgresSubscriptionStore
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
+from app.utils.call_budget import CallBudget, client_key, current_client
 from app.utils.durable_cache import PostgresCacheTier
 from app.utils.time_utils import local_sunset_date
 
@@ -61,12 +64,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ttl_seconds=settings.CACHE_TTL_SECONDS,
         persist_path=settings.CACHE_PERSIST_PATH or None,
         stale_grace_seconds=settings.CACHE_STALE_GRACE_SECONDS,
+        memory_budget_bytes=int(settings.CACHE_MEMORY_BUDGET_MB * 1e6),
+        persist_interval=settings.CACHE_PERSIST_INTERVAL_SECONDS,
     )
     logger.info(
-        "Weather cache: ttl=%ss, stale_grace=%ss, persist=%s",
+        "Weather cache: ttl=%ss, stale_grace=%ss, budget=%.0f MB, persist=%s",
         settings.CACHE_TTL_SECONDS,
         settings.CACHE_STALE_GRACE_SECONDS,
+        settings.CACHE_MEMORY_BUDGET_MB,
         settings.CACHE_PERSIST_PATH or "disabled",
+    )
+    budget = CallBudget(
+        client_hourly_limit=settings.RATE_LIMIT_CLIENT_HOURLY_CALLS,
+        daily_soft_cap=settings.OPEN_METEO_DAILY_SOFT_CAP,
     )
     registry = ModelRegistry(settings=settings)
     rating_store = RatingStore(path=settings.RATINGS_PATH)
@@ -78,6 +88,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         astro_service=astro_service,
         cache=cache,
         settings=settings,
+        budget=budget,
+        runs=ModelRunClock(http_client, settings) if settings.MODEL_RUN_TRACKING else None,
     )
     scoring_engine = ScoringEngine()
     explanation_engine = ExplanationEngine()
@@ -146,6 +158,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Attach to app state for injection via Request
     app.state.settings = settings
+    app.state.call_budget = budget
     app.state.prediction_service = prediction_service
     app.state.ml_model = ml_model
     app.state.rating_store = rating_store
@@ -162,6 +175,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Shutting down…")
     await http_client.aclose()
     await cache.close_durable()
+    cache.close()
     if subscription_store is not None:
         await subscription_store.close()
 
@@ -192,6 +206,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Added last, so it runs first; its own 429 carries the CORS header.
+    app.add_middleware(CallBudgetMiddleware)
+
     # Routers
     app.include_router(health.router)
     app.include_router(predict.router)
@@ -204,6 +221,54 @@ def create_app() -> FastAPI:
     app.include_router(push.router)
 
     return app
+
+
+# Endpoints that can make Open-Meteo calls.
+_BUDGETED_PATHS = ("/predict", "/forecast", "/heatmap", "/geocode", "/rate")
+
+
+class CallBudgetMiddleware:
+    """Tags each request with its client (so Open-Meteo calls it causes are
+    charged to it) and refuses it up front, with 429, once that client is over
+    RATE_LIMIT_CLIENT_HOURLY_CALLS. See app/utils/call_budget.py."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self._logged_source = False
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith(_BUDGETED_PATHS):
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
+        peer = scope["client"][0] if scope.get("client") else None
+        client = client_key(headers, peer)
+        if not self._logged_source:
+            # Once per process: shows in Render's logs which header is used.
+            self._logged_source = True
+            source = ("cf-connecting-ip" if "cf-connecting-ip" in headers
+                      else "x-forwarded-for" if "x-forwarded-for" in headers else "socket peer")
+            logger.info("Call budget: client IP taken from %s", source)
+
+        budget = getattr(scope.get("app").state, "call_budget", None) if scope.get("app") else None
+        if budget is not None and scope["method"] != "OPTIONS":
+            retry_after = budget.client_retry_after(client)
+            if retry_after is not None:
+                logger.warning("Call budget: %s over its hourly limit, refusing %s", client, scope["path"])
+                minutes = max(1, round(retry_after / 60))
+                response = JSONResponse(
+                    {"detail": f"Too many new places in a short time — please try again in about {minutes} min."},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after), "Access-Control-Allow-Origin": "*"},
+                )
+                await response(scope, receive, send)
+                return
+
+        token = current_client.set(client)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            current_client.reset(token)
 
 
 app = create_app()
