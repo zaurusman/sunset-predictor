@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Camera } from "lucide-react";
-import { predict } from "@/lib/api";
+import { isServiceBusy, predict } from "@/lib/api";
 import type { LocationState, PredictResponse } from "@/lib/types";
 import {
   loadCachedPrediction,
@@ -44,6 +44,8 @@ function HomeContent() {
   const [cachedAt, setCachedAt] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The last refresh failed only because the weather service is busy. */
+  const [busy, setBusy] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [photoOpen, setPhotoOpen] = useState(false);
   /** Bumped when alerts are switched on, so the location sheet re-reads its bells. */
@@ -57,6 +59,7 @@ function HomeContent() {
       const ticket = ++requestRef.current;
       setRefreshing(true);
       setError(null);
+      setBusy(false);
 
       try {
         const result = await predict({
@@ -71,6 +74,7 @@ function HomeContent() {
         saveCachedPrediction(loc, date, result);
       } catch (err) {
         if (ticket !== requestRef.current) return;
+        setBusy(isServiceBusy(err));
         setError(err instanceof Error ? err.message : "Couldn't reach the forecast.");
       } finally {
         if (ticket === requestRef.current) setRefreshing(false);
@@ -186,10 +190,15 @@ function HomeContent() {
       {error && (
         <div className="mb-5">
           <ErrorAlert
+            variant={busy ? "busy" : "error"}
             message={
-              prediction
-                ? `Showing the last reading — ${error}`
-                : error
+              busy
+                ? prediction
+                  ? `The weather service is busy right now, so this is your last reading${cachedAt ? ` (updated ${freshnessLabel(cachedAt)})` : ""}. Try again in a little while.`
+                  : "The weather service is busy right now, so this forecast can't load yet. Try again in a little while."
+                : prediction
+                  ? `Showing the last reading — ${error}`
+                  : error
             }
             onRetry={() => fetchPrediction(location, selectedDate)}
           />
