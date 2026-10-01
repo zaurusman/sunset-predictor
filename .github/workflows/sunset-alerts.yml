@@ -5,6 +5,8 @@ name: Sunset alerts
 on:
   schedule:
     - cron: "7 * * * *"
+    # Weekly keepalive (job below). Keep this string in sync with the `if`s.
+    - cron: "37 3 * * 1"
   workflow_dispatch:
     inputs:
       force:
@@ -14,6 +16,7 @@ on:
 
 jobs:
   run:
+    if: github.event.schedule != '37 3 * * 1'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -26,3 +29,18 @@ jobs:
           curl -fsS --retry 3 --retry-delay 20 --max-time 120 \
             -X POST -H "X-Alerts-Secret: $SECRET" \
             "$API/internal/alerts/run?force=$FORCE"
+
+  # GitHub silently disables scheduled workflows in a public repo after 60
+  # days without repository activity — the alerts would just stop. Re-enabling
+  # the workflow through the API resets that timer; no dummy commits needed.
+  keepalive:
+    if: github.event.schedule == '37 3 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Reset the 60-day inactivity timer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/sunset-alerts.yml/enable"
