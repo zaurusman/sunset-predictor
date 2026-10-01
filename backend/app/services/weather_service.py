@@ -33,6 +33,21 @@ _RETRYABLE_STATUS = {429}
 # forecast.
 ICON_SEAMLESS_MAX_DAYS = 7
 
+# The air-quality API rejects forecast_days above 7 with a 400 ("Allowed range
+# 0 to 7"), which _fetch_air_quality_raw turns into the humidity proxy. Asking
+# for 8 is what made /predict day+6 score with an estimated aerosol while
+# /forecast, which asked for 7, got the measured one.
+_AQ_MAX_FORECAST_DAYS = 7
+
+# From day+2 on, a forecast date's corridor is fetched along its sunset
+# azimuth rounded to this step, so consecutive evenings whose azimuths round
+# alike share one fetch. At 1° the rounding moves the farthest point (400 km)
+# by at most ~3.5 km, under one ICON grid cell. Tonight and tomorrow keep
+# their exact azimuth: tonight is the reading people check daily, and must
+# not move because of a fetch-sharing optimisation.
+_CORRIDOR_AZIMUTH_STEP_DEG = 1.0
+_CORRIDOR_EXACT_AZIMUTH_DAYS = 1
+
 # A complete archive month never changes (ERA5 is final), so it is cached for
 # a month and shared by every caller — the heatmap and the climatology build
 # fetch overlapping history, and used to pay for it twice.
@@ -359,9 +374,7 @@ class WeatherService:
                     )
                     data_source = "archive"
             else:
-                days_ahead = (target_date - today).days + 1
-                weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
-                aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
+                weather_data, aq_data = await self._fetch_forecast_for(lat, lon, sunset_time, today)
                 data_source = "forecast"
         except WeatherUnavailableError as exc:
             return self._stale_or_raise(cache_key, exc, "window snapshots")
@@ -395,25 +408,41 @@ class WeatherService:
             return cached
 
         today = datetime.now(UTC).date()
+        dates = [today + timedelta(days=offset) for offset in range(days)]
+        sunsets = {d: self._astro.get_sunset_time(lat, lon, d) for d in dates}
+        # The same fetches /predict makes for each of these evenings (see
+        # _forecast_fetch_days): the icon_seamless horizon for every evening
+        # whose window ends inside it, one `auto` fetch for any beyond.
+        beyond = max(
+            (_forecast_fetch_days(st, today) for st in sunsets.values()), default=0
+        )
         try:
-            weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
+            weather_icon = await self._fetch_forecast_raw(lat, lon, days=ICON_SEAMLESS_MAX_DAYS)
+            weather_auto = (
+                await self._fetch_forecast_raw(lat, lon, days=beyond)
+                if beyond > ICON_SEAMLESS_MAX_DAYS else None
+            )
         except WeatherUnavailableError as exc:
             stale = self._stale_or_raise(cache_key, exc, "forecast range windows")
             # A stale range may have been built before midnight.
             return [(d, w) for d, w in stale if d >= today]
-        aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
+        aq_data = await self._fetch_air_quality_raw(lat, lon, days=_AQ_MAX_FORECAST_DAYS)
 
         # Pre-parse timestamps once so the per-day extraction loop doesn't
         # re-parse the same list on every call to _extract_snapshot_for_hour.
-        _prepopulate_parsed_times(weather_data)
-        if aq_data is not None:
-            _prepopulate_parsed_times(aq_data)
+        for raw in (weather_icon, weather_auto, aq_data):
+            if raw is not None:
+                _prepopulate_parsed_times(raw)
 
         results: list[tuple[date, list[WeatherSnapshot]]] = []
-        for offset in range(days):
-            d = today + timedelta(days=offset)
+        for d in dates:
             try:
-                sunset_time = self._astro.get_sunset_time(lat, lon, d)
+                sunset_time = sunsets[d]
+                weather_data = (
+                    weather_icon
+                    if _forecast_fetch_days(sunset_time, today) == ICON_SEAMLESS_MAX_DAYS
+                    else weather_auto
+                )
                 window_snaps = self._extract_window_snapshots_from_raw(
                     weather_data, aq_data, lat, lon, sunset_time, "forecast"
                 )
@@ -465,24 +494,47 @@ class WeatherService:
             return cached
 
         try:
+            today = datetime.now(UTC).date()
+            days_ago = (today - target_date).days
             azimuth = self._astro.get_sunset_azimuth(lat, lon, target_date)
+            on_icon = (
+                target_date >= today
+                and _forecast_fetch_days(sunset_time, today) == ICON_SEAMLESS_MAX_DAYS
+            )
+            if on_icon and (target_date - today).days > _CORRIDOR_EXACT_AZIMUTH_DAYS:
+                azimuth = round(azimuth / _CORRIDOR_AZIMUTH_STEP_DEG) * _CORRIDOR_AZIMUTH_STEP_DEG
             points = [
                 (d, *destination_point(lat, lon, azimuth, d))
                 for d in CORRIDOR_DISTANCES_KM
             ]
-
-            today = datetime.now(UTC).date()
-            days_ago = (today - target_date).days
             lats = ",".join(f"{p[1]:.4f}" for p in points)
             lons = ",".join(f"{p[2]:.4f}" for p in points)
 
-            if target_date < today and days_ago > 7:
+            if on_icon:
+                # The whole icon_seamless horizon along this azimuth, shared by
+                # /predict and /forecast, and by every date whose azimuth
+                # rounds alike.
+                raw_key = TTLCache.make_key(
+                    "corridor_az", *self._ckey_coords(lat, lon), azimuth, str(today)
+                )
+                raw = self._cache.get(raw_key)
+                if raw is None:
+                    raw = await self._fetch_forecast_raw_multi(
+                        lats, lons, days=ICON_SEAMLESS_MAX_DAYS
+                    )
+                    for entry in raw if isinstance(raw, list) else [raw]:
+                        _prepopulate_parsed_times(entry)
+                    self._cache.set(raw_key, raw)
+            elif target_date < today and days_ago > 7:
                 raw = await self._fetch_archive_raw_multi(lats, lons, target_date)
-            else:
-                past_days = days_ago + 1 if target_date < today else 0
-                days_ahead = max((target_date - today).days + 2, 2)
+            elif target_date < today:
                 raw = await self._fetch_forecast_raw_multi(
-                    lats, lons, days=days_ahead, past_days=past_days
+                    lats, lons, days=2, past_days=days_ago + 1
+                )
+            else:
+                # Beyond icon_seamless's horizon: `auto`, as for the weather.
+                raw = await self._fetch_forecast_raw_multi(
+                    lats, lons, days=_forecast_fetch_days(sunset_time, today)
                 )
 
             samples: list[tuple[float, float, float]] = []
@@ -517,27 +569,45 @@ class WeatherService:
     async def get_corridor_samples_map(
         self, lat: float, lon: float, dates: list[date]
     ) -> dict[date, list[tuple[float, float, float]]]:
-        """Corridor samples for many dates, batched by calendar month.
+        """Corridor samples for many dates.
 
-        The sunset azimuth swings through ~60° over a year outside the tropics,
-        so the corridor for January points somewhere quite different from July's
-        and a single set of coordinates cannot serve a whole range. Grouping by
-        month keeps the azimuth error under a couple of degrees — far below the
-        angular width the Gaussian distance weighting already tolerates — while
-        collapsing the request count from one-per-day to one-per-month.
+        Forecast dates (today on) take get_corridor_samples, /predict's own
+        path, so both endpoints score an evening with the same corridor. A
+        7-day forecast costs one request each for tonight and tomorrow plus
+        one per distinct rounded azimuth after that — one near a solstice,
+        two or three near an equinox — all shared with /predict.
 
-        A 7-day forecast is therefore one request; a 12-month heatmap is twelve,
-        each cached for a day. Any month that fails is simply absent from the
+        Past dates are batched by calendar month. The sunset azimuth swings
+        through ~60° over a year outside the tropics, so a single set of
+        coordinates cannot serve a whole range; grouping by month keeps the
+        azimuth error under a couple of degrees — far below the angular width
+        the Gaussian distance weighting already tolerates — while collapsing
+        the request count from one-per-day to one-per-month. A 12-month heatmap
+        is twelve requests. Any month that fails is simply absent from the
         result, and those days score without corridor adjustment.
         """
         if not dates:
             return {}
 
+        today = datetime.now(UTC).date()
+
+        # Today and later: exactly /predict's corridor for each evening (its
+        # own sunset azimuth and model), so a forecast day and a single-date
+        # prediction for it cannot disagree. Sequential on purpose: dates
+        # whose azimuths round alike share one fetch, which concurrent misses
+        # would each pay for.
+        out: dict[date, list[tuple[float, float, float]]] = {}
+        for d in sorted(x for x in set(dates) if x >= today):
+            samples = await self.get_corridor_samples(
+                lat, lon, d, self._astro.get_sunset_time(lat, lon, d)
+            )
+            if samples:
+                out[d] = samples
+
         by_month: dict[tuple[int, int], list[date]] = {}
         for d in dates:
-            by_month.setdefault((d.year, d.month), []).append(d)
-
-        today = datetime.now(UTC).date()
+            if d < today:
+                by_month.setdefault((d.year, d.month), []).append(d)
 
         async def one_month(year: int, month: int, group: list[date]) -> dict:
             group.sort()
@@ -580,7 +650,6 @@ class WeatherService:
             return {d: v for d, v in month_map.items() if d in wanted}
 
         # Months are independent requests — fetch them concurrently.
-        out: dict[date, list[tuple[float, float, float]]] = {}
         for part in await asyncio.gather(
             *(one_month(y, m, g) for (y, m), g in sorted(by_month.items()))
         ):
@@ -842,9 +911,9 @@ class WeatherService:
     async def _fetch_forecast_snapshot(
         self, lat: float, lon: float, target_date: date, sunset_time: datetime
     ) -> WeatherSnapshot:
-        days_ahead = (target_date - datetime.now(UTC).date()).days + 1
-        weather_data = await self._fetch_forecast_raw(lat, lon, days=max(days_ahead + 1, 2))
-        aq_data = await self._fetch_air_quality_raw(lat, lon, days=max(days_ahead + 1, 2))
+        weather_data, aq_data = await self._fetch_forecast_for(
+            lat, lon, sunset_time, datetime.now(UTC).date()
+        )
         return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time, "forecast")
 
     async def _fetch_recent_past_snapshot(
@@ -971,6 +1040,17 @@ class WeatherService:
             "timezone": "UTC",
         }
         return await self._get_json(url, params)
+
+    async def _fetch_forecast_for(
+        self, lat: float, lon: float, sunset_time: datetime, today: date
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+        """(weather, aerosol) raw forecast for one evening, fetched exactly as
+        get_forecast_range_windows fetches that evening — same model, same
+        aerosol request — so /predict and /forecast read the same data."""
+        days = _forecast_fetch_days(sunset_time, today)
+        weather = await self._fetch_forecast_raw(lat, lon, days=days)
+        aq = await self._fetch_air_quality_raw(lat, lon, days=_AQ_MAX_FORECAST_DAYS)
+        return weather, aq
 
     async def _fetch_forecast_raw(
         self, lat: float, lon: float, days: int = 7, past_days: int = 0
@@ -1524,6 +1604,23 @@ def _nearest_hour_index(times: list[datetime], target: datetime) -> int:
     if i == len(times):
         return len(times) - 1
     return i - 1 if target - times[i - 1] <= times[i] - target else i
+
+
+def _forecast_fetch_days(sunset_time: datetime, today: date) -> int:
+    """forecast_days to request for the evening setting at *sunset_time*.
+
+    Its viewing window must be inside the data: usually that is the target
+    date's own UTC day, but in the Americas the window ends after 00:00 UTC,
+    one UTC day later. Every evening whose window ends within
+    ICON_SEAMLESS_MAX_DAYS reads the full icon_seamless horizon — the fetch
+    /forecast makes (a shorter forecast_days only trims the tail; verified
+    identical readings). A later evening falls back to `auto` with the days it
+    needs. Stretching icon_seamless to forecast_days=8 would cover day+6 in
+    the Americas too, but its run horizon (~180 h) then ends inside that day
+    for part of each day, and a null cloud cover reads as a clear sky.
+    """
+    needed = ((sunset_time + _WINDOW_END_AFTER_SUNSET).date() - today).days + 1
+    return ICON_SEAMLESS_MAX_DAYS if needed <= ICON_SEAMLESS_MAX_DAYS else needed
 
 
 def _prepopulate_parsed_times(data: dict) -> None:
