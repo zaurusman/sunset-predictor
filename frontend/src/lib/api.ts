@@ -24,6 +24,29 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
 
 // ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/** A non-2xx response, with its HTTP status kept so callers can tell a
+ *  temporarily busy weather service apart from a real failure. */
+export class ApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+/**
+ * True when the backend couldn't get weather data right now — the provider is
+ * rate-limited or out of its daily quota (503), or this client asked for too
+ * many new places (429). Nothing is broken; it passes on its own, so the UI
+ * says so calmly instead of showing a red error.
+ */
+export function isServiceBusy(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 503 || err.status === 429);
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -44,7 +67,7 @@ async function request<T>(
     } catch {
       // ignore parse errors
     }
-    throw new Error(`API error ${res.status}: ${detail}`);
+    throw new ApiError(res.status, `API error ${res.status}: ${detail}`);
   }
 
   return res.json() as Promise<T>;

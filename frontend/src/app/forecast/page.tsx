@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { Info } from "lucide-react";
-import { forecast } from "@/lib/api";
+import { forecast, isServiceBusy } from "@/lib/api";
 import type { DayForecast, ForecastResponse, LocationState } from "@/lib/types";
-import { loadLocation } from "@/lib/storage";
+import { loadCachedForecast, loadLocation, saveCachedForecast } from "@/lib/storage";
+import { freshnessLabel } from "@/lib/utils";
 
 import AppNav from "@/components/AppNav";
 import SupportFooter from "@/components/SupportFooter";
@@ -21,11 +22,23 @@ function ForecastContent() {
   const [data, setData] = useState<ForecastResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The last load failed only because the weather service is busy. */
+  const [busy, setBusy] = useState(false);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
   const load = useCallback(async (loc: LocationState) => {
+    // Paint the last forecast for this place first (as the Tonight tab does),
+    // so a busy weather service leaves the week on screen, not an error.
+    const cached = loadCachedForecast(loc, new Date().toISOString().slice(0, 10));
+    if (cached) {
+      setData(cached.forecast);
+      setCachedAt(cached.cachedAt);
+      setSelectedDate((d) => d ?? cached.forecast.days[0].date);
+    }
     setLoading(true);
     setError(null);
+    setBusy(false);
     try {
       const result = await forecast({
         latitude: loc.latitude,
@@ -33,8 +46,11 @@ function ForecastContent() {
         days: 7,
       });
       setData(result);
+      setCachedAt(new Date().toISOString());
+      saveCachedForecast(loc, result);
       if (result.days.length > 0) setSelectedDate(result.days[0].date);
     } catch (err) {
+      setBusy(isServiceBusy(err));
       setError(err instanceof Error ? err.message : "Failed to load forecast.");
     } finally {
       setLoading(false);
@@ -77,13 +93,23 @@ function ForecastContent() {
 
       {error && (
         <div className="mb-5">
-          <ErrorAlert message={error} onRetry={location ? () => load(location) : undefined} />
+          <ErrorAlert
+            variant={busy ? "busy" : "error"}
+            message={
+              busy
+                ? data
+                  ? `The weather service is busy right now, so this is your last forecast${cachedAt ? ` (updated ${freshnessLabel(cachedAt)})` : ""}. Try again in a little while.`
+                  : "The weather service is busy right now, so the 7-day forecast can't load yet. Try again in a little while."
+                : error
+            }
+            onRetry={location ? () => load(location) : undefined}
+          />
         </div>
       )}
 
-      {loading && <LoadingState message="Loading 7-day forecast…" />}
+      {loading && !data && <LoadingState message="Loading 7-day forecast…" />}
 
-      {!loading && data && (
+      {data && (
         <div className="flex flex-col gap-5 animate-fade-in">
           <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20 text-indigo-800 dark:text-indigo-300 text-sm">
             <Info size={15} className="flex-shrink-0 mt-0.5" />
