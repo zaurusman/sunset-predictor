@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import type { HeatmapDay } from "@/lib/types";
-import { getCategoryColor } from "@/lib/utils";
+import type { HeatmapDay, SunsetCategory } from "@/lib/types";
+import { getCategoryColor, SCORE_BANDS, scoreCategory } from "@/lib/utils";
 
 interface DayCell extends HeatmapDay {
   level: number;
@@ -18,22 +18,27 @@ interface Week {
 // Colors match getScoreHexColor / getCategoryBgColor in lib/utils.ts exactly.
 const LEVEL_CLASSES: string[] = [
   "bg-gray-200 dark:bg-slate-700",  // 0: empty cell
-  "bg-red-400",                      // 1: poor    (0–29)
-  "bg-orange-400",                   // 2: decent  (30–49)
-  "bg-amber-400",                    // 3: good    (50–64)
-  "bg-emerald-400",                  // 4: great   (65–79)
-  "bg-purple-500",                   // 5: epic    (80+)
+  "bg-red-400",                      // 1: poor
+  "bg-orange-400",                   // 2: decent
+  "bg-amber-400",                    // 3: good
+  "bg-emerald-400",                  // 4: great
+  "bg-purple-500",                   // 5: epic
 ];
 
-const LEVEL_LABELS = ["No data", "Poor (0–29)", "Decent (30–49)", "Good (50–64)", "Great (65–79)", "Epic (80+)"];
+const LEVELS: SunsetCategory[] = ["Poor", "Decent", "Good", "Great", "Epic"];
+/** "Good (55–71)" etc., straight from the shared bands. */
+const LEVEL_LABELS = [
+  "No data",
+  ...LEVELS.map((category) => {
+    const i = SCORE_BANDS.findIndex(([, c]) => c === category);
+    const min = SCORE_BANDS[i][0];
+    return i === 0 ? `${category} (${min}+)` : `${category} (${min}–${SCORE_BANDS[i - 1][0] - 1})`;
+  }),
+];
 const DAY_LABELS = ["Mon", "", "Wed", "", "Fri", "", "Sun"];
 
 function scoreToLevel(score: number): number {
-  if (score >= 80) return 5;
-  if (score >= 65) return 4;
-  if (score >= 50) return 3;
-  if (score >= 30) return 2;
-  return 1;
+  return LEVELS.indexOf(scoreCategory(score)) + 1;
 }
 
 function buildWeeks(days: HeatmapDay[]): Week[] {

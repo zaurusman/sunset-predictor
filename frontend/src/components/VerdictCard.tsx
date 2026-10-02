@@ -36,7 +36,7 @@ function headlineFor(prediction: PredictResponse, targetDate: string): string {
   if (targetDate < today) return `A ${prediction.category.toLowerCase()} one`;
   if (go) return "Worth heading out";
 
-  // The go-outside bar (70) sits above the Great band (65), so a 65–69 evening
+  // The go-outside bar (75) sits above the Great band (72), so a 72–74 evening
   // is genuinely nice without being worth changing plans for. A flat "Not
   // tonight" here would contradict the green Great badge beside it.
   if (prediction.beauty_score_0_100 >= 50) return "Worth a glance";
