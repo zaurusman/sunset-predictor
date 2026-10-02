@@ -102,7 +102,7 @@ export default function LocationSheet({
         role="dialog"
         aria-modal="true"
         aria-label="Choose a location"
-        className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-4 pt-3 flex flex-col gap-4 shadow-2xl animate-slide-up"
+        className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-4 pt-3 flex flex-col gap-4 shadow-2xl m-sheet"
         style={{ paddingBottom: "max(2rem, env(safe-area-inset-bottom))" }}
       >
         <div className="flex items-center gap-3">

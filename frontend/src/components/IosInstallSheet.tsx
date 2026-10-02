@@ -37,7 +37,7 @@ export default function IosInstallSheet({ open, onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-label="Add Afterglow to your Home Screen"
-        className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-5 pt-4 flex flex-col gap-4 shadow-2xl animate-slide-up"
+        className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-5 pt-4 flex flex-col gap-4 shadow-2xl m-sheet"
         style={{ paddingBottom: "max(2rem, env(safe-area-inset-bottom))" }}
       >
         <div className="flex items-center gap-3">

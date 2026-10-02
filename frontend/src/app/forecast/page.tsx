@@ -110,7 +110,7 @@ function ForecastContent() {
       {loading && !data && <LoadingState message="Loading 7-day forecast…" />}
 
       {data && (
-        <div className="flex flex-col gap-5 animate-fade-in">
+        <div className="flex flex-col gap-5 m-fade">
           <div className="flex items-start gap-3 px-4 py-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20 text-indigo-800 dark:text-indigo-300 text-sm">
             <Info size={15} className="flex-shrink-0 mt-0.5" />
             <span className="text-pretty">

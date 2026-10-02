@@ -53,7 +53,7 @@ export default function FirstRun({ onLocationSelect }: FirstRunProps) {
   };
 
   return (
-    <div className="flex flex-col gap-6 animate-fade-in">
+    <div className="flex flex-col gap-6 m-fade">
       <div className="flex flex-col gap-2 pt-6">
         <h1 className="text-[28px] leading-tight font-bold tracking-tight text-gray-900 dark:text-white text-pretty">
           Where are you watching from?

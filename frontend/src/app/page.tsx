@@ -208,7 +208,7 @@ function HomeContent() {
       {showSkeleton && <LoadingState message="Reading the sky…" />}
 
       {prediction && (
-        <div className="flex flex-col gap-4 animate-fade-in">
+        <div className="flex flex-col gap-4 m-fade">
           <VerdictCard prediction={prediction} targetDate={selectedDate} />
 
           <InstallPrompt

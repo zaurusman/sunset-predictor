@@ -200,7 +200,7 @@ function HeatmapContent() {
 
       {data && (
         <div
-          className={`flex flex-col gap-5 ${loading ? "opacity-40 pointer-events-none" : "animate-fade-in"}`}
+          className={`flex flex-col gap-5 ${loading ? "opacity-40 pointer-events-none" : "m-fade"}`}
         >
           <section className="bg-white dark:bg-slate-900/60 rounded-2xl border border-gray-200 dark:border-slate-700/40 p-5">
             <h2 className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold mb-4">
