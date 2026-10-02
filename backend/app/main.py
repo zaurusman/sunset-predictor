@@ -29,7 +29,7 @@ from app.services.model_runs import ModelRunClock
 from app.services.explanation_engine import ExplanationEngine
 from app.services.prediction_service import PredictionService
 from app.services.push_sender import WebPushSender
-from app.services.rating_store import RatingStore
+from app.services.rating_store import PostgresRatingStore, RatingStore
 from app.services.scoring_engine import ScoringEngine
 from app.services.subscription_store import PostgresSubscriptionStore
 from app.services.weather_service import WeatherService
@@ -83,7 +83,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         other_hour_cap=settings.OPEN_METEO_OTHER_HOURLY_CAP,
     )
     registry = ModelRegistry(settings=settings)
-    rating_store = RatingStore(path=settings.RATINGS_PATH)
 
     # Services
     astro_service = AstronomyService()
@@ -154,6 +153,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cache.attach_durable(tier)
         except Exception as exc:
             logger.error("Durable weather cache disabled: %s", exc)
+    # Human ratings — the training labels. Render's disk is wiped on every
+    # deploy, so in production they live in Postgres, on the same pool. The
+    # local file is for tests and runs without a database; if the database is
+    # configured but unreachable, ratings still work there, and say so loudly.
+    rating_store = RatingStore(path=settings.RATINGS_PATH)
+    if subscription_store is not None:
+        try:
+            pg_ratings = PostgresRatingStore(subscription_store.pool)
+            await pg_ratings.ensure_schema()
+            rating_store = pg_ratings
+        except Exception as exc:
+            logger.error("Ratings falling back to ephemeral %s: %s", settings.RATINGS_PATH, exc)
+    elif settings.DATABASE_URL:
+        logger.error("Ratings falling back to ephemeral %s: no database", settings.RATINGS_PATH)
     logger.info(
         "Push alerts: store=%s, sender=%s",
         "postgres" if subscription_store else "off",
@@ -171,7 +184,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info(
         "All services initialised. ML model loaded: %s. Ratings: %d stored at %s",
-        ml_model.is_loaded(), rating_store.count(), rating_store.path,
+        ml_model.is_loaded(), await rating_store.total(), rating_store.describe(),
     )
 
     yield  # ← application runs here

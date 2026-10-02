@@ -259,15 +259,18 @@ class PredictionService:
 
     async def capture_rating_context(
         self, lat: float, lon: float, target_date: date, horizon_deg: float
-    ) -> tuple[PredictResponse, list[WeatherSnapshot]]:
-        """Return the prediction for this evening plus the RAW window snapshots.
+    ) -> tuple[PredictResponse, list[WeatherSnapshot], list[tuple[float, float, float]]]:
+        """Return the prediction for this evening plus its RAW inputs: the
+        window snapshots and the upstream corridor samples.
 
         Used by POST /rate to store a human label together with the exact inputs
-        that produced the score. Storing raw snapshots — not just the score —
+        that produced the score. Storing raw inputs — not just the score —
         is what lets a future scoring change be replayed against old labels
-        offline, instead of needing a year of weather history refetched.
+        offline, instead of needing a year of weather history refetched. The
+        corridor gates every cloud pathway, so a replay without it is a replay
+        of a different evening.
 
-        Both calls hit the same cached fetch, so this costs no extra API
+        All three hit the same cached fetches, so this costs no extra API
         requests beyond what predict() already did for the same evening.
         """
         prediction = await self.predict(
@@ -282,7 +285,10 @@ class PredictionService:
         snapshots = await self._weather.get_window_snapshots(
             lat, lon, target_date, sunset_time
         )
-        return prediction, snapshots
+        corridor = await self._weather.get_corridor_samples(
+            lat, lon, target_date, sunset_time
+        )
+        return prediction, snapshots, corridor
 
     def local_sunset_date_for(self, lat: float, lon: float) -> date:
         """The date whose sunset is 'tonight' at this location."""
