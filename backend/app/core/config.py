@@ -54,9 +54,9 @@ class Settings(BaseSettings):
     # that measured no better than noise.
     ML_MIN_SPEARMAN: float = 0.15
 
-    # Where human sunset ratings (ML training labels) are appended as JSONL.
-    # NOTE: Render's free tier filesystem is EPHEMERAL — point this at a mounted
-    # persistent disk before relying on it in production.
+    # Where human sunset ratings (ML training labels) are appended as JSONL
+    # when there is no database. With DATABASE_URL set they go to Postgres
+    # instead (Render's disk is ephemeral); see app/services/rating_store.py.
     RATINGS_PATH: str = "data/ratings.jsonl"
 
     # Default horizon obstruction in degrees (0 = open ocean/flat horizon)

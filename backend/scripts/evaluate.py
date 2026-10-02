@@ -11,6 +11,7 @@ Run from backend/:
     python scripts/evaluate.py                       # 3 default cities, 1 year
     python scripts/evaluate.py --days 730            # 2 years
     python scripts/evaluate.py --labels data/ratings.jsonl
+    python scripts/evaluate.py --labels "$DATABASE_URL"   # production labels
 
 WHAT IT MEASURES, AND WHAT IT DOES NOT
 --------------------------------------
@@ -39,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import statistics as st
 import sys
 from datetime import date, timedelta
@@ -51,11 +51,11 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import Settings
-from app.schemas.weather import WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.climatology_service import _rank_in_sorted
-from app.services.rating_store import dedupe_latest, label_0_100
+from app.services.rating_dataset import rescore, snapshots_of, stored_corridor
+from app.services.rating_store import dedupe_latest, is_database_url, label_0_100, load_records
 from app.services.weather_service import WeatherService
 from app.utils.cache import TTLCache
 from app.utils.math_utils import spearman
@@ -309,7 +309,7 @@ async def replay_label(
     rec: dict,
     horizon_deg: float,
 ) -> Optional[float]:
-    """Re-score one stored label's RAW snapshots with the CURRENT engine.
+    """Re-score one stored label's RAW inputs with the CURRENT engine.
 
     Returns the score comparable to that label — at the observed moment when
     the label names one, otherwise the window aggregate — or None when the
@@ -323,51 +323,28 @@ async def replay_label(
     carries the pre-fix score forever. One evening in the current set was
     stored at 17.3 and scores 48.3 today — the same sky, two engines.
 
-    Storing the raw snapshots was always meant to make this replayable
-    (see rating_store's module docstring); nothing was actually replaying them.
+    Records from schema 2 on carry the corridor they were scored with. Older
+    ones do not, and it is not optional — it gates every pathway, and
+    horizon_band scores 0 without it — so it is refetched: for a past date the
+    archive is deterministic, so this reproduces what production saw rather
+    than approximating it.
     """
-    snaps_raw = rec.get("window_snapshots") or []
-    if not snaps_raw:
-        return None
+    corridor = stored_corridor(rec)
+    if corridor is None and snapshots_of(rec):
+        try:
+            target = date.fromisoformat(str(rec.get("target_date")))
+        except ValueError:
+            return None
+        lat = float(rec.get("latitude", 0.0))
+        lon = float(rec.get("longitude", 0.0))
+        sunset_time = astro.get_sunset_time(lat, lon, target)
+        try:
+            corridor = await weather.get_corridor_samples(lat, lon, target, sunset_time)
+        except Exception:
+            corridor = []
 
-    try:
-        snaps = [WeatherSnapshot(**s) for s in snaps_raw]
-    except Exception:
-        return None
-
-    try:
-        target = date.fromisoformat(str(rec.get("target_date")))
-    except ValueError:
-        return None
-
-    lat = float(rec.get("latitude", 0.0))
-    lon = float(rec.get("longitude", 0.0))
-
-    # The corridor is NOT stored on the record, and it is not optional: it
-    # gates every pathway, and horizon_band scores 0 without it. Refetch it —
-    # for a past date the archive is deterministic, so this reproduces what
-    # production saw rather than approximating it.
-    sunset_time = astro.get_sunset_time(lat, lon, target)
-    try:
-        corridor = await weather.get_corridor_samples(lat, lon, target, sunset_time)
-    except Exception:
-        corridor = []
-
-    scored: list[tuple[str, float]] = []
-    by_label: dict[str, float] = {}
-    for snap in snaps:
-        r = engine.score(snap, horizon_deg, corridor_samples=corridor)
-        label = snap.timestamp_label or "sunset"
-        scored.append((label, r.physics_score))
-        by_label[label] = r.physics_score
-
-    if not scored:
-        return None
-
-    moment = rec.get("observed_moment")
-    if moment and moment in by_label:
-        return by_label[moment]
-    return engine.score_window(scored).final_score
+    result = rescore(engine, rec, corridor=corridor, horizon_deg=horizon_deg)
+    return result["comparable"] if result else None
 
 
 async def report_labels(path: str, horizon_deg: float) -> None:
@@ -376,20 +353,11 @@ async def report_labels(path: str, horizon_deg: float) -> None:
     This is the only part of this harness that measures accuracy rather than
     distribution shape.
     """
-    p = Path(path)
-    if not p.exists():
+    if not is_database_url(path) and not Path(path).exists():
         print(f"\nNo label file at {path} — skipping accuracy check.")
         return
 
-    records: list[dict] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    records = await load_records(path)
 
     # One label per (evening, place). Shared with RatingStore so the harness
     # and the API cannot disagree about what counts as a duplicate.
@@ -487,7 +455,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--horizon-deg", type=float, default=2.0)
-    ap.add_argument("--labels", type=str, default="data/ratings.jsonl")
+    ap.add_argument(
+        "--labels", type=str, default="data/ratings.jsonl",
+        help="Ratings to correlate against: a JSONL path or a Postgres URL.",
+    )
     ap.add_argument(
         "--strict", action="store_true",
         help="Exit non-zero if any distribution guardrail fails (for CI).",

@@ -280,14 +280,14 @@ Tests cover:
 2. **Location for Reddit dataset** is manually specified. Posts may come from anywhere in the world, but weather is fetched for your specified location — this is a known mismatch. Future work: per-post geocoding from title/flair.
 3. **Aerosol optical depth** is estimated from visibility when the Open-Meteo Air Quality API is unavailable. The `aerosol_is_estimated` flag in the response indicates this.
 4. **Horizon obstruction** is manually specified (degrees). Future work: auto-derive from DEM elevation data.
-5. **No user rating system yet**. The architecture is designed to add it.
+5. **Few human ratings yet**. `POST /rate` stores each rating with its raw weather inputs — in Postgres when `DATABASE_URL` is set, else `backend/data/ratings.jsonl`. `backend/scripts/ratings.py` exports them and builds a training table; see its docstring.
 
 ---
 
 ## Roadmap
 
 - [ ] Per-post geocoding from Reddit title/flair
-- [ ] User rating system (POST /rate) to build ground-truth labels
+- [x] User rating system (POST /rate) to build ground-truth labels
 - [ ] Image aesthetic scoring via a vision model (e.g. CLIP embeddings)
 - [ ] Webcam / live image integration
 - [ ] Terrain-based horizon obstruction auto-detection

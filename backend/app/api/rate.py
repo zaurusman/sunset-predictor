@@ -15,8 +15,9 @@ from fastapi import status as http_status
 
 from app.core.logging import get_logger
 from app.schemas.rating import RatingRequest, RatingResponse, RatingStats
-from app.services.rating_store import band_of, label_0_100
+from app.services.rating_store import RATING_SCHEMA_VERSION, band_of, dedupe_latest, label_0_100
 from app.services.weather_service import WeatherUnavailableError
+from app.utils.call_budget import OTHER, TONIGHT, priority
 from app.utils.math_utils import spearman
 from app.utils.time_utils import utcnow
 
@@ -58,30 +59,37 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
 
     # ------------------------------------------------------------------
     # Capture the model's view of this evening alongside the human label.
-    # A rating without its inputs is useless for training, so a weather
-    # failure here is fatal to the request rather than silently degrading.
+    #
+    # The label is the scarce part: an evening can only be rated by someone
+    # who saw it, while its weather can be refetched from Open-Meteo's archive
+    # at any time. So a weather failure here (the shared Render IP refused,
+    # the quota spent) costs the raw inputs, never the rating — the record is
+    # stored with `context_error` set, and the training export backfills it.
+    # Tonight's rating is tonight's work for the call budget.
     # ------------------------------------------------------------------
+    prediction = None
+    snapshots: list = []
+    corridor: list = []
+    context_error: Optional[str] = None
     try:
-        prediction, snapshots = await svc.capture_rating_context(
-            lat=body.latitude,
-            lon=body.longitude,
-            target_date=target_date,
-            horizon_deg=settings.DEFAULT_HORIZON_OBSTRUCTION_DEG,
-        )
+        with priority(TONIGHT if target_date == today else OTHER):
+            prediction, snapshots, corridor = await svc.capture_rating_context(
+                lat=body.latitude,
+                lon=body.longitude,
+                target_date=target_date,
+                horizon_deg=settings.DEFAULT_HORIZON_OBSTRUCTION_DEG,
+            )
     except WeatherUnavailableError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Weather data is unavailable right now — please rate again shortly.",
-        ) from exc
+        context_error = f"weather unavailable: {exc}"[:300]
+        logger.warning("Storing rating without weather context: %s", exc)
     except Exception as exc:
+        context_error = f"{type(exc).__name__}: {exc}"[:300]
         logger.error("Failed to capture rating context: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=http_status.HTTP_502_BAD_GATEWAY,
-            detail="Could not retrieve the weather behind this evening's score.",
-        ) from exc
 
     record = {
-        "schema_version": 1,
+        # See RATING_SCHEMA_VERSION for what each version added. Readers must
+        # tolerate every earlier one — the store is append-only, never migrated.
+        "schema_version": RATING_SCHEMA_VERSION,
         "recorded_at": utcnow().isoformat(),
         "target_date": str(target_date),
         "latitude": body.latitude,
@@ -104,39 +112,66 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
         # sunset-lit-cloud evening and an afterglow-gradient one are different
         # events that share a date. None means "the evening as a whole".
         "observed_moment": body.observed_moment,
+        # The horizon obstruction the evening was scored with — an input to
+        # the engine, so a replay needs it.
+        "horizon_deg": settings.DEFAULT_HORIZON_OBSTRUCTION_DEG,
+        # Why the fields below are empty, when they are. None when captured.
+        "context_error": context_error,
         # What the model said at capture time — the thing we are measuring.
-        "predicted_score": prediction.beauty_score_0_100,
-        "predicted_category": prediction.category,
-        "predicted_confidence": prediction.confidence_0_100,
-        "algorithm_version": prediction.algorithm_version,
-        "ml_model_used": prediction.ml_model_used,
-        "physics_breakdown": prediction.physics_component_breakdown.model_dump(),
-        "window_scores": prediction.window_scores,
-        "best_window_point": prediction.best_window_point,
+        "predicted_score": prediction.beauty_score_0_100 if prediction else None,
+        "predicted_category": prediction.category if prediction else None,
+        "predicted_confidence": prediction.confidence_0_100 if prediction else None,
+        "raw_physics_score": prediction.raw_physics_score if prediction else None,
+        "climatology_percentile": prediction.climatology_percentile if prediction else None,
+        "algorithm_version": (
+            prediction.algorithm_version if prediction else settings.ALGORITHM_VERSION
+        ),
+        "ml_model_used": prediction.ml_model_used if prediction else None,
+        "physics_breakdown": (
+            prediction.physics_component_breakdown.model_dump() if prediction else None
+        ),
+        "window_scores": prediction.window_scores if prediction else {},
+        "best_window_point": prediction.best_window_point if prediction else None,
         # What the model scored at the SPECIFIC moment this rating describes,
         # when that's known — the number this rating should actually be
         # compared against. Falls back to the evening's aggregated score when
         # the moment wasn't given.
         "predicted_score_at_observed_moment": (
             prediction.window_scores.get(body.observed_moment)
-            if body.observed_moment else None
+            if prediction and body.observed_moment else None
         ),
-        # Raw inputs — lets any future scoring change be replayed offline.
+        # Raw inputs — lets any future scoring change, or a trained model, be
+        # replayed offline against this label.
         "window_snapshots": [s.model_dump(mode="json") for s in snapshots],
+        # (distance_km, cloud_low_pct, cloud_mid_pct) toward the setting sun.
+        "corridor_samples": [list(c) for c in corridor],
     }
 
-    total = await store.append(record)
+    try:
+        total = await store.append(record)
+    except Exception as exc:
+        # Never acknowledge a rating that was not saved.
+        logger.error("Failed to store rating: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not save that rating right now — please try again shortly.",
+        ) from exc
+
+    predicted = prediction.beauty_score_0_100 if prediction else None
     logger.info(
-        "Stored rating %.0f/100 for %s at (%.3f, %.3f); model said %.1f. Total ratings: %d",
+        "Stored rating %.0f/100 for %s at (%.3f, %.3f); model said %s. Total ratings: %d",
         body.score_0_100(), target_date, body.latitude, body.longitude,
-        prediction.beauty_score_0_100, total,
+        f"{predicted:.1f}" if predicted is not None else "n/a (no weather)", total,
     )
 
     return RatingResponse(
         success=True,
-        message=_thanks_message(body.score_0_100(), prediction.beauty_score_0_100),
+        message=(
+            _thanks_message(body.score_0_100(), predicted)
+            if predicted is not None else "Thanks — logged."
+        ),
         rated_date=target_date,
-        predicted_score=prediction.beauty_score_0_100,
+        predicted_score=predicted,
         total_ratings=total,
     )
 
@@ -152,8 +187,9 @@ async def rate_sunset(request: Request, body: RatingRequest) -> RatingResponse:
 )
 async def rating_stats(request: Request) -> RatingStats:
     store = request.app.state.rating_store
-    # Deduplicated: a changed mind is one observation, not two.
-    records = store.latest_per_evening()
+    # Deduplicated: a changed mind is one observation, not two. Raw inputs
+    # stay in the database — nothing here reads them.
+    records = dedupe_latest(await store.records(with_raw=False))
 
     if not records:
         return RatingStats(
