@@ -82,11 +82,18 @@ request_deadline: contextvars.ContextVar[Optional[float]] = contextvars.ContextV
 def background_work() -> Iterator[None]:
     """For tasks started from a request that outlive it (climatology builds):
     non-tonight priority, and no request deadline."""
+    from app.utils.client_fetch import client_data, client_fetch_allowed
+
     token = call_priority.set(OTHER)
     deadline = request_deadline.set(None)
+    # Never the browser's data or a browser fetch: the request is long gone.
+    data = client_data.set(None)
+    allowed = client_fetch_allowed.set(False)
     try:
         yield
     finally:
+        client_fetch_allowed.reset(allowed)
+        client_data.reset(data)
         request_deadline.reset(deadline)
         call_priority.reset(token)
 

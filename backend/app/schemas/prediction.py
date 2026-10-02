@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +39,14 @@ class PredictRequest(BaseModel):
     weather_override: Optional[WeatherOverride] = Field(
         default=None,
         description="Manually override weather fields (useful for testing).",
+    )
+    client_data: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Open-Meteo responses the browser fetched itself (canonical URL → "
+            "JSON), after a 503 carrying `client_fetch`. See "
+            "app/utils/client_fetch.py."
+        ),
     )
 
 

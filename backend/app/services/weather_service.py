@@ -17,6 +17,13 @@ from app.schemas.weather import WeatherOverride, WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.utils.geo import destination_point
 from app.utils.cache import TTLCache
+from app.utils.client_fetch import (
+    ClientFetchNeeded,
+    canonical_url,
+    client_data,
+    client_fetch_allowed,
+    collect,
+)
 from app.utils.time_utils import local_sunset_date
 from app.utils.call_budget import (
     TONIGHT,
@@ -321,12 +328,28 @@ class WeatherService:
             cached = self._cache.get_fresh(cache_key, since)
         if cached is not None:
             return cached
+        if client_data.get() is not None:
+            # Browser-supplied data (see client_fetch) stays in this request:
+            # never start a shared fetch others would join, nor join one.
+            return await build()
         task = self._inflight.get(cache_key)
+        joined = task is not None
         if task is None:
             task = asyncio.ensure_future(build())
             self._inflight[cache_key] = task
             task.add_done_callback(lambda _: self._inflight.pop(cache_key, None))
-        return await asyncio.shield(task)
+        try:
+            return await asyncio.shield(task)
+        except ClientFetchNeeded:
+            # Started by a request whose browser may fetch; this one's can't.
+            if client_fetch_allowed.get():
+                raise
+            raise WeatherUnavailableError("Open-Meteo refused the server") from None
+        except WeatherUnavailableError:
+            # Started by a request whose browser can't fetch; this one's can.
+            if joined and client_fetch_allowed.get():
+                return await build()
+            raise
 
     async def _forecast_bundle(
         self, lat: float, lon: float, today: date
@@ -360,11 +383,11 @@ class WeatherService:
                 self._cache.set(aq_key, aq, ttl_override=self._current_ttl())
             return aq
 
-        weather = await self._shared_fetch(
-            weather_key, build_weather, since=await self._since(("forecast",), lat, lon)
-        )
-        aq = await self._shared_fetch(
-            aq_key, build_aq, since=await self._since(("aq",), lat, lon)
+        weather, aq = await collect(
+            self._shared_fetch(
+                weather_key, build_weather, since=await self._since(("forecast",), lat, lon)
+            ),
+            self._shared_fetch(aq_key, build_aq, since=await self._since(("aq",), lat, lon)),
         )
         return weather, aq
 
@@ -820,10 +843,11 @@ class WeatherService:
         # whose azimuths round alike share one fetch, which concurrent misses
         # would each pay for.
         out: dict[date, list[tuple[float, float, float]]] = {}
-        for d in sorted(x for x in set(dates) if x >= today):
-            samples = await self.get_corridor_samples(
-                lat, lon, d, self._astro.get_sunset_time(lat, lon, d)
-            )
+        forecast_dates = sorted(x for x in set(dates) if x >= today)
+        for d, samples in zip(forecast_dates, await collect(*(
+            self.get_corridor_samples(lat, lon, d, self._astro.get_sunset_time(lat, lon, d))
+            for d in forecast_dates
+        ))):
             if samples:
                 out[d] = samples
 
@@ -1492,6 +1516,14 @@ class WeatherService:
         Non-retryable client errors (e.g. 400) fail fast. If retries are
         exhausted, raises :class:`WeatherUnavailableError` (→ HTTP 503).
         """
+        supplied = client_data.get()
+        if supplied is not None:
+            # The browser fetches; the server doesn't (see client_fetch).
+            key = canonical_url(url, params)
+            if key in supplied:
+                return supplied[key]
+            raise ClientFetchNeeded([key])
+
         max_retries = self._settings.HTTP_MAX_RETRIES
         last_exc: Exception | None = None
         reason = ""
@@ -1505,6 +1537,10 @@ class WeatherService:
                 try:
                     await self.budget.acquire_other(weighted_cost(params))
                 except BudgetExhausted as exc:
+                    if client_fetch_allowed.get():
+                        # The browser has its own Open-Meteo limit: let it fetch
+                        # rather than answer "busy" (see client_fetch).
+                        raise ClientFetchNeeded([canonical_url(url, params)]) from exc
                     # One WARNING per refused request is logged where it
                     # becomes a 503 ("Busy: ..."); per call it is noise.
                     logger.debug("Open-Meteo call held back to keep tonight working: %s (%s)", exc, url)
@@ -1512,6 +1548,10 @@ class WeatherService:
 
         for attempt in range(max_retries + 1):
             try:
+                if self._settings.OPEN_METEO_SIMULATE_DAILY_LIMIT:  # testing only
+                    raise httpx.HTTPStatusError("simulated", request=httpx.Request("GET", url),
+                        response=httpx.Response(429, json={"error": True,
+                            "reason": "Daily API request limit exceeded. (simulated)"}))
                 await self._concurrency.acquire(level)
                 try:
                     response = await self._http.get(url, params=params)
@@ -1527,6 +1567,9 @@ class WeatherService:
                 reason = _error_reason(exc.response)
                 if status == 429 and self.budget is not None:
                     self.budget.note_rate_limited(reason)
+                if _quota_exhausted(reason) and client_fetch_allowed.get():
+                    # The browser has its own Open-Meteo limit: let it fetch.
+                    raise ClientFetchNeeded([canonical_url(url, params)]) from exc
                 if attempt >= max_retries or _quota_exhausted(reason):
                     break
                 delay = self._retry_delay(exc.response, attempt)

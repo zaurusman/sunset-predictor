@@ -7,6 +7,7 @@ from app.schemas.prediction import PredictRequest, PredictResponse
 from app.services.weather_service import WeatherBusyError, WeatherUnavailableError
 from app.core.logging import get_logger
 from app.utils.call_budget import OTHER, TONIGHT, priority
+from app.utils.client_fetch import ClientFetchNeeded, browser_may_fetch, fetch_request
 from app.utils.time_utils import local_sunset_date
 
 logger = get_logger(__name__)
@@ -32,8 +33,13 @@ async def predict_sunset(
     )
     try:
         # Tonight's calls go first and are never held back (see call_budget).
-        with priority(TONIGHT if tonight else OTHER):
+        # Tonight only: the browser may fetch what the server can't (see
+        # app/utils/client_fetch.py).
+        with priority(TONIGHT if tonight else OTHER), browser_may_fetch(tonight, body.client_data):
             return await svc.predict(body)
+    except ClientFetchNeeded as need:
+        logger.info("Tonight: asking the browser to fetch %s", [u.split("?")[0] for u in need.urls])
+        return fetch_request(need)
     except WeatherBusyError as exc:
         # Only reached when it actually needed Open-Meteo calls: whatever is
         # cached (memory or the durable tier) is served even when the share

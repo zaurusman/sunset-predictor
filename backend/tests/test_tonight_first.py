@@ -212,7 +212,8 @@ async def test_one_wait_deadline_for_the_whole_request():
 def test_cached_pages_still_load_when_the_share_is_used_up():
     """Only calls are refused, never requests: a 7-day forecast or another
     date already in the cache costs nothing and loads; one that would need
-    Open-Meteo gets 503 "busy"; tonight always loads."""
+    Open-Meteo gets 503 (the 7-day page: "browser, fetch these"; another
+    date: "busy"); tonight always loads."""
     fake = CountingOpenMeteo()
     with TestClient(app) as client:
         ws = app.state.prediction_service._weather
@@ -234,7 +235,11 @@ def test_cached_pages_still_load_when_the_share_is_used_up():
             assert client.post("/predict", json=day3).status_code == 200       # cached
             assert sum(fake.calls.values()) == sent
 
-            r = client.post("/forecast", json={**week, "latitude": 31.0})       # not cached
+            # Not cached: the server keeps its share for tonight and asks the
+            # browser to fetch the rest (see test_client_fetch).
+            r = client.post("/forecast", json={**week, "latitude": 31.0})
+            assert r.status_code == 503 and r.json()["client_fetch"]
+            r = client.post("/predict", json={**day3, "latitude": 31.0})        # not cached
             assert r.status_code == 503 and "tonight" in r.json()["detail"]
             r = client.post("/predict", json={"latitude": 31.0, "longitude": LON})  # tonight
             assert r.status_code == 200

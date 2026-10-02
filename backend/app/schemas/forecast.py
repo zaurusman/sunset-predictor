@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,14 @@ class ForecastRequest(BaseModel):
     longitude: float = Field(..., ge=-180, le=180)
     days: int = Field(default=7, ge=1, le=16, description="Number of days to forecast")
     horizon_obstruction_deg: float = Field(default=2.0, ge=0, le=90)
+    client_data: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Open-Meteo responses the browser fetched itself (canonical URL → "
+            "JSON), after a 503 carrying `client_fetch`. See "
+            "app/utils/client_fetch.py."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
