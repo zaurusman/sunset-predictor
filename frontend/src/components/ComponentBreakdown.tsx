@@ -88,7 +88,7 @@ export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProp
 
   return (
     <div className="flex flex-col gap-3.5">
-      {COMPONENTS.map(({ key, label }) => {
+      {COMPONENTS.map(({ key, label }, i) => {
         const score = breakdown[key];
         const weight = breakdown.component_weights[key.replace("_score", "")] ?? 0;
         const colour = getComponentHexColor(score, isDark);
@@ -111,8 +111,12 @@ export default function ComponentBreakdown({ breakdown }: ComponentBreakdownProp
             </div>
             <div className="h-1.5 bg-gray-200 dark:bg-slate-800 rounded-full overflow-hidden">
               <div
-                className="h-full rounded-full transition-all duration-700"
-                style={{ width: `${score}%`, backgroundColor: colour }}
+                className="m-grow-x h-full rounded-full"
+                style={{
+                  width: `${score}%`,
+                  backgroundColor: colour,
+                  animationDelay: `${450 + i * 60}ms`,
+                }}
               />
             </div>
           </div>

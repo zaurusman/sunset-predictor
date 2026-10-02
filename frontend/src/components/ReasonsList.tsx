@@ -2,6 +2,7 @@
 
 import { CheckCircle2, Cloud, Droplets, Eye, Mountain, Sun } from "lucide-react";
 import { isPositiveReason } from "@/lib/utils";
+import { staggerDelay } from "@/lib/motion";
 
 interface ReasonsListProps {
   reasons: string[];
@@ -41,7 +42,8 @@ export default function ReasonsList({ reasons }: ReasonsListProps) {
         return (
           <div
             key={i}
-            className="flex items-start gap-3 px-4 py-3 rounded-xl bg-gray-50 dark:bg-slate-800/50 border border-gray-200 dark:border-slate-700/40"
+            style={{ animationDelay: `${staggerDelay(i, 55, 330) + 120}ms` }}
+            className="m-rise-sm flex items-start gap-3 px-4 py-3 rounded-xl bg-gray-50 dark:bg-slate-800/50 border border-gray-200 dark:border-slate-700/40"
           >
             <span
               className={

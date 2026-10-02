@@ -16,7 +16,7 @@ interface ForecastChartProps {
 const DEFAULT_W = 320; // used for SSR + the first client render
 const VB_H = 200;
 const PAD_TOP = 18; // room for the value label above each bar
-const PAD_BOTTOM = 20; // room for the two-line date label
+const PAD_BOTTOM = 26; // room for the two-line date label
 const PAD_LEFT = 26; // room for the y-axis labels
 const PAD_RIGHT = 6;
 
@@ -63,7 +63,19 @@ export default function ForecastChart({
   const isDark = useIsDark();
   const [hoveredDate, setHoveredDate] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const bars = useRef(new Map<string, SVGPathElement>());
   const [width, setWidth] = useState(DEFAULT_W);
+
+  /** Selecting a day gives its bar a small nudge, then hands off to the page. */
+  const choose = (day: DayForecast) => {
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      bars.current.get(day.date)?.animate(
+        [{ transform: "scaleY(1)" }, { transform: "scaleY(1.06)" }, { transform: "scaleY(1)" }],
+        { duration: 380, easing: "ease-out" },
+      );
+    }
+    onDayClick?.(day);
+  };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -79,7 +91,7 @@ export default function ForecastChart({
   const plotW = Math.max(1, width - PAD_LEFT - PAD_RIGHT);
 
   const gridColor = isDark ? "#1e293b" : "#e2e8f0";
-  // Both axes carry 9-10px text, so both need 4.5:1. The previous pair leaned
+  // Both axes carry 11px text, so both need 4.5:1. The previous pair leaned
   // one step too light on each side — #94a3b8 is 2.65:1 on white, and #64748b
   // is 4.0:1 on slate-950. This pair clears the bar in both themes.
   const xAxisColor = isDark ? "#94a3b8" : "#64748b";
@@ -118,7 +130,7 @@ export default function ForecastChart({
                   x={PLOT_X - 6}
                   y={y}
                   fill={yAxisColor}
-                  fontSize={10}
+                  fontSize={11}
                   textAnchor="end"
                   dominantBaseline="middle"
                 >
@@ -150,11 +162,11 @@ export default function ForecastChart({
                 aria-pressed={
                   interactive ? day.date === selectedDate : undefined
                 }
-                onClick={() => onDayClick?.(day)}
+                onClick={() => choose(day)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    onDayClick?.(day);
+                    choose(day);
                   }
                 }}
                 onMouseEnter={() => setHoveredDate(day.date)}
@@ -180,10 +192,20 @@ export default function ForecastChart({
                   strokeWidth={1}
                 />
 
+                {/* Grows in on arrival; the days the user isn't looking at step back. */}
                 <path
+                  ref={(el) => {
+                    if (el) bars.current.set(day.date, el);
+                    else bars.current.delete(day.date);
+                  }}
                   d={barPath(barX, barY, barW, barH)}
                   fill={getScoreHexColor(score, isDark)}
-                  opacity={dimmed ? 0.45 : 1}
+                  className="m-grow-y"
+                  style={{
+                    opacity: dimmed ? 0.35 : 1,
+                    transition: "opacity .35s",
+                    animationDelay: `${200 + i * 60}ms`,
+                  }}
                 />
 
                 {/* Score above the bar */}
@@ -191,10 +213,12 @@ export default function ForecastChart({
                   x={slotX + slotW / 2}
                   y={barY - 5}
                   fill={xAxisColor}
-                  fontSize={10}
+                  fontSize={11}
                   fontWeight={600}
                   textAnchor="middle"
                   opacity={dimmed ? 0.7 : 1}
+                  className="m-fade"
+                  style={{ animationDelay: `${600 + i * 60}ms` }}
                 >
                   {rounded}
                 </text>
@@ -202,9 +226,9 @@ export default function ForecastChart({
                 {/* Two-line date label below the baseline */}
                 <text
                   x={slotX + slotW / 2}
-                  y={BASELINE + 9}
+                  y={BASELINE + 11}
                   fill={xAxisColor}
-                  fontSize={9}
+                  fontSize={11}
                   textAnchor="middle"
                   opacity={dimmed ? 0.7 : 1}
                 >
@@ -212,9 +236,9 @@ export default function ForecastChart({
                 </text>
                 <text
                   x={slotX + slotW / 2}
-                  y={BASELINE + 18}
+                  y={BASELINE + 23}
                   fill={yAxisColor}
-                  fontSize={9}
+                  fontSize={11}
                   textAnchor="middle"
                   opacity={dimmed ? 0.7 : 1}
                 >

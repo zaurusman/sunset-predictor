@@ -9,6 +9,8 @@ import { loadCachedForecast, loadLocation, saveCachedForecast } from "@/lib/stor
 import { freshnessLabel } from "@/lib/utils";
 
 import AppNav from "@/components/AppNav";
+import { useSky } from "@/components/sky/SkyProvider";
+import { usePrefersReducedMotion } from "@/lib/motion";
 import SupportFooter from "@/components/SupportFooter";
 import PageTransition from "@/components/PageTransition";
 import SunsetCard from "@/components/SunsetCard";
@@ -27,6 +29,10 @@ function ForecastContent() {
   const [busy, setBusy] = useState(false);
   const [cachedAt, setCachedAt] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  /** The expanded card: undefined until the user chooses (today opens), null when all are shut. */
+  const [openDate, setOpenDate] = useState<string | null | undefined>(undefined);
+  const { setMood } = useSky();
+  const reduce = usePrefersReducedMotion();
 
   const load = useCallback(async (loc: LocationState) => {
     // Paint the last forecast for this place first (as the Tonight tab does),
@@ -80,7 +86,35 @@ function ForecastContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleDayClick = (day: DayForecast) => setSelectedDate(day.date);
+  // The sky follows the day being looked at.
+  const selectedDay = data?.days.find((d) => d.date === selectedDate);
+  useEffect(() => {
+    if (selectedDay) setMood(selectedDay.category);
+  }, [selectedDay, setMood]);
+
+  /** Choosing a day on the chart selects it, opens its card and brings it into view. */
+  const handleDayClick = (day: DayForecast) => {
+    setSelectedDate(day.date);
+    setOpenDate(day.date);
+    // Wait for the other card to fold so the scroll lands where it settles.
+    setTimeout(() => {
+      const el = document.getElementById(`day-${day.date}`);
+      if (!el) return;
+      const header = document.querySelector<HTMLElement>("[data-scrolled]")?.offsetHeight ?? 0;
+      window.scrollTo({
+        top: el.getBoundingClientRect().top + window.scrollY - header - 8,
+        behavior: reduce ? "auto" : "smooth",
+      });
+    }, 460);
+  };
+
+  /** A card header toggles that card and selects its day. */
+  const toggleCard = (day: DayForecast, isOpen: boolean) => {
+    setSelectedDate(day.date);
+    setOpenDate(isOpen ? null : day.date);
+  };
+
+  const expandedDate = openDate === undefined ? data?.days[0]?.date : openDate;
 
   return (
     <>
@@ -131,12 +165,13 @@ function ForecastContent() {
             />
           </section>
 
-          <section className="flex flex-col gap-3">
+          <section className="flex flex-col gap-3 m-stagger">
             {data.days.map((day) => (
               <SunsetCard
                 key={day.date}
                 day={day}
-                defaultExpanded={day.date === selectedDate && day.date === data.days[0]?.date}
+                expanded={day.date === expandedDate}
+                onToggle={() => toggleCard(day, day.date === expandedDate)}
               />
             ))}
           </section>
