@@ -10,6 +10,7 @@ import { freshnessLabel } from "@/lib/utils";
 
 import AppNav from "@/components/AppNav";
 import SupportFooter from "@/components/SupportFooter";
+import PageTransition from "@/components/PageTransition";
 import SunsetCard from "@/components/SunsetCard";
 import ForecastChart from "@/components/ForecastChart";
 import LoadingState from "@/components/LoadingState";
@@ -151,11 +152,13 @@ function ForecastContent() {
 
 export default function ForecastPage() {
   return (
-    <main className="min-h-screen text-gray-900 dark:text-white px-4 py-6 max-w-2xl mx-auto">
-      <Suspense fallback={<LoadingState message="Loading forecast…" />}>
-        <ForecastContent />
-      </Suspense>
-      <SupportFooter />
-    </main>
+    <PageTransition>
+      <main className="min-h-screen text-gray-900 dark:text-white px-4 py-6 max-w-2xl mx-auto">
+        <Suspense fallback={<LoadingState message="Loading forecast…" />}>
+          <ForecastContent />
+        </Suspense>
+        <SupportFooter />
+      </main>
+    </PageTransition>
   );
 }

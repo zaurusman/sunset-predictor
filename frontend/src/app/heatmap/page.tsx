@@ -9,6 +9,7 @@ import { loadLocation } from "@/lib/storage";
 import AppNav from "@/components/AppNav";
 import { useSky } from "@/components/sky/SkyProvider";
 import SupportFooter from "@/components/SupportFooter";
+import PageTransition from "@/components/PageTransition";
 import HeatmapGrid from "@/components/HeatmapGrid";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
@@ -254,11 +255,13 @@ function HeatmapContent() {
 
 export default function HeatmapPage() {
   return (
-    <main className="min-h-screen text-gray-900 dark:text-white px-4 py-6 max-w-3xl mx-auto">
-      <Suspense fallback={<LoadingState message="Loading sunset history…" />}>
-        <HeatmapContent />
-      </Suspense>
-      <SupportFooter />
-    </main>
+    <PageTransition>
+      <main className="min-h-screen text-gray-900 dark:text-white px-4 py-6 max-w-3xl mx-auto">
+        <Suspense fallback={<LoadingState message="Loading sunset history…" />}>
+          <HeatmapContent />
+        </Suspense>
+        <SupportFooter />
+      </main>
+    </PageTransition>
   );
 }
