@@ -6,7 +6,7 @@ import { Info } from "lucide-react";
 import { forecast, isServiceBusy } from "@/lib/api";
 import type { DayForecast, ForecastResponse, LocationState } from "@/lib/types";
 import { loadCachedForecast, loadLocation, saveCachedForecast } from "@/lib/storage";
-import { freshnessLabel } from "@/lib/utils";
+import { freshnessLabel, localToday } from "@/lib/utils";
 
 import AppNav from "@/components/AppNav";
 import { useSky } from "@/components/sky/SkyProvider";
@@ -37,7 +37,7 @@ function ForecastContent() {
   const load = useCallback(async (loc: LocationState) => {
     // Paint the last forecast for this place first (as the Tonight tab does),
     // so a busy weather service leaves the week on screen, not an error.
-    const cached = loadCachedForecast(loc, new Date().toISOString().slice(0, 10));
+    const cached = loadCachedForecast(loc, localToday());
     if (cached) {
       setData(cached.forecast);
       setCachedAt(cached.cachedAt);
@@ -52,10 +52,14 @@ function ForecastContent() {
         longitude: loc.longitude,
         days: 7,
       });
-      setData(result);
+      // The server's first day is the UTC date, which just after local
+      // midnight is an evening that has already ended here.
+      const upcoming = result.days.filter((d) => d.date >= localToday());
+      setData(upcoming.length ? { ...result, days: upcoming } : result);
       setCachedAt(new Date().toISOString());
       saveCachedForecast(loc, result);
-      if (result.days.length > 0) setSelectedDate(result.days[0].date);
+      const first = upcoming[0] ?? result.days[0];
+      if (first) setSelectedDate(first.date);
     } catch (err) {
       setBusy(isServiceBusy(err));
       setError(err instanceof Error ? err.message : "Failed to load forecast.");

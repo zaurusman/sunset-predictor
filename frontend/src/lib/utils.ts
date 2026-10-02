@@ -205,10 +205,27 @@ export function formatDateLong(isoString: string): string {
   }
 }
 
+/**
+ * Today's date on the user's clock, "YYYY-MM-DD".
+ *
+ * Not the UTC date: the server treats "tonight" as the location's local date,
+ * and from local midnight until UTC midnight (00:00–03:00 in Israel) the UTC
+ * date is still yesterday. Asking for that date made the app show an evening
+ * that had already ended, and when the server was rate-limited it refused the
+ * browser-fetch fallback for it (that is for tonight only), so new places failed.
+ */
+export function localToday(): string {
+  const d = new Date();
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, "0"),
+    String(d.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
 /** True if the ISO date string refers to today. */
 export function isToday(isoDateString: string): boolean {
-  const today = new Date().toISOString().slice(0, 10);
-  return isoDateString === today;
+  return isoDateString === localToday();
 }
 
 /**
