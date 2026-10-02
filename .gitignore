@@ -66,3 +66,7 @@ frontend/.turbo/
 # a UI verification pass or a demo cannot commit fabricated observations into
 # the one dataset that measures whether the model is actually right.
 data/ratings.jsonl
+
+# Local design tooling (brainstorm mockups, Impeccable detector config)
+.superpowers/
+.impeccable/
