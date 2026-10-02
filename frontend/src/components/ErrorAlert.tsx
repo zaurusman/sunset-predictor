@@ -22,7 +22,7 @@ export default function ErrorAlert({ message, onRetry, variant = "error" }: Erro
     <div
       role={busy ? "status" : "alert"}
       className={clsx(
-        "flex items-start gap-3 px-4 py-3 rounded-xl border text-sm",
+        "m-alert flex items-start gap-3 px-4 py-3 rounded-xl border text-sm",
         busy
           ? "bg-white dark:bg-slate-800/60 border-gray-200 dark:border-slate-700/40"
           : "bg-red-500/10 border-red-500/30"

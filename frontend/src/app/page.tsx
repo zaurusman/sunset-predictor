@@ -218,7 +218,7 @@ function HomeContent() {
       {showSkeleton && <LoadingState message="Reading the sky…" />}
 
       {prediction && (
-        <div className="flex flex-col gap-4 m-fade">
+        <div className="flex flex-col gap-4 m-stagger">
           <VerdictCard prediction={prediction} targetDate={selectedDate} />
 
           <InstallPrompt
@@ -248,7 +248,7 @@ function HomeContent() {
 
           <button
             onClick={() => setPhotoOpen(true)}
-            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/40 text-gray-700 dark:text-slate-300 hover:text-orange-700 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors text-sm font-medium"
+            className="m-press flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/40 text-gray-700 dark:text-slate-300 hover:text-orange-700 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors text-sm font-medium"
           >
             <Camera size={16} />
             Share your sunset photo
@@ -265,15 +265,14 @@ function HomeContent() {
         alertsVersion={alertsVersion}
       />
 
-      {photoOpen && (
-        <SubmitPhotoModal
-          latitude={location.latitude}
-          longitude={location.longitude}
-          locationName={location.name}
-          defaultDate={selectedDate}
-          onClose={() => setPhotoOpen(false)}
-        />
-      )}
+      <SubmitPhotoModal
+        open={photoOpen}
+        latitude={location.latitude}
+        longitude={location.longitude}
+        locationName={location.name}
+        defaultDate={selectedDate}
+        onClose={() => setPhotoOpen(false)}
+      />
     </>
   );
 }

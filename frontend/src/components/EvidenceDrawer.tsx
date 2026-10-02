@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { PredictResponse } from "@/lib/types";
 import { hazeLabel, isPositiveReason } from "@/lib/utils";
+import { usePresence } from "@/lib/motion";
 import ComponentBreakdown from "./ComponentBreakdown";
 
 interface EvidenceDrawerProps {
@@ -28,6 +29,8 @@ function Stat({ label, value }: { label: string; value: string }) {
  */
 export default function EvidenceDrawer({ prediction }: EvidenceDrawerProps) {
   const [open, setOpen] = useState(false);
+  // Stays mounted while the drawer folds shut, so it can animate closed.
+  const details = usePresence(open, 450);
 
   const helping = prediction.reasons.filter(isPositiveReason);
   const hurting = prediction.reasons.filter((r) => !isPositiveReason(r));
@@ -78,43 +81,47 @@ export default function EvidenceDrawer({ prediction }: EvidenceDrawerProps) {
         ))}
       </div>
 
-      {open && (
-        <div className="px-5 py-5 border-t border-gray-200 dark:border-slate-700/40 bg-gray-50 dark:bg-slate-900/40 flex flex-col gap-5">
-          <ComponentBreakdown breakdown={prediction.physics_component_breakdown} />
+      <div className="m-collapse" data-open={open}>
+        <div>
+          {details.mounted && (
+            <div className="m-rise-sm px-5 py-5 border-t border-gray-200 dark:border-slate-700/40 bg-gray-50 dark:bg-slate-900/40 flex flex-col gap-5">
+              <ComponentBreakdown breakdown={prediction.physics_component_breakdown} />
 
-          <div>
-            <h3 className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold mb-3">
-              Weather at sunset
-            </h3>
-            <div className="grid grid-cols-3 gap-2">
-              <Stat label="Cloud" value={`${Math.round(w.cloud_total_pct)}%`} />
-              <Stat label="High cloud" value={`${Math.round(w.cloud_high_pct)}%`} />
-              <Stat label="Low cloud" value={`${Math.round(w.cloud_low_pct)}%`} />
-              {/* Archive dates carry no visibility — showing a made-up number
-                  there would be worse than showing nothing. */}
-              {w.visibility_km !== null && (
-                <Stat label="Visibility" value={`${Math.round(w.visibility_km)} km`} />
-              )}
-              <Stat label="Humidity" value={`${Math.round(w.humidity_pct)}%`} />
-              {/* The water column is what the moisture component scores, so it
-                  belongs in the evidence — surface humidity alone doesn't
-                  explain a low moisture bar. */}
-              {w.tcwv_kg_m2 !== null && (
-                <Stat label="Air moisture" value={`${Math.round(w.tcwv_kg_m2)} mm`} />
-              )}
-              <Stat label="Rain" value={`${w.precipitation_mm} mm`} />
-              {haze && (
-                <Stat
-                  label={w.aerosol_is_estimated ? "Haze (est.)" : "Haze"}
-                  value={haze}
-                />
-              )}
-              <Stat label="Temp" value={`${Math.round(w.temperature_c)}°C`} />
-              <Stat label="Wind" value={`${Math.round(w.wind_speed_kmh)} km/h`} />
+              <div>
+                <h3 className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold mb-3">
+                  Weather at sunset
+                </h3>
+                <div className="grid grid-cols-3 gap-2">
+                  <Stat label="Cloud" value={`${Math.round(w.cloud_total_pct)}%`} />
+                  <Stat label="High cloud" value={`${Math.round(w.cloud_high_pct)}%`} />
+                  <Stat label="Low cloud" value={`${Math.round(w.cloud_low_pct)}%`} />
+                  {/* Archive dates carry no visibility — showing a made-up number
+                      there would be worse than showing nothing. */}
+                  {w.visibility_km !== null && (
+                    <Stat label="Visibility" value={`${Math.round(w.visibility_km)} km`} />
+                  )}
+                  <Stat label="Humidity" value={`${Math.round(w.humidity_pct)}%`} />
+                  {/* The water column is what the moisture component scores, so it
+                      belongs in the evidence — surface humidity alone doesn't
+                      explain a low moisture bar. */}
+                  {w.tcwv_kg_m2 !== null && (
+                    <Stat label="Air moisture" value={`${Math.round(w.tcwv_kg_m2)} mm`} />
+                  )}
+                  <Stat label="Rain" value={`${w.precipitation_mm} mm`} />
+                  {haze && (
+                    <Stat
+                      label={w.aerosol_is_estimated ? "Haze (est.)" : "Haze"}
+                      value={haze}
+                    />
+                  )}
+                  <Stat label="Temp" value={`${Math.round(w.temperature_c)}°C`} />
+                  <Stat label="Wind" value={`${Math.round(w.wind_speed_kmh)} km/h`} />
+                </div>
+              </div>
             </div>
-          </div>
+          )}
         </div>
-      )}
+      </div>
     </section>
   );
 }

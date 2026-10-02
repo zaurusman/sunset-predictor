@@ -7,6 +7,7 @@ import { sameLocation } from "@/lib/storage";
 import { isStandalone } from "@/lib/install";
 import { alertsAvailable, enableAlerts, isAlertOn, permission, setAlert } from "@/lib/push";
 import LocationSearch from "./LocationSearch";
+import { usePresence } from "@/lib/motion";
 
 interface LocationSheetProps {
   open: boolean;
@@ -65,7 +66,9 @@ export default function LocationSheet({
     };
   }, [open, alertsVersion]);
 
-  if (!open) return null;
+  // Stays mounted while it slides away, so closing animates too.
+  const sheet = usePresence(open, 220);
+  if (!sheet.mounted) return null;
 
   const toggleBell = async (place: LocationState) => {
     const key = `${place.latitude},${place.longitude}`;
@@ -95,12 +98,14 @@ export default function LocationSheet({
       <button
         aria-label="Close location picker"
         onClick={onClose}
-        className="absolute inset-0 bg-slate-900/30 dark:bg-slate-950/60"
+        data-closing={sheet.closing}
+        className="m-backdrop absolute inset-0 bg-slate-900/30 dark:bg-slate-950/60"
       />
 
       <div
         role="dialog"
         aria-modal="true"
+        data-closing={sheet.closing}
         aria-label="Choose a location"
         className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-4 pt-3 flex flex-col gap-4 shadow-2xl m-sheet"
         style={{ paddingBottom: "max(2rem, env(safe-area-inset-bottom))" }}

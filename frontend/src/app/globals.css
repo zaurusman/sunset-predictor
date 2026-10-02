@@ -92,6 +92,14 @@ body {
 
 .m-rise { animation: rise 0.56s var(--ease-out) backwards; }
 .m-rise-sm { animation: rise-sm 0.42s var(--ease-out) backwards; }
+/* A stack of cards rising one after another. Children that render nothing take
+   no slot, so no wrapper divs (and no stray gaps) are needed. Fixed overlays
+   (a sheet a card opens) are excluded: they have their own entrance. */
+.m-stagger > :not(.fixed) { animation: rise 0.56s var(--ease-out) backwards; }
+.m-stagger > :nth-child(2) { animation-delay: 70ms; }
+.m-stagger > :nth-child(3) { animation-delay: 140ms; }
+.m-stagger > :nth-child(4) { animation-delay: 210ms; }
+.m-stagger > :nth-child(n + 5) { animation-delay: 280ms; }
 .m-fade { animation: fade 0.3s ease-out backwards; }
 .m-word { display: inline-block; overflow: hidden; vertical-align: bottom; padding-bottom: 2px; }
 .m-word > span { display: inline-block; animation: word-rise 0.6s var(--ease-out) backwards; }
@@ -137,7 +145,7 @@ body {
 
 /* ── Reduced motion: keep colour and opacity, drop movement ─────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .m-rise, .m-rise-sm, .m-word > span, .m-grow-y, .m-grow-x, .m-pop,
+  .m-rise, .m-rise-sm, .m-stagger > :not(.fixed), .m-word > span, .m-grow-y, .m-grow-x, .m-pop,
   .m-reveal, .m-drop, .m-alert, .m-modal { animation: fade 0.2s ease-out backwards; }
   .m-modal[data-closing="true"] { animation: modal-out 0.12s linear forwards; transform: none; }
   .m-sheet, .m-sheet[data-closing="true"] { animation: none; }
