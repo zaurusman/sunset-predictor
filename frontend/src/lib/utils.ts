@@ -18,8 +18,8 @@ export const SCORE_BANDS: readonly (readonly [number, SunsetCategory])[] = [
   // Mirrors SCORE_THRESHOLDS in backend/app/services/scoring_engine.py, which
   // labels the category pill. They drifted once (80/65/50/30 here after the
   // backend moved to 85/72/55/38), and an 82 "Great" was drawn in Epic purple.
-  [85, "Epic"],
-  [72, "Great"],
+  [82, "Epic"],
+  [70, "Great"],
   [55, "Good"],
   [38, "Decent"],
   [0, "Poor"],

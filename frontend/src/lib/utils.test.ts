@@ -6,8 +6,8 @@ describe("scoreCategory", () => {
   // which labels the category pill. A drift here paints an 82 "Great" purple.
   it("bands at the backend's thresholds", () => {
     expect(SCORE_BANDS).toEqual([
-      [85, "Epic"],
-      [72, "Great"],
+      [82, "Epic"],
+      [70, "Great"],
       [55, "Good"],
       [38, "Decent"],
       [0, "Poor"],
@@ -15,11 +15,10 @@ describe("scoreCategory", () => {
   });
 
   it("puts each edge in the upper band", () => {
-    expect(scoreCategory(84.9)).toBe("Great");
-    expect(scoreCategory(85)).toBe("Epic");
-    expect(scoreCategory(82)).toBe("Great");
-    expect(scoreCategory(72)).toBe("Great");
-    expect(scoreCategory(71)).toBe("Good");
+    expect(scoreCategory(81.9)).toBe("Great");
+    expect(scoreCategory(82)).toBe("Epic");
+    expect(scoreCategory(70)).toBe("Great");
+    expect(scoreCategory(69.9)).toBe("Good");
     expect(scoreCategory(55)).toBe("Good");
     expect(scoreCategory(38)).toBe("Decent");
     expect(scoreCategory(37)).toBe("Poor");
