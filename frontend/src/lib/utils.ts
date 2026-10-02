@@ -14,11 +14,19 @@ import type { SunsetCategory } from "./types";
  * the breakdown bars banded at 75/50/30, so one score could render in two
  * different colours on the same screen.
  */
+export const SCORE_BANDS: readonly (readonly [number, SunsetCategory])[] = [
+  // Mirrors SCORE_THRESHOLDS in backend/app/services/scoring_engine.py, which
+  // labels the category pill. They drifted once (80/65/50/30 here after the
+  // backend moved to 85/72/55/38), and an 82 "Great" was drawn in Epic purple.
+  [82, "Epic"],
+  [70, "Great"],
+  [55, "Good"],
+  [38, "Decent"],
+  [0, "Poor"],
+];
+
 export function scoreCategory(score: number): SunsetCategory {
-  if (score >= 80) return "Epic";
-  if (score >= 65) return "Great";
-  if (score >= 50) return "Good";
-  if (score >= 30) return "Decent";
+  for (const [min, category] of SCORE_BANDS) if (score >= min) return category;
   return "Poor";
 }
 

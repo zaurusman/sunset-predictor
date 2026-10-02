@@ -7,7 +7,10 @@ import type { HeatmapDay, HeatmapResponse, LocationState } from "@/lib/types";
 import { loadLocation } from "@/lib/storage";
 
 import AppNav from "@/components/AppNav";
+import { useSky } from "@/components/sky/SkyProvider";
+import { staggerDelay } from "@/lib/motion";
 import SupportFooter from "@/components/SupportFooter";
+import PageTransition from "@/components/PageTransition";
 import HeatmapGrid from "@/components/HeatmapGrid";
 import LoadingState from "@/components/LoadingState";
 import ErrorAlert from "@/components/ErrorAlert";
@@ -81,6 +84,8 @@ function ProgressBar({ loading, months }: { loading: boolean; months: number }) 
 }
 
 function HeatmapContent() {
+  const { setMood } = useSky();
+  useEffect(() => setMood("Neutral"), [setMood]);
   const params = useSearchParams();
 
   const dataCache = useRef<Map<MonthsOption, HeatmapResponse>>(new Map());
@@ -200,13 +205,14 @@ function HeatmapContent() {
 
       {data && (
         <div
-          className={`flex flex-col gap-5 ${loading ? "opacity-40 pointer-events-none" : "animate-fade-in"}`}
+          className={`flex flex-col gap-5 ${loading ? "opacity-40 pointer-events-none" : "m-fade"}`}
         >
           <section className="bg-white dark:bg-slate-900/60 rounded-2xl border border-gray-200 dark:border-slate-700/40 p-5">
             <h2 className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold mb-4">
               Daily sunset scores
             </h2>
-            <HeatmapGrid days={data.days} />
+            {/* Keyed on the range so switching 6m/12m replays the wave. */}
+            <HeatmapGrid key={`${data.days[0]?.date}-${data.days.length}`} days={data.days} />
           </section>
 
           {bestMonths.length > 0 && (
@@ -229,8 +235,8 @@ function HeatmapContent() {
                       </div>
                       <div className="h-1.5 rounded-full bg-gray-200 dark:bg-slate-700">
                         <div
-                          className="h-full rounded-full bg-orange-500"
-                          style={{ width: `${avg}%` }}
+                          className="m-grow-x h-full rounded-full bg-orange-500"
+                          style={{ width: `${avg}%`, animationDelay: `${staggerDelay(rank, 80, 240)}ms` }}
                         />
                       </div>
                     </div>
@@ -251,11 +257,13 @@ function HeatmapContent() {
 
 export default function HeatmapPage() {
   return (
-    <main className="min-h-screen bg-gray-50 dark:bg-slate-950 text-gray-900 dark:text-white px-4 py-6 max-w-3xl mx-auto">
-      <Suspense fallback={<LoadingState message="Loading sunset history…" />}>
-        <HeatmapContent />
-      </Suspense>
-      <SupportFooter />
-    </main>
+    <PageTransition>
+      <main className="min-h-screen text-gray-900 dark:text-white px-4 py-6 max-w-3xl mx-auto">
+        <Suspense fallback={<LoadingState message="Loading sunset history…" />}>
+          <HeatmapContent />
+        </Suspense>
+        <SupportFooter />
+      </main>
+    </PageTransition>
   );
 }

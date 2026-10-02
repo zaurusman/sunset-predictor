@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useId, useRef, useState } from "react";
 import type { PredictResponse } from "@/lib/types";
 import {
   countdownTo,
@@ -9,6 +10,13 @@ import {
   isToday,
 } from "@/lib/utils";
 import { useIsDark } from "@/lib/useIsDark";
+import {
+  markSunsetPlayed,
+  shouldPlaySunset,
+  useCountUp,
+  usePrefersReducedMotion,
+} from "@/lib/motion";
+import { SCORE_START_MS, useSky } from "./sky/SkyProvider";
 
 interface VerdictCardProps {
   prediction: PredictResponse;
@@ -28,7 +36,7 @@ function headlineFor(prediction: PredictResponse, targetDate: string): string {
   if (targetDate < today) return `A ${prediction.category.toLowerCase()} one`;
   if (go) return "Worth heading out";
 
-  // The go-outside bar (70) sits above the Great band (65), so a 65–69 evening
+  // The go-outside bar (75) sits above the Great band (70), so a 70–74 evening
   // is genuinely nice without being worth changing plans for. A flat "Not
   // tonight" here would contradict the green Great badge beside it.
   if (prediction.beauty_score_0_100 >= 50) return "Worth a glance";
@@ -56,6 +64,31 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
 export default function VerdictCard({ prediction, targetDate }: VerdictCardProps) {
   const isDark = useIsDark();
+  const reduce = usePrefersReducedMotion();
+  const { setMood, playSunset } = useSky();
+  const ref = useRef<HTMLElement>(null);
+  const ringId = useId();
+
+  // Decided once, at mount: the sun sets on the first open of each day only.
+  // This card renders only after the page has read localStorage, so reading it
+  // here never differs from a server render.
+  const [sunset] = useState(
+    () => !reduce && isToday(targetDate) && shouldPlaySunset(targetDate),
+  );
+  const sunsetStarted = useRef(false);
+  /** Bumped by a long-press on the ring, which replays the sunset on demand. */
+  const [replays, setReplays] = useState(0);
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => {
+    if (sunset && !sunsetStarted.current) {
+      sunsetStarted.current = true;
+      markSunsetPlayed(targetDate);
+      playSunset(ref.current!, prediction.category);
+    } else {
+      setMood(prediction.category);
+    }
+  }, [sunset, prediction.category, targetDate, playSunset, setMood]);
 
   const monthName = new Date(prediction.sunset_time).toLocaleDateString(undefined, {
     month: "long",
@@ -74,20 +107,73 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
   const countdown = isToday(targetDate) ? countdownTo(prediction.sunset_time) : null;
   const why = prediction.reasons[0];
 
+  // The number counts up as the ring fills; after the sunset it waits for the
+  // sun to touch the horizon. Later changes glide from the value on screen.
+  const withSunset = sunset || replays > 0;
+  const shown = useCountUp(score, {
+    durationMs: withSunset ? 1500 : 1000,
+    delayMs: withSunset ? SCORE_START_MS : 0,
+    enabled: !reduce,
+    restart: replays,
+  });
+
+  /** Holding the ring for a moment sets the sun again. */
+  const replaySunset = () => {
+    if (reduce || !ref.current) return;
+    // A tiny tick on phones that support it; only after a real touch, or Chrome logs an error.
+    if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.(12);
+    playSunset(ref.current, prediction.category);
+    setReplays((n) => n + 1);
+  };
+  const startPress = () => {
+    clearTimeout(pressTimer.current);
+    pressTimer.current = setTimeout(replaySunset, 550);
+  };
+  const cancelPress = () => clearTimeout(pressTimer.current);
+  const tipAngle = ((-90 + 3.6 * shown) * Math.PI) / 180;
+
   return (
-    <section className="bg-white dark:bg-slate-900/60 rounded-2xl border border-gray-200 dark:border-slate-700/40 p-5 flex flex-col gap-4">
+    <section
+      ref={ref}
+      className="m-rise bg-white dark:bg-slate-900/60 rounded-2xl border border-gray-200 dark:border-slate-700/40 p-5 flex flex-col gap-4"
+    >
       <div className="flex items-start gap-4">
         <div className="flex-1 flex flex-col gap-1.5 min-w-0">
           <span className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold">
             {isToday(targetDate) ? "Tonight" : targetDate}
           </span>
-          <h1 className="text-[27px] leading-tight font-bold tracking-tight text-gray-900 dark:text-white text-pretty">
-            {headline}
+          {/* Keyed so a new answer (or a replayed sunset) rises in word by word. */}
+          <h1
+            key={`${headline}-${replays}`}
+            className="text-[27px] leading-tight font-bold tracking-tight text-gray-900 dark:text-white text-pretty"
+          >
+            {headline.split(" ").map((word, i) => (
+              <span key={i}>
+                {i > 0 && " "}
+                <span className="m-word">
+                  <span style={{ animationDelay: `${i * 70}ms` }}>{word}</span>
+                </span>
+              </span>
+            ))}
           </h1>
         </div>
 
-        <div className="relative w-[62px] h-[62px] flex-shrink-0">
-          <svg width="62" height="62" viewBox="0 0 62 62" aria-hidden="true">
+        <div
+          className="relative w-[62px] h-[62px] flex-shrink-0 select-none [-webkit-touch-callout:none] transition-transform duration-150 active:scale-95"
+          onPointerDown={startPress}
+          onPointerUp={cancelPress}
+          onPointerLeave={cancelPress}
+          onPointerCancel={cancelPress}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <svg width="62" height="62" viewBox="0 0 62 62" aria-hidden="true" className="overflow-visible">
+            <defs>
+              {/* From the band's deeper shade to its brighter one, along the arc. */}
+              <linearGradient id={ringId} x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor={getScoreHexColor(score, !isDark)} />
+                <stop offset="100%" stopColor={colour} />
+              </linearGradient>
+            </defs>
             <circle
               cx="31"
               cy="31"
@@ -101,19 +187,31 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
               cy="31"
               r={RADIUS}
               fill="none"
-              stroke={colour}
+              stroke={`url(#${ringId})`}
               strokeWidth="6"
               strokeLinecap="round"
-              strokeDasharray={`${(CIRCUMFERENCE * score) / 100} ${CIRCUMFERENCE}`}
+              strokeDasharray={`${(CIRCUMFERENCE * shown) / 100} ${CIRCUMFERENCE}`}
               transform="rotate(-90 31 31)"
-              style={{ transition: "stroke-dasharray 0.6s ease" }}
+              // A zero-length dash still draws its round cap as a dot.
+              opacity={shown < 1 ? 0 : 1}
+            />
+            {/* The travelling tip that leads the fill. */}
+            <circle
+              cx={31 + RADIUS * Math.cos(tipAngle)}
+              cy={31 + RADIUS * Math.sin(tipAngle)}
+              r="4.5"
+              fill="#fff"
+              stroke={colour}
+              strokeWidth="2.5"
+              style={{ filter: `drop-shadow(0 0 4px ${colour})`, opacity: shown < 1 ? 0 : 1 }}
             />
           </svg>
           <div
             className="absolute inset-0 flex items-center justify-center text-[21px] font-bold tabular-nums tracking-tight"
             style={{ color: colour }}
+            aria-hidden="true"
           >
-            {score}
+            {Math.round(shown)}
           </div>
           <span className="sr-only">{score} out of 100</span>
         </div>

@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { Camera, CheckCircle, Upload, X } from "lucide-react";
 import { submitPhoto } from "@/lib/api";
+import { usePresence } from "@/lib/motion";
 
 interface Props {
   latitude: number;
@@ -14,13 +15,24 @@ interface Props {
 
 type Status = "idle" | "submitting" | "success" | "error";
 
-export default function SubmitPhotoModal({
+/**
+ * Stays mounted while it animates closed; the dialog itself unmounts after
+ * each close, so every open starts with a fresh form, as it always has.
+ */
+export default function SubmitPhotoModal({ open, ...props }: Props & { open: boolean }) {
+  const presence = usePresence(open, 180);
+  if (!presence.mounted) return null;
+  return <PhotoDialog {...props} closing={presence.closing} />;
+}
+
+function PhotoDialog({
   latitude,
   longitude,
   locationName,
   defaultDate,
   onClose,
-}: Props) {
+  closing,
+}: Props & { closing: boolean }) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [photoDate, setPhotoDate] = useState(defaultDate);
@@ -84,7 +96,8 @@ export default function SubmitPhotoModal({
   return (
     /* Backdrop */
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      className="m-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      data-closing={closing}
       onClick={(e) => e.target === e.currentTarget && onClose()}
       onKeyDown={handleKeyDown}
       role="dialog"
@@ -92,7 +105,10 @@ export default function SubmitPhotoModal({
       aria-label="Submit sunset photo"
       tabIndex={-1}
     >
-      <div className="relative w-full max-w-md bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700/60 rounded-2xl shadow-2xl p-6 flex flex-col gap-5">
+      <div
+        data-closing={closing}
+        className="m-modal relative w-full max-w-md bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700/60 rounded-2xl shadow-2xl p-6 flex flex-col gap-5"
+      >
         {/* Close button */}
         <button
           onClick={onClose}

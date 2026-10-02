@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { PlusSquare, Share, X } from "lucide-react";
+import { usePresence } from "@/lib/motion";
 
 interface Props {
   open: boolean;
@@ -19,7 +20,9 @@ export default function IosInstallSheet({ open, onClose }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  if (!open) return null;
+  // Stays mounted while it slides away, so closing animates too.
+  const sheet = usePresence(open, 220);
+  if (!sheet.mounted) return null;
 
   const steps = [
     { icon: <Share size={18} />, text: <>Tap <strong>Share</strong> in Safari&apos;s toolbar</> },
@@ -31,13 +34,15 @@ export default function IosInstallSheet({ open, onClose }: Props) {
       <button
         aria-label="Close"
         onClick={onClose}
-        className="absolute inset-0 bg-slate-900/30 dark:bg-slate-950/60"
+        data-closing={sheet.closing}
+        className="m-backdrop absolute inset-0 bg-slate-900/30 dark:bg-slate-950/60"
       />
       <div
         role="dialog"
         aria-modal="true"
+        data-closing={sheet.closing}
         aria-label="Add Afterglow to your Home Screen"
-        className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-5 pt-4 flex flex-col gap-4 shadow-2xl animate-slide-up"
+        className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-t-3xl border-t border-x border-gray-200 dark:border-slate-700/50 px-5 pt-4 flex flex-col gap-4 shadow-2xl m-sheet"
         style={{ paddingBottom: "max(2rem, env(safe-area-inset-bottom))" }}
       >
         <div className="flex items-center gap-3">

@@ -110,9 +110,14 @@ PRECIP_FLOOR = 0.15
 # here").
 #
 # Re-derive these whenever the raw scale moves, alongside REFERENCE_QUANTILES.
+# Epic and Great were then lowered by hand (85 → 82, 72 → 70, 2026-10-03) at
+# the owner's call: an 82 reads as Epic to people looking at the sky. Epic
+# drives push alerts, so this also sends them a little more often.
+#
+# Mirrored by SCORE_BANDS in frontend/src/lib/utils.ts — change both together.
 SCORE_THRESHOLDS: list[tuple[float, str]] = [
-    (85, "Epic"),
-    (72, "Great"),
+    (82, "Epic"),
+    (70, "Great"),
     (55, "Good"),
     (38, "Decent"),
     (0, "Poor"),

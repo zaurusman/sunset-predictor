@@ -17,6 +17,7 @@ import { freshnessLabel } from "@/lib/utils";
 
 import AppNav from "@/components/AppNav";
 import SupportFooter from "@/components/SupportFooter";
+import PageTransition from "@/components/PageTransition";
 import DatePicker from "@/components/DatePicker";
 import ErrorAlert from "@/components/ErrorAlert";
 import EvidenceDrawer from "@/components/EvidenceDrawer";
@@ -31,6 +32,20 @@ import ViewingCurve from "@/components/ViewingCurve";
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** A place passed in the URL by the other tabs, if there is a valid one. */
+function locationFromParams(params: URLSearchParams): LocationState | null {
+  const lat = Number(params.get("lat"));
+  const lon = Number(params.get("lon"));
+  const name = params.get("name");
+  return Number.isFinite(lat) && Number.isFinite(lon) && (lat !== 0 || lon !== 0)
+    ? {
+        latitude: lat,
+        longitude: lon,
+        name: name || `${lat.toFixed(3)}, ${lon.toFixed(3)}`,
+      }
+    : null;
 }
 
 function HomeContent() {
@@ -103,19 +118,7 @@ function HomeContent() {
   // we remembered. Nothing was persisted before, so every visit used to start
   // from an empty screen and a fresh permission prompt.
   useEffect(() => {
-    const lat = Number(params.get("lat"));
-    const lon = Number(params.get("lon"));
-    const name = params.get("name");
-
-    const fromUrl =
-      Number.isFinite(lat) && Number.isFinite(lon) && (lat !== 0 || lon !== 0)
-        ? {
-            latitude: lat,
-            longitude: lon,
-            name: name || `${lat.toFixed(3)}, ${lon.toFixed(3)}`,
-          }
-        : null;
-
+    const fromUrl = locationFromParams(params);
     const initial = fromUrl ?? loadLocation();
 
     setPlaces(loadPlaces());
@@ -150,8 +153,15 @@ function HomeContent() {
 
   // Nothing is known until localStorage has been read; rendering the first-run
   // screen before then would flash it at returning visitors on every load.
+  // The header still renders (with the place from the URL, when a tab passed
+  // one) so it stays anchored while the tab transition slides this page in.
   if (!hydrated) {
-    return <div className="min-h-screen" aria-hidden="true" />;
+    return (
+      <>
+        <AppNav location={locationFromParams(params)} active="tonight" />
+        <div className="min-h-screen" aria-hidden="true" />
+      </>
+    );
   }
 
   if (!location) {
@@ -208,7 +218,7 @@ function HomeContent() {
       {showSkeleton && <LoadingState message="Reading the sky…" />}
 
       {prediction && (
-        <div className="flex flex-col gap-4 animate-fade-in">
+        <div className="flex flex-col gap-4 m-stagger">
           <VerdictCard prediction={prediction} targetDate={selectedDate} />
 
           <InstallPrompt
@@ -238,7 +248,7 @@ function HomeContent() {
 
           <button
             onClick={() => setPhotoOpen(true)}
-            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/40 text-gray-700 dark:text-slate-300 hover:text-orange-700 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors text-sm font-medium"
+            className="m-press flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-white dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/40 text-gray-700 dark:text-slate-300 hover:text-orange-700 dark:hover:text-orange-400 hover:border-orange-500/40 transition-colors text-sm font-medium"
           >
             <Camera size={16} />
             Share your sunset photo
@@ -255,26 +265,27 @@ function HomeContent() {
         alertsVersion={alertsVersion}
       />
 
-      {photoOpen && (
-        <SubmitPhotoModal
-          latitude={location.latitude}
-          longitude={location.longitude}
-          locationName={location.name}
-          defaultDate={selectedDate}
-          onClose={() => setPhotoOpen(false)}
-        />
-      )}
+      <SubmitPhotoModal
+        open={photoOpen}
+        latitude={location.latitude}
+        longitude={location.longitude}
+        locationName={location.name}
+        defaultDate={selectedDate}
+        onClose={() => setPhotoOpen(false)}
+      />
     </>
   );
 }
 
 export default function HomePage() {
   return (
-    <main className="min-h-screen bg-gray-50 dark:bg-slate-950 text-gray-900 dark:text-white px-4 py-6 max-w-2xl mx-auto">
-      <Suspense fallback={<div className="min-h-screen" aria-hidden="true" />}>
-        <HomeContent />
-      </Suspense>
-      <SupportFooter />
-    </main>
+    <PageTransition>
+      <main className="min-h-screen text-gray-900 dark:text-white px-4 py-6 max-w-2xl mx-auto">
+        <Suspense fallback={<div className="min-h-screen" aria-hidden="true" />}>
+          <HomeContent />
+        </Suspense>
+        <SupportFooter />
+      </main>
+    </PageTransition>
   );
 }

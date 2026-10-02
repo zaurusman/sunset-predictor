@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Calendar, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
+import { usePresence } from "@/lib/motion";
 
 interface DatePickerProps {
   value: string; // "YYYY-MM-DD"
@@ -58,6 +59,7 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
   maxDate.setDate(todayDate.getDate() + 7);
 
   const [open, setOpen] = useState(false);
+  const popover = usePresence(open, 180);
   const [viewYear, setViewYear] = useState(() => parseIso(value).getFullYear());
   const [viewMonth, setViewMonth] = useState(() => parseIso(value).getMonth());
   const containerRef = useRef<HTMLDivElement>(null);
@@ -127,91 +129,97 @@ export default function DatePicker({ value, onChange, disabled = false }: DatePi
       </button>
 
       {/* Calendar popover */}
-      {open && (
-        <div className="absolute z-50 top-full mt-2 left-1/2 -translate-x-1/2 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-2xl p-4 w-72">
-          {/* Month/year navigation */}
-          <div className="flex items-center justify-between mb-3">
-            <button
-              onClick={prevMonth}
-              disabled={!canPrev}
-              className="p-1.5 rounded-lg text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
-            >
-              <ChevronLeft size={14} />
-            </button>
-            <span className="text-sm font-semibold text-gray-900 dark:text-white">
-              {MONTH_NAMES[viewMonth]} {viewYear}
-            </span>
-            <button
-              onClick={nextMonth}
-              disabled={!canNext}
-              className="p-1.5 rounded-lg text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
-            >
-              <ChevronRight size={14} />
-            </button>
-          </div>
-
-          {/* Weekday headers */}
-          <div className="grid grid-cols-7 mb-1">
-            {WEEKDAYS.map((d) => (
-              <div key={d} className="text-center text-gray-400 dark:text-slate-500 text-xs py-1 font-medium">
-                {d}
-              </div>
-            ))}
-          </div>
-
-          {/* Day grid */}
-          <div className="grid grid-cols-7 gap-y-0.5">
-            {cells.map((day, idx) => {
-              if (day === null) return <div key={`e${idx}`} />;
-
-              const cellDate = new Date(viewYear, viewMonth, day);
-              const cellIso = toIso(cellDate);
-              const isSelected = cellIso === value;
-              const isToday = cellDate.getTime() === todayDate.getTime();
-              const isFuture = cellDate > todayDate;
-              const isDisabled = cellDate > maxDate || cellDate < minDate;
-
-              let cls =
-                "text-xs h-8 w-full rounded-lg font-medium transition-colors ";
-              if (isDisabled) {
-                cls += "text-gray-300 dark:text-slate-600 cursor-not-allowed";
-              } else if (isSelected) {
-                cls += "bg-orange-500 text-white";
-              } else if (isToday) {
-                cls += "border border-orange-500/50 text-orange-500 dark:text-orange-400 hover:bg-orange-500/10";
-              } else if (isFuture) {
-                cls += "text-indigo-500 dark:text-indigo-300 hover:bg-indigo-500/10";
-              } else {
-                cls += "text-gray-700 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700";
-              }
-
-              return (
-                <button
-                  key={day}
-                  onClick={() => !isDisabled && selectDay(day)}
-                  disabled={isDisabled}
-                  className={cls}
-                >
-                  {day}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Footer */}
-          <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-700/60 flex items-center justify-between gap-2">
-            <span className="text-xs text-indigo-400/70 dark:text-indigo-300/70 flex items-center gap-1">
-              <span className="inline-block w-2 h-2 rounded-sm bg-indigo-400/40" />
-              Forecast dates
-            </span>
-            {value !== todayIso() && (
+      {/* Positioning and motion live on separate elements: the drop animation
+          sets transform, which would cancel the centring translate. */}
+      {popover.mounted && (
+        <div className="absolute z-50 top-full mt-2 left-1/2 -translate-x-1/2 w-72">
+          <div
+            className={`m-drop bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-2xl p-4 ${popover.closing ? "opacity-0 transition-opacity duration-150 pointer-events-none" : ""}`}
+          >
+            {/* Month/year navigation */}
+            <div className="flex items-center justify-between mb-3">
               <button
-                onClick={goToday}
-                className="text-xs text-orange-500 dark:text-orange-400 hover:text-orange-400 dark:hover:text-orange-300 transition-colors"
+                onClick={prevMonth}
+                disabled={!canPrev}
+                className="p-1.5 rounded-lg text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
               >
-                Back to today
+                <ChevronLeft size={14} />
               </button>
-            )}
+              <span className="text-sm font-semibold text-gray-900 dark:text-white">
+                {MONTH_NAMES[viewMonth]} {viewYear}
+              </span>
+              <button
+                onClick={nextMonth}
+                disabled={!canNext}
+                className="p-1.5 rounded-lg text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronRight size={14} />
+              </button>
+            </div>
+
+            {/* Weekday headers */}
+            <div className="grid grid-cols-7 mb-1">
+              {WEEKDAYS.map((d) => (
+                <div key={d} className="text-center text-gray-400 dark:text-slate-500 text-xs py-1 font-medium">
+                  {d}
+                </div>
+              ))}
+            </div>
+
+            {/* Day grid */}
+            <div className="grid grid-cols-7 gap-y-0.5">
+              {cells.map((day, idx) => {
+                if (day === null) return <div key={`e${idx}`} />;
+
+                const cellDate = new Date(viewYear, viewMonth, day);
+                const cellIso = toIso(cellDate);
+                const isSelected = cellIso === value;
+                const isToday = cellDate.getTime() === todayDate.getTime();
+                const isFuture = cellDate > todayDate;
+                const isDisabled = cellDate > maxDate || cellDate < minDate;
+
+                let cls =
+                  "text-xs h-8 w-full rounded-lg font-medium transition-colors ";
+                if (isDisabled) {
+                  cls += "text-gray-300 dark:text-slate-600 cursor-not-allowed";
+                } else if (isSelected) {
+                  cls += "bg-orange-500 text-white";
+                } else if (isToday) {
+                  cls += "border border-orange-500/50 text-orange-500 dark:text-orange-400 hover:bg-orange-500/10";
+                } else if (isFuture) {
+                  cls += "text-indigo-500 dark:text-indigo-300 hover:bg-indigo-500/10";
+                } else {
+                  cls += "text-gray-700 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700";
+                }
+
+                return (
+                  <button
+                    key={day}
+                    onClick={() => !isDisabled && selectDay(day)}
+                    disabled={isDisabled}
+                    className={cls}
+                  >
+                    {day}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Footer */}
+            <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-700/60 flex items-center justify-between gap-2">
+              <span className="text-xs text-indigo-400/70 dark:text-indigo-300/70 flex items-center gap-1">
+                <span className="inline-block w-2 h-2 rounded-sm bg-indigo-400/40" />
+                Forecast dates
+              </span>
+              {value !== todayIso() && (
+                <button
+                  onClick={goToday}
+                  className="text-xs text-orange-500 dark:text-orange-400 hover:text-orange-400 dark:hover:text-orange-300 transition-colors"
+                >
+                  Back to today
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

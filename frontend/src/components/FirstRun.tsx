@@ -1,22 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigation } from "lucide-react";
 import type { LocationState, SunsetCategory } from "@/lib/types";
+import { SCORE_BANDS } from "@/lib/utils";
 import LocationSearch from "./LocationSearch";
+import { useSky } from "./sky/SkyProvider";
 
 interface FirstRunProps {
   onLocationSelect: (location: LocationState) => void;
 }
 
-/** Band widths mirror the thresholds in `scoreCategory`. */
-const SCALE: { label: SunsetCategory; grow: number; className: string }[] = [
-  { label: "Poor", grow: 30, className: "bg-red-600 dark:bg-red-400" },
-  { label: "Decent", grow: 20, className: "bg-orange-600 dark:bg-orange-400" },
-  { label: "Good", grow: 15, className: "bg-yellow-600 dark:bg-yellow-400" },
-  { label: "Great", grow: 15, className: "bg-emerald-600 dark:bg-emerald-400" },
-  { label: "Epic", grow: 20, className: "bg-violet-600 dark:bg-violet-400" },
-];
+const BAND_CLASSES: Record<SunsetCategory, string> = {
+  Poor: "bg-red-600 dark:bg-red-400",
+  Decent: "bg-orange-600 dark:bg-orange-400",
+  Good: "bg-yellow-600 dark:bg-yellow-400",
+  Great: "bg-emerald-600 dark:bg-emerald-400",
+  Epic: "bg-violet-600 dark:bg-violet-400",
+};
+
+/** Band widths are the score ranges themselves, so the scale can't drift from the bands. */
+const SCALE = [...SCORE_BANDS].reverse().map(([min, label], i, bands) => ({
+  label,
+  grow: (bands[i + 1]?.[0] ?? 100) - min,
+  className: BAND_CLASSES[label],
+}));
 
 /**
  * Shown once, on a first visit with nothing remembered.
@@ -27,6 +35,8 @@ const SCALE: { label: SunsetCategory; grow: number; className: string }[] = [
 export default function FirstRun({ onLocationSelect }: FirstRunProps) {
   const [locating, setLocating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { setMood } = useSky();
+  useEffect(() => setMood("Neutral"), [setMood]);
 
   const useMyLocation = () => {
     if (!navigator.geolocation) {
@@ -53,7 +63,7 @@ export default function FirstRun({ onLocationSelect }: FirstRunProps) {
   };
 
   return (
-    <div className="flex flex-col gap-6 animate-fade-in">
+    <div className="flex flex-col gap-6 m-fade">
       <div className="flex flex-col gap-2 pt-6">
         <h1 className="text-[28px] leading-tight font-bold tracking-tight text-gray-900 dark:text-white text-pretty">
           Where are you watching from?
@@ -109,7 +119,7 @@ export default function FirstRun({ onLocationSelect }: FirstRunProps) {
           ))}
         </div>
         <p className="text-gray-700 dark:text-slate-300 text-xs leading-relaxed text-pretty">
-          Most evenings land in the 40s and 50s. Past 70, Afterglow tells you it&rsquo;s
+          Most evenings land in the 40s and 50s. Past 75, Afterglow tells you it&rsquo;s
           worth changing your plans for.
         </p>
       </div>
