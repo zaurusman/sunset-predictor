@@ -77,12 +77,55 @@ async function request<T>(
 // Backend endpoints
 // ---------------------------------------------------------------------------
 
-/** Predict sunset beauty for a single location and date. */
+/** Only Open-Meteo, over HTTPS, may be fetched on the server's behalf. */
+function isOpenMeteoUrl(url: unknown): url is string {
+  if (typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && (u.hostname === "open-meteo.com" || u.hostname.endsWith(".open-meteo.com"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Predict sunset beauty for a single location and date.
+ *
+ * Proof of concept (backend/app/utils/client_fetch.py): Open-Meteo limits
+ * calls per IP address, and the server's address is shared with other apps.
+ * When Open-Meteo refuses the server, tonight's prediction answers 503 with
+ * `client_fetch` — the URL it needed. The browser, which has its own limit,
+ * fetches it and asks again with everything fetched so far; the server still
+ * does all the scoring. A few rounds at most.
+ */
 export async function predict(body: PredictRequest): Promise<PredictResponse> {
-  return request<PredictResponse>(`${API_BASE}/predict`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  const clientData: Record<string, unknown> = {};
+  for (let round = 0; round < 8; round++) {
+    const payload = Object.keys(clientData).length ? { ...body, client_data: clientData } : body;
+    const res = await fetch(`${API_BASE}/predict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) return res.json() as Promise<PredictResponse>;
+
+    let detail: unknown = res.statusText;
+    let fetchUrl: unknown;
+    try {
+      const err = await res.json();
+      detail = err?.detail ?? detail;
+      fetchUrl = err?.client_fetch;
+    } catch {
+      // ignore parse errors
+    }
+    if (res.status !== 503 || !isOpenMeteoUrl(fetchUrl) || fetchUrl in clientData) {
+      throw new ApiError(res.status, `API error ${res.status}: ${detail}`);
+    }
+    const weather = await fetch(fetchUrl);
+    if (!weather.ok) throw new ApiError(503, `API error 503: weather provider unavailable`);
+    clientData[fetchUrl] = await weather.json();
+  }
+  throw new ApiError(503, "API error 503: weather data incomplete");
 }
 
 /** Fetch multi-day sunset forecast. */

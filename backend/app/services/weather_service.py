@@ -17,6 +17,12 @@ from app.schemas.weather import WeatherOverride, WeatherSnapshot
 from app.services.astronomy_service import AstronomyService
 from app.utils.geo import destination_point
 from app.utils.cache import TTLCache
+from app.utils.client_fetch import (
+    ClientFetchNeeded,
+    canonical_url,
+    client_data,
+    client_fetch_allowed,
+)
 from app.utils.time_utils import local_sunset_date
 from app.utils.call_budget import (
     TONIGHT,
@@ -1492,6 +1498,14 @@ class WeatherService:
         Non-retryable client errors (e.g. 400) fail fast. If retries are
         exhausted, raises :class:`WeatherUnavailableError` (→ HTTP 503).
         """
+        supplied = client_data.get()
+        if supplied is not None:
+            # PoC (see client_fetch): the browser fetches; the server doesn't.
+            key = canonical_url(url, params)
+            if key in supplied:
+                return supplied[key]
+            raise ClientFetchNeeded(key)
+
         max_retries = self._settings.HTTP_MAX_RETRIES
         last_exc: Exception | None = None
         reason = ""
@@ -1512,6 +1526,10 @@ class WeatherService:
 
         for attempt in range(max_retries + 1):
             try:
+                if self._settings.OPEN_METEO_SIMULATE_DAILY_LIMIT:  # PoC testing only
+                    raise httpx.HTTPStatusError("simulated", request=httpx.Request("GET", url),
+                        response=httpx.Response(429, json={"error": True,
+                            "reason": "Daily API request limit exceeded. (simulated)"}))
                 await self._concurrency.acquire(level)
                 try:
                     response = await self._http.get(url, params=params)
@@ -1527,6 +1545,9 @@ class WeatherService:
                 reason = _error_reason(exc.response)
                 if status == 429 and self.budget is not None:
                     self.budget.note_rate_limited(reason)
+                if _quota_exhausted(reason) and client_fetch_allowed.get():
+                    # PoC: the browser has its own Open-Meteo limit — let it fetch.
+                    raise ClientFetchNeeded(canonical_url(url, params)) from exc
                 if attempt >= max_retries or _quota_exhausted(reason):
                     break
                 delay = self._retry_delay(exc.response, attempt)

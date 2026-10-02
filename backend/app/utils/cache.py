@@ -11,6 +11,7 @@ from collections import OrderedDict
 from typing import Any, Optional
 
 from app.core.logging import get_logger
+from app.utils.client_fetch import client_data
 from app.utils.durable_cache import (
     DURABLE_MIN_TTL_SECONDS,
     decode_value,
@@ -135,6 +136,8 @@ class TTLCache:
 
     def set(self, key: str, value: Any, ttl_override: Optional[int] = None) -> None:
         """Store *value* under *key* for TTL seconds (or ttl_override if given)."""
+        if client_data.get() is not None:
+            return  # browser-supplied data is never shared (see client_fetch)
         ttl = ttl_override if ttl_override is not None else self._ttl
         try:
             packed: Any = encode_value(value)
