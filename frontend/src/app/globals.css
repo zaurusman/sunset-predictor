@@ -98,7 +98,7 @@ body {
 .m-grow-y { transform-box: fill-box; transform-origin: bottom; animation: grow-y 0.7s var(--ease-out) backwards; }
 .m-grow-x { transform-origin: left; animation: grow-x 0.7s var(--ease-out) backwards; }
 .m-pop { transform-box: fill-box; transform-origin: center; animation: pop 0.42s var(--ease-out) backwards; }
-.m-halo { transform-box: fill-box; transform-origin: center; animation: halo 0.9s ease-out both; }
+.m-halo { transform-box: fill-box; transform-origin: center; opacity: 0; animation: halo 0.9s ease-out forwards; }
 .m-reveal { animation: reveal-x 1.1s var(--ease-out) backwards; }
 .m-sweep { animation: sweep 1.1s var(--ease-out) both; }
 .m-sheet { animation: sheet-in 0.38s var(--ease-out) backwards; }

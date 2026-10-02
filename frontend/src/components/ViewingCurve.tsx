@@ -103,6 +103,10 @@ export default function ViewingCurve({
   // orange-700 rather than -600: the peak label is 12px, so it needs 4.5:1.
   const accent = isDark ? "#fb923c" : "#c2410c";
   const activePt = pts.find((p) => p.point === active) ?? pts[0];
+  const peakPt = pts.find((p) => p.point === peak) ?? pts[0];
+  // The entrance plays once: the curve draws left to right, a marker sweeps to
+  // the peak, and the peak dot pops. Picking a time afterwards is instant.
+  const intro = selected === null;
 
   return (
     <section className="bg-white dark:bg-slate-900/60 rounded-2xl border border-gray-200 dark:border-slate-700/40 p-5">
@@ -115,44 +119,73 @@ export default function ViewingCurve({
         </span>
       </div>
 
-      <svg
-        viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
-        preserveAspectRatio="none"
-        className="w-full h-24 overflow-visible"
-        role="img"
-        aria-label={`Sunset quality peaks at ${clockFor(peak)}`}
-      >
-        <defs>
-          <linearGradient id="viewingCurveFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={accent} stopOpacity="0.24" />
-            <stop offset="100%" stopColor={accent} stopOpacity="0" />
-          </linearGradient>
-        </defs>
+      <div className="relative">
+        <svg
+          viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+          preserveAspectRatio="none"
+          className="w-full h-24 overflow-visible m-reveal"
+          style={{ animationDelay: "250ms" }}
+          role="img"
+          aria-label={`Sunset quality peaks at ${clockFor(peak)}`}
+        >
+          <defs>
+            <linearGradient id="viewingCurveFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={accent} stopOpacity="0.24" />
+              <stop offset="100%" stopColor={accent} stopOpacity="0" />
+            </linearGradient>
+          </defs>
 
-        <path d={area} fill="url(#viewingCurveFill)" />
-        <path
-          d={line}
-          fill="none"
-          stroke={accent}
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          vectorEffect="non-scaling-stroke"
-        />
+          <path d={area} fill="url(#viewingCurveFill)" />
+          <path
+            d={line}
+            fill="none"
+            stroke={accent}
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
 
-        {pts.map((p) => {
-          const isActive = p.point === active;
-          return (
+          {intro && (
             <circle
-              key={p.point}
-              cx={p.x}
-              cy={p.y}
-              r={isActive ? 5.5 : 3.5}
-              fill={isActive ? accent : isDark ? "#475569" : "#cbd5e1"}
+              cx={peakPt.x}
+              cy={peakPt.y}
+              r={5.5}
+              fill="none"
+              stroke={accent}
+              strokeWidth="2"
               vectorEffect="non-scaling-stroke"
+              className="m-halo"
+              style={{ animationDelay: "1.1s" }}
             />
-          );
-        })}
-      </svg>
+          )}
+          {pts.map((p) => {
+            const isActive = p.point === active;
+            return (
+              <circle
+                key={p.point}
+                cx={p.x}
+                cy={p.y}
+                r={isActive ? 5.5 : 3.5}
+                fill={isActive ? accent : isDark ? "#475569" : "#cbd5e1"}
+                vectorEffect="non-scaling-stroke"
+                className={intro && isActive ? "m-pop" : undefined}
+                style={intro && isActive ? { animationDelay: "1.02s" } : undefined}
+              />
+            );
+          })}
+        </svg>
+        {intro && (
+          <span
+            aria-hidden="true"
+            className="m-sweep absolute top-1 bottom-0 w-px border-l border-dashed"
+            style={{
+              borderColor: accent,
+              ["--sweep-to" as string]: `${(peakPt.x / VIEW_W) * 100}%`,
+              animationDelay: "250ms",
+            }}
+          />
+        )}
+      </div>
 
       <div className="grid grid-cols-4 gap-1 mt-2">
         {pts.map((p) => {
@@ -169,7 +202,7 @@ export default function ViewingCurve({
               }
             >
               <span className="text-xs font-semibold tabular-nums">{clockFor(p.point)}</span>
-              <span className="text-[10px] opacity-80">
+              <span className="text-[11px] opacity-80">
                 {p.point === "sunset" ? "sunset" : p.point}
               </span>
             </button>
