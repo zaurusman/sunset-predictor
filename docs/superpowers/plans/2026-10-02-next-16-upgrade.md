@@ -21,7 +21,9 @@
 Shorthand used below:
 
 ```bash
-CLEAN='env -i HOME=/Users/yotamtsabari PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin LANG=en_US.UTF-8'
+# zsh does not word-split a variable, so use a tiny wrapper script rather than CLEAN='env -i …'.
+printf '#!/bin/sh\nexec env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=en_US.UTF-8 "$@"\n' > /tmp/clean && chmod +x /tmp/clean
+CLEAN=/tmp/clean   # then: $CLEAN npm ci
 ```
 
 ---
