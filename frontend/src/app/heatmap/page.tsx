@@ -7,6 +7,7 @@ import type { HeatmapDay, HeatmapResponse, LocationState } from "@/lib/types";
 import { loadLocation } from "@/lib/storage";
 
 import AppNav from "@/components/AppNav";
+import { useSky } from "@/components/sky/SkyProvider";
 import SupportFooter from "@/components/SupportFooter";
 import HeatmapGrid from "@/components/HeatmapGrid";
 import LoadingState from "@/components/LoadingState";
@@ -81,6 +82,8 @@ function ProgressBar({ loading, months }: { loading: boolean; months: number }) 
 }
 
 function HeatmapContent() {
+  const { setMood } = useSky();
+  useEffect(() => setMood("Neutral"), [setMood]);
   const params = useSearchParams();
 
   const dataCache = useRef<Map<MonthsOption, HeatmapResponse>>(new Map());
@@ -251,7 +254,7 @@ function HeatmapContent() {
 
 export default function HeatmapPage() {
   return (
-    <main className="min-h-screen bg-gray-50 dark:bg-slate-950 text-gray-900 dark:text-white px-4 py-6 max-w-3xl mx-auto">
+    <main className="min-h-screen text-gray-900 dark:text-white px-4 py-6 max-w-3xl mx-auto">
       <Suspense fallback={<LoadingState message="Loading sunset history…" />}>
         <HeatmapContent />
       </Suspense>

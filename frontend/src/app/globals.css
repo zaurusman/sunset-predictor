@@ -148,3 +148,30 @@ body {
   ::view-transition-new(*),
   ::view-transition-group(*) { animation-duration: 0s !important; animation-delay: 0s !important; }
 }
+
+/* ── Sky ────────────────────────────────────────────────────────────────── */
+/* First paint before JS: the neutral mood (same values as lib/sky.ts). The
+   .dark class is set by next-themes before paint, so neither theme flashes. */
+.sky-initial { background: linear-gradient(180deg, #ece4dc 0%, #f3eee9 22%, #f8fafc 44%); }
+.dark .sky-initial { background: linear-gradient(180deg, #24201d 0%, #17141a 24%, #020617 46%); }
+.sky-sun {
+  width: 190px;
+  height: 190px;
+  margin: -95px 0 0 -95px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fffbeb 0%, #fff1d6 14%, #fdba74 30%, rgba(251, 146, 60, 0.55) 44%, rgba(251, 146, 60, 0.18) 60%, rgba(251, 146, 60, 0) 72%);
+}
+/* The literal light on the horizon as the sun goes down. */
+.sky-flare {
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 9999px;
+  background: radial-gradient(ellipse 50% 100% at 50% 50%, #fb923c 0%, rgba(251, 146, 60, 0.5) 45%, rgba(251, 146, 60, 0) 100%);
+  box-shadow: 0 0 18px 6px rgba(251, 146, 60, 0.35);
+}
+.sky-glow { background: radial-gradient(ellipse 50% 45% at 50% 40%, rgba(251, 146, 60, 0.28), transparent 70%); }
+.sky-glow[data-breathe="true"] { animation: breathe 6s ease-in-out infinite alternate; }
+@keyframes breathe { from { opacity: 0.55; transform: translateX(-4%); } to { opacity: 1; transform: translateX(4%); } }
+@media (prefers-reduced-motion: reduce) {
+  .sky-glow[data-breathe="true"] { animation: none; }
+}

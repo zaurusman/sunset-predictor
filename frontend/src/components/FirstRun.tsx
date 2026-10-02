@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigation } from "lucide-react";
 import type { LocationState, SunsetCategory } from "@/lib/types";
 import LocationSearch from "./LocationSearch";
+import { useSky } from "./sky/SkyProvider";
 
 interface FirstRunProps {
   onLocationSelect: (location: LocationState) => void;
@@ -27,6 +28,8 @@ const SCALE: { label: SunsetCategory; grow: number; className: string }[] = [
 export default function FirstRun({ onLocationSelect }: FirstRunProps) {
   const [locating, setLocating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { setMood } = useSky();
+  useEffect(() => setMood("Neutral"), [setMood]);
 
   const useMyLocation = () => {
     if (!navigator.geolocation) {

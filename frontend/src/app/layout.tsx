@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import ThemeProvider from "@/components/ThemeProvider";
 import ServiceWorkerRegistrar from "@/components/ServiceWorkerRegistrar";
+import SkyProvider from "@/components/sky/SkyProvider";
 
 export const metadata: Metadata = {
   title: "Afterglow",
@@ -28,15 +29,9 @@ export default function RootLayout({
       <body className="min-h-screen antialiased">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
           <ServiceWorkerRegistrar />
-          {/* Subtle ambient gradient overlay */}
-          <div
-            className="fixed inset-0 pointer-events-none z-0"
-            style={{
-              background:
-                "radial-gradient(ellipse 80% 50% at 50% -10%, rgba(249,115,22,0.06) 0%, transparent 60%)",
-            }}
-          />
-          <div className="relative z-10">{children}</div>
+          <SkyProvider>
+            <div className="relative z-10">{children}</div>
+          </SkyProvider>
         </ThemeProvider>
       </body>
     </html>
