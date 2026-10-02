@@ -123,7 +123,8 @@ export default function HeatmapGrid({ days }: { days: HeatmapDay[] }) {
           </div>
 
           {/* Week columns */}
-          {weeks.map((week) => (
+          {/* Cells fade in as a wave, column by column, capped so long ranges never wait. */}
+          {weeks.map((week, w) => (
             <div key={week.key} className="flex flex-col gap-[3px]">
               {/* Month label row */}
               <div className="h-[16px] text-[10px] text-gray-500 dark:text-slate-400 leading-none whitespace-nowrap">
@@ -136,9 +137,10 @@ export default function HeatmapGrid({ days }: { days: HeatmapDay[] }) {
                   key={i}
                   className={`w-3 h-3 rounded-sm transition-opacity ${
                     cell
-                      ? `${LEVEL_CLASSES[cell.level]} cursor-pointer hover:opacity-70`
+                      ? `m-fade ${LEVEL_CLASSES[cell.level]} cursor-pointer hover:opacity-70`
                       : "bg-transparent"
                   }`}
+                  style={cell ? { animationDelay: `${Math.min(w * 12 + i * 6, 600)}ms` } : undefined}
                   onMouseEnter={() => cell && setHovered(cell)}
                   onMouseLeave={() => setHovered(null)}
                 />
