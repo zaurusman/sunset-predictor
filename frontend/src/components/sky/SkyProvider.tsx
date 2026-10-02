@@ -26,7 +26,7 @@ const SUN_MS = 1950;
 const DUSK_MS = 2200;
 const FADE_MS = 900;
 /** The score starts as the sun touches the horizon, slightly before it is gone. */
-const SCORE_START_MS = SUN_MS - 450;
+export const SCORE_START_MS = SUN_MS - 450;
 
 /**
  * The sky band behind every page. It lives in the root layout so it persists
