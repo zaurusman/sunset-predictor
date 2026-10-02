@@ -56,15 +56,26 @@ export function usePrefersReducedMotion(): boolean {
 /**
  * Counts from the value currently on screen to `target` (so a refresh glides
  * rather than restarting at 0). Jumps straight to `target` when disabled.
+ * Changing `restart` counts up from 0 again.
  */
 export function useCountUp(
   target: number,
-  { durationMs, delayMs = 0, enabled = true }: { durationMs: number; delayMs?: number; enabled?: boolean },
+  {
+    durationMs,
+    delayMs = 0,
+    enabled = true,
+    restart = 0,
+  }: { durationMs: number; delayMs?: number; enabled?: boolean; restart?: number },
 ): number {
   const [value, setValue] = useState(enabled ? 0 : target);
   const shown = useRef(value);
+  const lastRestart = useRef(restart);
 
   useEffect(() => {
+    if (restart !== lastRestart.current) {
+      lastRestart.current = restart;
+      if (enabled) shown.current = 0;
+    }
     const from = shown.current;
     let raf = 0;
     const start = performance.now() + (enabled ? delayMs : 0);
@@ -78,7 +89,7 @@ export function useCountUp(
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [target, durationMs, delayMs, enabled]);
+  }, [target, durationMs, delayMs, enabled, restart]);
 
   return value;
 }

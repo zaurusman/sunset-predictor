@@ -36,7 +36,7 @@ function headlineFor(prediction: PredictResponse, targetDate: string): string {
   if (targetDate < today) return `A ${prediction.category.toLowerCase()} one`;
   if (go) return "Worth heading out";
 
-  // The go-outside bar (75) sits above the Great band (72), so a 72–74 evening
+  // The go-outside bar (75) sits above the Great band (70), so a 70–74 evening
   // is genuinely nice without being worth changing plans for. A flat "Not
   // tonight" here would contradict the green Great badge beside it.
   if (prediction.beauty_score_0_100 >= 50) return "Worth a glance";
@@ -76,6 +76,9 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
     () => !reduce && isToday(targetDate) && shouldPlaySunset(targetDate),
   );
   const sunsetStarted = useRef(false);
+  /** Bumped by a long-press on the ring, which replays the sunset on demand. */
+  const [replays, setReplays] = useState(0);
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
     if (sunset && !sunsetStarted.current) {
@@ -106,26 +109,42 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
 
   // The number counts up as the ring fills; after the sunset it waits for the
   // sun to touch the horizon. Later changes glide from the value on screen.
-  const introDelay = sunset ? SCORE_START_MS : 0;
+  const withSunset = sunset || replays > 0;
   const shown = useCountUp(score, {
-    durationMs: sunset ? 1500 : 1000,
-    delayMs: introDelay,
+    durationMs: withSunset ? 1500 : 1000,
+    delayMs: withSunset ? SCORE_START_MS : 0,
     enabled: !reduce,
+    restart: replays,
   });
+
+  /** Holding the ring for a moment sets the sun again. */
+  const replaySunset = () => {
+    if (reduce || !ref.current) return;
+    // A tiny tick on phones that support it; only after a real touch, or Chrome logs an error.
+    if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.(12);
+    playSunset(ref.current, prediction.category);
+    setReplays((n) => n + 1);
+  };
+  const startPress = () => {
+    clearTimeout(pressTimer.current);
+    pressTimer.current = setTimeout(replaySunset, 550);
+  };
+  const cancelPress = () => clearTimeout(pressTimer.current);
   const tipAngle = ((-90 + 3.6 * shown) * Math.PI) / 180;
 
   return (
     <section
       ref={ref}
-      className="m-rise bg-white dark:bg-slate-900/60 rounded-2xl border border-gray-200 dark:border-slate-700/40 p-5 flex flex-col gap-4">
+      className="m-rise bg-white dark:bg-slate-900/60 rounded-2xl border border-gray-200 dark:border-slate-700/40 p-5 flex flex-col gap-4"
+    >
       <div className="flex items-start gap-4">
         <div className="flex-1 flex flex-col gap-1.5 min-w-0">
           <span className="text-gray-600 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold">
             {isToday(targetDate) ? "Tonight" : targetDate}
           </span>
-          {/* Keyed so a new answer rises in word by word. */}
+          {/* Keyed so a new answer (or a replayed sunset) rises in word by word. */}
           <h1
-            key={headline}
+            key={`${headline}-${replays}`}
             className="text-[27px] leading-tight font-bold tracking-tight text-gray-900 dark:text-white text-pretty"
           >
             {headline.split(" ").map((word, i) => (
@@ -139,7 +158,14 @@ export default function VerdictCard({ prediction, targetDate }: VerdictCardProps
           </h1>
         </div>
 
-        <div className="relative w-[62px] h-[62px] flex-shrink-0">
+        <div
+          className="relative w-[62px] h-[62px] flex-shrink-0 select-none [-webkit-touch-callout:none] transition-transform duration-150 active:scale-95"
+          onPointerDown={startPress}
+          onPointerUp={cancelPress}
+          onPointerLeave={cancelPress}
+          onPointerCancel={cancelPress}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           <svg width="62" height="62" viewBox="0 0 62 62" aria-hidden="true" className="overflow-visible">
             <defs>
               {/* From the band's deeper shade to its brighter one, along the arc. */}
