@@ -136,8 +136,8 @@ class Settings(BaseSettings):
     # Everything except tonight (the 7-day forecast, other dates, heatmaps,
     # climatology) is held to these shares — waiting for the minute, refused
     # for the hour — so tonight always has the rest. 0 = off.
-    # PoC testing only (see app/utils/client_fetch.py): behave as if Open-Meteo
-    # had refused every call with its daily limit.
+    # Testing only (see app/utils/client_fetch.py): behave as if Open-Meteo had
+    # refused every server call with its daily limit, so the browser fetches.
     OPEN_METEO_SIMULATE_DAILY_LIMIT: bool = False
     OPEN_METEO_OTHER_MINUTE_CAP: float = 480
     OPEN_METEO_OTHER_HOURLY_CAP: float = 4000

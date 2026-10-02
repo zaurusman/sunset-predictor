@@ -26,6 +26,7 @@ from app.services.climatology_service import ClimatologyService
 from app.services.explanation_engine import ExplanationEngine
 from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.weather_service import WeatherService
+from app.utils.client_fetch import collect
 from app.utils.math_utils import clamp
 from app.utils.time_utils import local_sunset_date, utcnow
 
@@ -301,22 +302,26 @@ class PredictionService:
             lat, lon, days=request.days
         )
 
-        # One batched corridor request covers the whole forecast range.
-        corridor_map = await self._weather.get_corridor_samples_map(
-            lat, lon, [d for d, _ in daily_window_snaps]
-        )
-
         # ONE ensemble request for every day in range. Fetching it per day (as
         # _score_day used to) cost up to 8 requests per forecast, because each
         # day's lookup had a different cache key.
-        try:
-            spread_map = await self._weather.get_ensemble_cloud_spread_map(
-                lat, lon,
-                [(d, self._astro.get_sunset_time(lat, lon, d)) for d, _ in daily_window_snaps],
-            )
-        except Exception as exc:
-            logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
-            spread_map = {}
+        async def ensemble_spreads() -> dict:
+            try:
+                return await self._weather.get_ensemble_cloud_spread_map(
+                    lat, lon,
+                    [(d, self._astro.get_sunset_time(lat, lon, d)) for d, _ in daily_window_snaps],
+                )
+            except Exception as exc:
+                logger.warning("Ensemble spread lookup failed for (%.4f, %.4f): %s", lat, lon, exc)
+                return {}
+
+        # One batched corridor request covers the whole forecast range. Both
+        # are collected together so a browser fetching for us (client_fetch)
+        # gets every missing URL in one round.
+        corridor_map, spread_map = await collect(
+            self._weather.get_corridor_samples_map(lat, lon, [d for d, _ in daily_window_snaps]),
+            ensemble_spreads(),
+        )
 
         # Score each day concurrently using the same window algorithm as predict()
         tasks = [

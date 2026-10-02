@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.schemas.forecast import ForecastRequest, ForecastResponse
 from app.services.weather_service import WeatherBusyError, WeatherUnavailableError
 from app.core.logging import get_logger
+from app.utils.client_fetch import ClientFetchNeeded, browser_may_fetch, fetch_request
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["forecast"])
@@ -24,7 +25,12 @@ async def forecast_sunset(
     """
     svc = request.app.state.prediction_service
     try:
-        return await svc.forecast(body)
+        # The browser may fetch what the server can't (see app/utils/client_fetch.py).
+        with browser_may_fetch(True, body.client_data):
+            return await svc.forecast(body)
+    except ClientFetchNeeded as need:
+        logger.info("7-day forecast: asking the browser to fetch %s", [u.split("?")[0] for u in need.urls])
+        return fetch_request(need)
     except WeatherBusyError as exc:
         # Only reached when it actually needed Open-Meteo calls: whatever is
         # cached (memory or the durable tier) is served even when the share

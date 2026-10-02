@@ -43,8 +43,8 @@ class PredictRequest(BaseModel):
     client_data: Optional[dict[str, Any]] = Field(
         default=None,
         description=(
-            "Proof of concept: Open-Meteo responses the browser fetched itself "
-            "(canonical URL → JSON), after a 503 carrying `client_fetch`. See "
+            "Open-Meteo responses the browser fetched itself (canonical URL → "
+            "JSON), after a 503 carrying `client_fetch`. See "
             "app/utils/client_fetch.py."
         ),
     )

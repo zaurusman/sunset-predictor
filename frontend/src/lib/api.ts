@@ -89,53 +89,65 @@ function isOpenMeteoUrl(url: unknown): url is string {
 }
 
 /**
- * Predict sunset beauty for a single location and date.
- *
- * Proof of concept (backend/app/utils/client_fetch.py): Open-Meteo limits
- * calls per IP address, and the server's address is shared with other apps.
- * When Open-Meteo refuses the server, tonight's prediction answers 503 with
- * `client_fetch` — the URL it needed. The browser, which has its own limit,
- * fetches it and asks again with everything fetched so far; the server still
- * does all the scoring. A few rounds at most.
+ * POST to an endpoint whose weather data the browser may fetch itself
+ * (backend/app/utils/client_fetch.py). Open-Meteo limits calls per IP
+ * address, and the server's address is shared with other apps. When the
+ * server can't download, it answers 503 with `client_fetch` — the Open-Meteo
+ * URLs it still needs. The browser, which has its own limit, fetches them and
+ * asks again with everything fetched so far; the server still does all the
+ * scoring, so the score is the same. About three rounds at most.
  */
-export async function predict(body: PredictRequest): Promise<PredictResponse> {
+async function postWithClientFetch<T>(path: string, body: object): Promise<T> {
   const clientData: Record<string, unknown> = {};
-  for (let round = 0; round < 8; round++) {
+  for (let round = 0; round < 6; round++) {
     const payload = Object.keys(clientData).length ? { ...body, client_data: clientData } : body;
-    const res = await fetch(`${API_BASE}/predict`, {
+    const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (res.ok) return res.json() as Promise<PredictResponse>;
+    if (res.ok) return res.json() as Promise<T>;
 
     let detail: unknown = res.statusText;
-    let fetchUrl: unknown;
+    let wanted: unknown;
     try {
       const err = await res.json();
       detail = err?.detail ?? detail;
-      fetchUrl = err?.client_fetch;
+      wanted = err?.client_fetch;
     } catch {
       // ignore parse errors
     }
-    if (res.status !== 503 || !isOpenMeteoUrl(fetchUrl) || fetchUrl in clientData) {
+    const urls = Array.isArray(wanted) ? wanted : [];
+    // Only Open-Meteo URLs, and only ones not fetched yet (no loops).
+    if (
+      res.status !== 503 ||
+      urls.length === 0 ||
+      !urls.every((u) => isOpenMeteoUrl(u) && !(u in clientData))
+    ) {
       throw new ApiError(res.status, `API error ${res.status}: ${detail}`);
     }
-    const weather = await fetch(fetchUrl);
-    if (!weather.ok) throw new ApiError(503, `API error 503: weather provider unavailable`);
-    clientData[fetchUrl] = await weather.json();
+    const fetched = await Promise.all(
+      (urls as string[]).map(async (u) => {
+        const weather = await fetch(u);
+        if (!weather.ok) throw new ApiError(503, "API error 503: weather provider unavailable");
+        return [u, await weather.json()] as const;
+      })
+    );
+    for (const [u, json] of fetched) clientData[u] = json;
   }
   throw new ApiError(503, "API error 503: weather data incomplete");
+}
+
+/** Predict sunset beauty for a single location and date. */
+export async function predict(body: PredictRequest): Promise<PredictResponse> {
+  return postWithClientFetch<PredictResponse>("/predict", body);
 }
 
 /** Fetch multi-day sunset forecast. */
 export async function forecast(
   body: ForecastRequest
 ): Promise<ForecastResponse> {
-  return request<ForecastResponse>(`${API_BASE}/forecast`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return postWithClientFetch<ForecastResponse>("/forecast", body);
 }
 
 /** Health check. */
