@@ -65,3 +65,37 @@ def local_sunset_date(lat: float, lon: float) -> date:
     """
     tz = get_timezone_for_coordinates(lat, lon)
     return datetime.now(tz=tz).date()
+
+
+# How far a phone's clock may sit from the longitude timezone above: summer
+# time, and zones set well east of the sun (Spain, western China).
+_CLOCK_SLACK = timedelta(hours=3)
+
+
+def tonight_dates(lat: float, lon: float) -> set[date]:
+    """Every date a client may mean by "tonight" at these coordinates.
+
+    The app sends the phone's own date, which can turn over a few hours before
+    or after the longitude timezone does (Israel's summer time is an hour
+    ahead of it), and the 7-day page's first day (see first_forecast_date).
+    Never the UTC date as such: out west that is tomorrow's evening for part
+    of every day.
+    """
+    tz = get_timezone_for_coordinates(lat, lon)
+    now = datetime.now(tz=tz)
+    return {
+        (now - _CLOCK_SLACK).date(),
+        (now + _CLOCK_SLACK).date(),
+        first_forecast_date(lat, lon),
+    }
+
+
+def first_forecast_date(lat: float, lon: float) -> date:
+    """The first evening /forecast lists: the location's date, or the UTC
+    date when that is earlier.
+
+    East of Greenwich, between local and UTC midnight, that is the evening
+    just gone, as /forecast has always started there (the app drops past
+    days). Out west it is tonight; the UTC date would be tomorrow.
+    """
+    return min(local_sunset_date(lat, lon), datetime.now(tz=UTC).date())

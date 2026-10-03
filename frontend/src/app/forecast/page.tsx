@@ -52,8 +52,9 @@ function ForecastContent() {
         longitude: loc.longitude,
         days: 7,
       });
-      // The server's first day is the UTC date, which just after local
-      // midnight is an evening that has already ended here.
+      // East of Greenwich the server's first day is the UTC date until
+      // 00:00 UTC, which just after local midnight is an evening that has
+      // already ended here.
       const upcoming = result.days.filter((d) => d.date >= localToday());
       setData(upcoming.length ? { ...result, days: upcoming } : result);
       setCachedAt(new Date().toISOString());

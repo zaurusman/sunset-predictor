@@ -122,7 +122,15 @@ def test_tonight_by_the_utc_date_hands_off_too(wired, monkeypatch):
     7-day page asks for the UTC date, and it must not fail as "another date"."""
     client, ws, fake = wired
     today = datetime.now(timezone.utc).date()
-    monkeypatch.setattr("app.api.predict.local_sunset_date", lambda lat, lon: today - timedelta(days=1))
+    late = datetime(today.year, today.month, today.day, 23, 30, tzinfo=timezone.utc)
+
+    class LateEvening(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return late.astimezone(tz) if tz else late.replace(tzinfo=None)
+
+    # Only the "what is tonight" clock: 01:30 the next day in Israel.
+    monkeypatch.setattr("app.utils.time_utils.datetime", LateEvening)
     ws._settings.OPEN_METEO_SIMULATE_DAILY_LIMIT = True
     body = {"latitude": LAT, "longitude": LON, "target_date": today.isoformat()}
     r, rounds = _browser_loop(client, fake, "/predict", body)

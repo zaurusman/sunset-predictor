@@ -24,7 +24,7 @@ from app.utils.client_fetch import (
     client_fetch_allowed,
     collect,
 )
-from app.utils.time_utils import local_sunset_date
+from app.utils.time_utils import first_forecast_date, tonight_dates
 from app.utils.call_budget import (
     TONIGHT,
     BudgetExhausted,
@@ -236,6 +236,33 @@ class WeatherService:
         decimals = self._settings.CACHE_COORD_DECIMALS
         return round(lat, decimals), round(lon, decimals)
 
+    def _sunset_day(self, lat: float, lon: float, d: date) -> date:
+        """The UTC day that evening *d* (a local date) sets on, which is the
+        day its rows are in, since every fetch is in UTC. That is *d* itself
+        east of ~90°W and the next day further west."""
+        return self._astro.get_sunset_time(lat, lon, d).date()
+
+    def _evening_key(self, lat: float, lon: float, d: date) -> str:
+        """Cache-key text for evening *d* (a local date).
+
+        Dates used to name the evening that set on that UTC date, and entries
+        keyed that way outlive a deploy in the durable tier. Where that is the
+        same evening (east of ~90°W, all of Israel), the key is the bare date,
+        so those entries are still found and a frozen evening stays frozen.
+        Further west it named the evening before, so the key also names the
+        UTC day the evening sets on.
+        """
+        day = self._sunset_day(lat, lon, d)
+        return str(d) if day == d else f"{d}@{day}"
+
+    def _shifted(self, lat: float, lon: float, days: list[date]) -> tuple[str, ...]:
+        """Extra cache-key part for an entry holding several evenings: none
+        when each sets on its own UTC date (the keys stay what they were, see
+        _evening_key), otherwise one marking the local-evening dates."""
+        if all(self._sunset_day(lat, lon, d) == d for d in days):
+            return ()
+        return ("local",)
+
     def _frozen_get(self, cache_key: str, window_over: bool) -> Any:
         """Cache read that, once the evening's window is over, also accepts an
         expired entry and pins it for _FROZEN_TTL_SECONDS — so the last
@@ -435,7 +462,9 @@ class WeatherService:
                 aerosol_is_estimated=override.aerosol_optical_depth is None,
             )
 
-        cache_key = TTLCache.make_key("snapshot", *self._ckey_coords(lat, lon), str(target_date))
+        cache_key = TTLCache.make_key(
+            "snapshot", *self._ckey_coords(lat, lon), self._evening_key(lat, lon, target_date)
+        )
         if override is None:
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -443,19 +472,21 @@ class WeatherService:
                 return cached
 
         sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
+        # Which data holds the evening goes by the UTC day it sets on.
+        sunset_day = sunset_time.date()
         today = datetime.now(UTC).date()
-        days_ago = (today - target_date).days
+        days_ago = (today - sunset_day).days
 
         try:
-            if target_date < today:
+            if sunset_day < today:
                 if days_ago <= 7:
                     # Use forecast + past_days for very recent dates — the archive
                     # has a ~5-day lag so it may not have data yet.
-                    snapshot = await self._fetch_recent_past_snapshot(lat, lon, target_date, sunset_time, days_ago)
+                    snapshot = await self._fetch_recent_past_snapshot(lat, lon, sunset_time, days_ago)
                 else:
-                    snapshot = await self._fetch_archive_snapshot(lat, lon, target_date, sunset_time)
+                    snapshot = await self._fetch_archive_snapshot(lat, lon, sunset_time)
             else:
-                snapshot = await self._fetch_forecast_snapshot(lat, lon, target_date, sunset_time)
+                snapshot = await self._fetch_forecast_snapshot(lat, lon, sunset_time)
         except WeatherUnavailableError as exc:
             snapshot = self._stale_or_raise(cache_key, exc, "snapshot")
             # Never re-cache stale data: that would reset its TTL and pass it
@@ -487,19 +518,19 @@ class WeatherService:
         if cached is not None:
             return cached
 
-        today = datetime.now(UTC).date()
+        first = first_forecast_date(lat, lon)
 
         try:
             weather_data = await self._fetch_forecast_raw(lat, lon, days=days)
         except WeatherUnavailableError as exc:
             stale = self._stale_or_raise(cache_key, exc, "forecast range")
             # A stale range may have been built before midnight.
-            return [(d, s) for d, s in stale if d >= today]
+            return [(d, s) for d, s in stale if d >= first]
         aq_data = await self._fetch_air_quality_raw(lat, lon, days=days)
 
         results: list[tuple[date, WeatherSnapshot]] = []
         for offset in range(days):
-            d = today + timedelta(days=offset)
+            d = first + timedelta(days=offset)
             try:
                 sunset_time = self._astro.get_sunset_time(lat, lon, d)
                 snapshot = self._extract_snapshot_for_hour(
@@ -543,14 +574,18 @@ class WeatherService:
         Results are cached for the configured TTL to avoid redundant API calls
         and to keep the score stable within a single server session.
         """
-        cache_key = TTLCache.make_key("window_snaps", *self._ckey_coords(lat, lon), str(target_date))
+        cache_key = TTLCache.make_key(
+            "window_snaps", *self._ckey_coords(lat, lon), self._evening_key(lat, lon, target_date)
+        )
         window_over = sunset_time + _WINDOW_END_AFTER_SUNSET < datetime.now(UTC)
+        # Which data holds the evening goes by the UTC day it sets on.
+        sunset_day = sunset_time.date()
         today = datetime.now(UTC).date()
-        days_ago = (today - target_date).days
+        days_ago = (today - sunset_day).days
         # An icon_seamless forecast (see the fetch below) is current until a
         # newer run publishes. After the window it is frozen, as before.
         on_icon = (
-            target_date >= today
+            sunset_day >= today
             and _forecast_fetch_days(sunset_time, today) == ICON_SEAMLESS_MAX_DAYS
         )
         if on_icon and not window_over:
@@ -563,15 +598,15 @@ class WeatherService:
 
         # Single raw fetch for all window points
         try:
-            if target_date < today:
+            if sunset_day < today:
                 if days_ago <= 7:
                     weather_data = await self._fetch_forecast_raw(lat, lon, days=1, past_days=days_ago + 1)
                     aq_data = await self._fetch_air_quality_raw(lat, lon, days=1, past_days=days_ago + 1)
                     data_source = "forecast"
                 else:
-                    weather_data = await self._fetch_archive_raw(lat, lon, target_date)
+                    weather_data = await self._fetch_archive_raw(lat, lon, sunset_day)
                     aq_data = await self._fetch_air_quality_range_raw(
-                        lat, lon, target_date, target_date
+                        lat, lon, sunset_day, sunset_day
                     )
                     data_source = "archive"
             else:
@@ -604,19 +639,25 @@ class WeatherService:
         day now gets window-level (4-point) scoring instead of a single snapshot.
         Results are cached for the configured TTL.
         """
-        cache_key = TTLCache.make_key("forecast_range_windows", *self._ckey_coords(lat, lon), days)
+        # The evenings are local dates (see first_forecast_date); the fetches
+        # run in UTC days from today's.
+        first = first_forecast_date(lat, lon)
+        dates = [first + timedelta(days=offset) for offset in range(days)]
+        cache_key = TTLCache.make_key(
+            "forecast_range_windows", *self._ckey_coords(lat, lon), days,
+            *self._shifted(lat, lon, dates),
+        )
         on_icon = days <= _BUNDLE_DAYS
         if on_icon:
             cached = self._cache.get_fresh(cache_key, await self._since(("forecast", "aq"), lat, lon))
         else:
             cached = self._cache.get(cache_key)
-        if cached is not None and cached and cached[0][0] != datetime.now(UTC).date():
-            cached = None  # built before 00:00 UTC: its first day is gone
+        if cached is not None and cached and cached[0][0] != first:
+            cached = None  # built before midnight: its first day is gone
         if cached is not None:
             return cached
 
         today = datetime.now(UTC).date()
-        dates = [today + timedelta(days=offset) for offset in range(days)]
         sunsets = {d: self._astro.get_sunset_time(lat, lon, d) for d in dates}
         # The same fetches /predict makes for each of these evenings (see
         # _forecast_fetch_days): the icon_seamless horizon for every evening
@@ -633,7 +674,7 @@ class WeatherService:
         except WeatherUnavailableError as exc:
             stale = self._stale_or_raise(cache_key, exc, "forecast range windows")
             # A stale range may have been built before midnight.
-            return [(d, w) for d, w in stale if d >= today]
+            return [(d, w) for d, w in stale if d >= first]
 
         # Pre-parse timestamps once so the per-day extraction loop doesn't
         # re-parse the same list on every call to _extract_snapshot_for_hour.
@@ -693,17 +734,24 @@ class WeatherService:
         the observer is looking.
         """
         cache_key = TTLCache.make_key(
-            "corridor", *self._ckey_coords(lat, lon), str(target_date)
+            "corridor", *self._ckey_coords(lat, lon), self._evening_key(lat, lon, target_date)
         )
         window_over = sunset_time + _WINDOW_END_AFTER_SUNSET < datetime.now(UTC)
-        today_utc = datetime.now(UTC).date()
+        # Which data holds the evening goes by the UTC day it sets on.
+        sunset_day = sunset_time.date()
+        today = datetime.now(UTC).date()
         # Same model rule as the fetch below: icon_seamless within its horizon.
         on_icon = (
-            target_date >= today_utc
-            and _forecast_fetch_days(sunset_time, today_utc) == ICON_SEAMLESS_MAX_DAYS
+            sunset_day >= today
+            and _forecast_fetch_days(sunset_time, today) == ICON_SEAMLESS_MAX_DAYS
         )
-        daily = on_icon and (target_date - today_utc).days > _CORRIDOR_LIVE_DAYS
-        tonight = target_date in (today_utc, local_sunset_date(lat, lon))
+        # Counted in evenings from /forecast's first: tonight and tomorrow are
+        # live wherever the location is.
+        daily = (
+            on_icon
+            and (target_date - first_forecast_date(lat, lon)).days > _CORRIDOR_LIVE_DAYS
+        )
+        tonight = target_date in tonight_dates(lat, lon)
         since = 0.0
         if on_icon:
             since = (
@@ -718,13 +766,8 @@ class WeatherService:
             return cached
 
         try:
-            today = datetime.now(UTC).date()
-            days_ago = (today - target_date).days
+            days_ago = (today - sunset_day).days
             azimuth = self._astro.get_sunset_azimuth(lat, lon, target_date)
-            on_icon = (
-                target_date >= today
-                and _forecast_fetch_days(sunset_time, today) == ICON_SEAMLESS_MAX_DAYS
-            )
             if daily:
                 azimuth = round(azimuth / _CORRIDOR_AZIMUTH_STEP_DEG) * _CORRIDOR_AZIMUTH_STEP_DEG
             points = [
@@ -762,9 +805,9 @@ class WeatherService:
                     # it ends before this evening: fetch it (once, however many
                     # readers are waiting — an infinite `since` forces a miss).
                     raw = await self._shared_fetch(raw_key, build, since=math.inf)
-            elif target_date < today and days_ago > 7:
-                raw = await self._fetch_archive_raw_multi(lats, lons, target_date)
-            elif target_date < today:
+            elif sunset_day < today and days_ago > 7:
+                raw = await self._fetch_archive_raw_multi(lats, lons, sunset_day)
+            elif sunset_day < today:
                 raw = await self._fetch_forecast_raw_multi(
                     lats, lons, days=2, past_days=days_ago + 1
                 )
@@ -836,16 +879,17 @@ class WeatherService:
             return {}
 
         today = datetime.now(UTC).date()
+        sunsets = {d: self._astro.get_sunset_time(lat, lon, d) for d in set(dates)}
 
-        # Today and later: exactly /predict's corridor for each evening (its
-        # own sunset azimuth and model), so a forecast day and a single-date
-        # prediction for it cannot disagree. Sequential on purpose: dates
-        # whose azimuths round alike share one fetch, which concurrent misses
-        # would each pay for.
+        # Setting today (UTC) and later: exactly /predict's corridor for each
+        # evening (its own sunset azimuth and model), so a forecast day and a
+        # single-date prediction for it cannot disagree. Sequential on
+        # purpose: dates whose azimuths round alike share one fetch, which
+        # concurrent misses would each pay for.
         out: dict[date, list[tuple[float, float, float]]] = {}
-        forecast_dates = sorted(x for x in set(dates) if x >= today)
+        forecast_dates = sorted(x for x in sunsets if sunsets[x].date() >= today)
         for d, samples in zip(forecast_dates, await collect(*(
-            self.get_corridor_samples(lat, lon, d, self._astro.get_sunset_time(lat, lon, d))
+            self.get_corridor_samples(lat, lon, d, sunsets[d])
             for d in forecast_dates
         ))):
             if samples:
@@ -853,7 +897,7 @@ class WeatherService:
 
         by_month: dict[tuple[int, int], list[date]] = {}
         for d in dates:
-            if d < today:
+            if sunsets[d].date() < today:
                 by_month.setdefault((d.year, d.month), []).append(d)
 
         async def one_month(year: int, month: int, group: list[date]) -> dict:
@@ -861,18 +905,22 @@ class WeatherService:
             wanted = set(group)
             first = date(year, month, 1)
             last = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
-            if last < today - timedelta(days=8) and _share_whole_month(len(group), last.day):
+            if (
+                self._sunset_day(lat, lon, last) < today - timedelta(days=8)
+                and _share_whole_month(len(group), last.day)
+            ):
                 # A complete archive month, mostly needed: computed for the
                 # WHOLE month (same azimuth, same request) so the heatmap and
                 # the climatology share one entry.
                 group = [first + timedelta(days=i) for i in range((last - first).days + 1)]
                 cache_key = TTLCache.make_key(
                     "corridor_month_full", *self._ckey_coords(lat, lon), year, month,
+                    *self._shifted(lat, lon, group),
                 )
             else:
                 cache_key = TTLCache.make_key(
                     "corridor_month", *self._ckey_coords(lat, lon), year, month,
-                    str(group[0]), str(group[-1]),
+                    str(group[0]), str(group[-1]), *self._shifted(lat, lon, group),
                 )
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -895,11 +943,12 @@ class WeatherService:
                 return {d: v for d, v in (stale or {}).items() if d in wanted}
 
             # Archive months are immutable; give them a long TTL.
-            is_past = group[-1] < today - timedelta(days=8)
+            last_day = self._sunset_day(lat, lon, group[-1])
+            is_past = last_day < today - timedelta(days=8)
             self._cache.set(
                 cache_key, month_map,
                 ttl_override=_ARCHIVE_MONTH_TTL_SECONDS if is_past
-                else _settled_ttl(group[-1]),
+                else _settled_ttl(last_day),
             )
             return {d: v for d, v in month_map.items() if d in wanted}
 
@@ -925,8 +974,9 @@ class WeatherService:
         lats = ",".join(f"{p[1]:.4f}" for p in points)
         lons = ",".join(f"{p[2]:.4f}" for p in points)
 
+        # The UTC days the evenings set on, which is what the rows are in.
         today = datetime.now(UTC).date()
-        start, end = group[0], group[-1]
+        start, end = self._sunset_day(lat, lon, group[0]), self._sunset_day(lat, lon, group[-1])
 
         if end < today - timedelta(days=7):
             raw = await self._fetch_archive_range_raw_multi(lats, lons, start, end)
@@ -1007,15 +1057,16 @@ class WeatherService:
         return await self._get_json(url, params)
 
     async def _fetch_archive_raw_multi(
-        self, lats: str, lons: str, target_date: date
+        self, lats: str, lons: str, day: date
     ) -> Any:
+        """One UTC *day* of archive rows."""
         url = f"{self._settings.OPEN_METEO_ARCHIVE_URL}/archive"
         params = {
             "latitude": lats,
             "longitude": lons,
             "hourly": CORRIDOR_HOURLY_VARS,
-            "start_date": str(target_date),
-            "end_date": str(target_date),
+            "start_date": str(day),
+            "end_date": str(day),
             "timezone": "UTC",
         }
         return await self._get_json(url, params)
@@ -1025,7 +1076,7 @@ class WeatherService:
     ) -> WeatherSnapshot:
         """Fetch a historical weather snapshot from the Open-Meteo archive."""
         sunset_time = self._astro.get_sunset_time(lat, lon, target_date)
-        return await self._fetch_archive_snapshot(lat, lon, target_date, sunset_time)
+        return await self._fetch_archive_snapshot(lat, lon, sunset_time)
 
     async def get_historical_range_windows(
         self,
@@ -1043,7 +1094,13 @@ class WeatherService:
                             the heatmap and the climatology build — share it
           - days_ago <= 7 → forecast API with past_days (same as get_window_snapshots)
         """
-        cache_key = TTLCache.make_key("hist_range_windows", *self._ckey_coords(lat, lon), str(start_date), str(end_date))
+        days = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
+        # The rows are in UTC days: each evening is read on the day it sets.
+        sunset_day = {d: self._sunset_day(lat, lon, d) for d in days}
+        cache_key = TTLCache.make_key(
+            "hist_range_windows", *self._ckey_coords(lat, lon), str(start_date), str(end_date),
+            *self._shifted(lat, lon, days),
+        )
         cached = self._cache.get(cache_key)
         if cached is not None:
             logger.debug(
@@ -1060,8 +1117,11 @@ class WeatherService:
         # per calendar month for _ARCHIVE_MONTH_TTL_SECONDS — long enough for
         # the durable tier, so a restart doesn't re-extract every past day.
         # Only the days not covered by a cached month are built below.
-        days = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
-        months = _complete_months(start_date, end_date, archive_boundary)
+        last_archive_evening = max(
+            (d for d in days if sunset_day[d] <= archive_boundary),
+            default=start_date - timedelta(days=1),
+        )
+        months = _complete_months(start_date, end_date, last_archive_evening)
         by_day: dict[date, list[WeatherSnapshot]] = {}
         cached_months: set[date] = set()
         for first, _ in months:
@@ -1070,13 +1130,16 @@ class WeatherService:
                 by_day.update(hit)
                 cached_months.add(first)
         # Archive data never changes; recent forecast data only until it settles.
-        range_ttl = 86400 if end_date <= archive_boundary else _settled_ttl(end_date)
+        range_ttl = (
+            86400 if sunset_day[end_date] <= archive_boundary
+            else _settled_ttl(sunset_day[end_date])
+        )
         missing = [d for d in days if d not in by_day]
         if not missing:
             results = [(d, by_day[d]) for d in days]
             self._cache.set(cache_key, results, ttl_override=range_ttl)
             return results
-        fetch_start, fetch_end = missing[0], missing[-1]
+        fetch_start, fetch_end = sunset_day[missing[0]], sunset_day[missing[-1]]
 
         # One bulk archive fetch for the old portion, plus one bulk aerosol
         # fetch covering the same span — measured AOD for historical days, so
@@ -1130,7 +1193,7 @@ class WeatherService:
 
         for current in missing:
             try:
-                days_ago = (today - current).days
+                days_ago = (today - sunset_day[current]).days
                 if days_ago <= 7:
                     weather_data, aq_data = recent_weather, recent_aq
                     data_source = "forecast"
@@ -1180,7 +1243,7 @@ class WeatherService:
     # ------------------------------------------------------------------
 
     async def _fetch_forecast_snapshot(
-        self, lat: float, lon: float, target_date: date, sunset_time: datetime
+        self, lat: float, lon: float, sunset_time: datetime
     ) -> WeatherSnapshot:
         weather_data, aq_data = await self._fetch_forecast_for(
             lat, lon, sunset_time, datetime.now(UTC).date()
@@ -1188,7 +1251,7 @@ class WeatherService:
         return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time, "forecast")
 
     async def _fetch_recent_past_snapshot(
-        self, lat: float, lon: float, target_date: date, sunset_time: datetime, days_ago: int
+        self, lat: float, lon: float, sunset_time: datetime, days_ago: int
     ) -> WeatherSnapshot:
         """Use the forecast endpoint with past_days for dates within the last 7 days.
 
@@ -1200,13 +1263,14 @@ class WeatherService:
         return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time, "forecast")
 
     async def _fetch_archive_snapshot(
-        self, lat: float, lon: float, target_date: date, sunset_time: datetime
+        self, lat: float, lon: float, sunset_time: datetime
     ) -> WeatherSnapshot:
-        weather_data = await self._fetch_archive_raw(lat, lon, target_date)
+        day = sunset_time.date()
+        weather_data = await self._fetch_archive_raw(lat, lon, day)
         # Measured aerosol, same as every other path — otherwise a past date is
         # scored with the humidity proxy while the climatology it is ranked
         # against used real AOD.
-        aq_data = await self._fetch_air_quality_range_raw(lat, lon, target_date, target_date)
+        aq_data = await self._fetch_air_quality_range_raw(lat, lon, day, day)
         return self._extract_snapshot_for_hour(weather_data, aq_data, lat, lon, sunset_time, "archive")
 
     async def get_ensemble_cloud_spread(
@@ -1242,7 +1306,7 @@ class WeatherService:
         now = datetime.now(UTC)
         in_range = [
             (d, st) for d, st in targets
-            if 0 <= (d - now.date()).days <= ICON_SEAMLESS_MAX_DAYS
+            if 0 <= (st.date() - now.date()).days <= ICON_SEAMLESS_MAX_DAYS
         ]
 
         # An evening whose window is over keeps the spread it was last given
@@ -1252,7 +1316,9 @@ class WeatherService:
         pending: list[tuple[date, datetime]] = []
         for d, st in in_range:
             frozen = (
-                self._cache.get_stale(TTLCache.make_key("ensemble_day", *coords, str(d)))
+                self._cache.get_stale(
+                    TTLCache.make_key("ensemble_day", *coords, self._evening_key(lat, lon, d))
+                )
                 if st + _WINDOW_END_AFTER_SUNSET < now else None
             )
             if frozen is not None:
@@ -1307,7 +1373,7 @@ class WeatherService:
             variance = sum((m - mean) ** 2 for m in members) / len(members)
             out[d] = variance ** 0.5
             self._cache.set(
-                TTLCache.make_key("ensemble_day", *coords, str(d)), out[d],
+                TTLCache.make_key("ensemble_day", *coords, self._evening_key(lat, lon, d)), out[d],
                 ttl_override=_FROZEN_TTL_SECONDS,
             )
         return out
@@ -1421,15 +1487,16 @@ class WeatherService:
         return _merge_raw(list(weather_chunks)), (_merge_raw(list(aq_chunks)) if aq_ok else None)
 
     async def _fetch_archive_raw(
-        self, lat: float, lon: float, target_date: date
+        self, lat: float, lon: float, day: date
     ) -> dict[str, Any]:
+        """One UTC *day* of archive rows."""
         url = f"{self._settings.OPEN_METEO_ARCHIVE_URL}/archive"
         params = {
             "latitude": lat,
             "longitude": lon,
             "hourly": ARCHIVE_HOURLY_VARS,
-            "start_date": str(target_date),
-            "end_date": str(target_date),
+            "start_date": str(day),
+            "end_date": str(day),
             "timezone": "UTC",
         }
         return await self._get_json(url, params)
@@ -1630,8 +1697,11 @@ class WeatherService:
     def _month_windows_key(self, lat: float, lon: float, first: date) -> str:
         # Bump _WINDOWS_CACHE_VERSION when window extraction changes, so cached
         # months built by the old code aren't served for another 30 days.
+        nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+        month = [first + timedelta(days=i) for i in range((nxt - first).days)]
         return TTLCache.make_key(
-            "archive_month_windows", _WINDOWS_CACHE_VERSION, *self._ckey_coords(lat, lon), str(first)
+            "archive_month_windows", _WINDOWS_CACHE_VERSION, *self._ckey_coords(lat, lon), str(first),
+            *self._shifted(lat, lon, month),
         )
 
     # ------------------------------------------------------------------
@@ -1969,9 +2039,9 @@ def _settled_ttl(newest_day: date) -> Optional[int]:
 def _forecast_fetch_days(sunset_time: datetime, today: date) -> int:
     """forecast_days to request for the evening setting at *sunset_time*.
 
-    Its viewing window must be inside the data: usually that is the target
-    date's own UTC day, but in the Americas the window ends after 00:00 UTC,
-    one UTC day later. Every evening whose window ends within
+    Its viewing window must be inside the data: usually that is the UTC day
+    the evening sets on, but in the Americas the window can end after
+    00:00 UTC, one UTC day later. Every evening whose window ends within
     ICON_SEAMLESS_MAX_DAYS reads the full icon_seamless horizon — the fetch
     /forecast makes (a shorter forecast_days only trims the tail; verified
     identical readings). A later evening falls back to `auto` with the days it
