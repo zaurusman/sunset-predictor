@@ -25,7 +25,7 @@ from app.services.astronomy_service import AstronomyService
 from app.services.climatology_service import ClimatologyService
 from app.services.explanation_engine import ExplanationEngine
 from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
-from app.services.weather_service import WeatherService
+from app.services.weather_service import _WINDOW_END_AFTER_SUNSET, WeatherService
 from app.utils.client_fetch import collect
 from app.utils.math_utils import clamp
 from app.utils.time_utils import local_sunset_date, utcnow
@@ -330,8 +330,15 @@ class PredictionService:
         )
 
         # Score each day concurrently using the same window algorithm as predict()
+        # — except an evening whose viewing window is over: /predict keeps the
+        # last reading from before sunset for it (see WeatherService._frozen_get),
+        # so the 7-day card reads that reading rather than rescoring the evening
+        # from a newer model run and disagreeing with Tonight.
+        now = utcnow()
         tasks = [
-            self._score_day(
+            self._frozen_day(lat, lon, d, horizon_deg)
+            if self._astro.get_sunset_time(lat, lon, d) + _WINDOW_END_AFTER_SUNSET < now
+            else self._score_day(
                 lat, lon, d, window_snaps, horizon_deg,
                 corridor_samples=corridor_map.get(d, []),
                 ensemble_spread=spread_map.get(d),
@@ -424,6 +431,21 @@ class PredictionService:
     # ------------------------------------------------------------------
     # Internal: score a single day (used by forecast)
     # ------------------------------------------------------------------
+
+    async def _frozen_day(
+        self, lat: float, lon: float, target_date: date, horizon_deg: float
+    ) -> DayForecast:
+        """An evening that is over, exactly as /predict shows it."""
+        p = await self.predict(
+            PredictRequest(
+                latitude=lat, longitude=lon, target_date=target_date,
+                horizon_obstruction_deg=horizon_deg,
+            )
+        )
+        return DayForecast(
+            date=target_date,
+            **p.model_dump(include=set(DayForecast.model_fields) - {"date"}),
+        )
 
     async def _score_day(
         self,

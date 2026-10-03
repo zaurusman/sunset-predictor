@@ -1,6 +1,8 @@
 """POST /predict endpoint — single-day sunset prediction."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException, Request
 
 from app.schemas.prediction import PredictRequest, PredictResponse
@@ -28,8 +30,12 @@ async def predict_sunset(
     - Supply `weather_override` to inject custom weather values (useful for testing).
     """
     svc = request.app.state.prediction_service
-    tonight = body.target_date is None or body.target_date == local_sunset_date(
-        body.latitude, body.longitude
+    # The location's date or the UTC date (which /forecast starts from): for a
+    # few hours around midnight they differ, and both mean this evening — the
+    # same rule as the corridor's (WeatherService.get_corridor_samples).
+    tonight = body.target_date is None or body.target_date in (
+        local_sunset_date(body.latitude, body.longitude),
+        datetime.now(timezone.utc).date(),
     )
     try:
         # Tonight's calls go first and are never held back (see call_budget).
