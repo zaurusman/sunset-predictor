@@ -112,7 +112,10 @@ export default function AppNav({ location, active, onChangeLocation }: AppNavPro
                   className="absolute inset-0 rounded-lg bg-white dark:bg-slate-800 shadow-sm"
                 />
               )}
-              <span className="relative">{tab.label}</span>
+              {/* Named so the labels stay above the moving highlight. */}
+              <span className="relative" style={{ viewTransitionName: `tab-label-${tab.id}` }}>
+                {tab.label}
+              </span>
             </Link>
           );
         })}
