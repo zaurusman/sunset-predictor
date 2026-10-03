@@ -28,7 +28,7 @@ from app.services.scoring_engine import GO_OUTSIDE_THRESHOLD, ScoringEngine
 from app.services.weather_service import _WINDOW_END_AFTER_SUNSET, WeatherService
 from app.utils.client_fetch import collect
 from app.utils.math_utils import clamp
-from app.utils.time_utils import local_sunset_date, utcnow
+from app.utils.time_utils import first_forecast_date, local_sunset_date, utcnow
 
 logger = get_logger(__name__)
 
@@ -367,8 +367,9 @@ class PredictionService:
 
     async def heatmap(self, lat: float, lon: float, months: int = 12) -> HeatmapResponse:
         """Return one scored day per calendar day for the past *months* months."""
-        today = date.today()
-        end_date = today - timedelta(days=1)  # yesterday; recent dates use forecast API, not archive
+        # Up to the evening before /forecast's first; recent dates use the
+        # forecast API, not the archive.
+        end_date = first_forecast_date(lat, lon) - timedelta(days=1)
 
         # Compute start_date as the 1st of the month N months back
         month = end_date.month - months

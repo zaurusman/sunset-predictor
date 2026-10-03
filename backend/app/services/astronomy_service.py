@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
 from astral import Observer
 from astral.sun import sun, azimuth as solar_azimuth, elevation as solar_elevation
 
 from app.core.logging import get_logger
+from app.utils.time_utils import get_timezone_for_coordinates
 
 logger = get_logger(__name__)
 
@@ -33,12 +35,16 @@ class AstronomyService:
         """
         Return a dictionary of solar event times (UTC) for the given date.
 
+        *target_date* is the location's local date: its sunset is that
+        evening's, wherever the location is. (Asked in UTC, astral returns
+        the sunset on that UTC date, which west of ~90°W is the local evening
+        before, and near 90°W some dates have none.) East of there both rules
+        give the same instant.
+
         Keys: dawn, sunrise, noon, sunset, dusk
         """
-        observer = Observer(latitude=lat, longitude=lon)
         try:
-            times = sun(observer, date=target_date, tzinfo=UTC)
-            return dict(times)
+            return dict(_local_sun_times(lat, lon, target_date))
         except Exception as exc:
             # astral raises ValueError for locations with no sunset (polar day/night)
             logger.warning(
@@ -48,7 +54,7 @@ class AstronomyService:
             return self._estimate_sun_times(lat, lon, target_date)
 
     def get_sunset_time(self, lat: float, lon: float, target_date: date) -> datetime:
-        """Return the UTC datetime of sunset for the given date."""
+        """Return the UTC datetime of sunset on the given local date."""
         times = self.get_sun_times(lat, lon, target_date)
         return times["sunset"]
 
@@ -97,7 +103,7 @@ class AstronomyService:
 
     def get_sunset_utc_hour(self, lat: float, lon: float, target_date: date) -> int:
         """
-        Return the UTC hour (0–23) of the sunset.
+        Return the UTC hour (0–23) of the sunset on the given local date.
 
         Used to select the correct hourly weather row from Open-Meteo.
         """
@@ -114,13 +120,27 @@ class AstronomyService:
         """
         Very rough fallback for polar regions where astral fails.
 
-        Sets sunset to 18:00 UTC (arbitrary but functional for weather lookup).
+        Sets sunset to 18:00 local time (arbitrary but functional for weather
+        lookup).
         """
-        base = datetime(target_date.year, target_date.month, target_date.day, tzinfo=UTC)
+        tz = get_timezone_for_coordinates(lat, lon)
+        base = datetime(target_date.year, target_date.month, target_date.day, tzinfo=tz)
         return {
-            "dawn": base.replace(hour=5),
-            "sunrise": base.replace(hour=6),
-            "noon": base.replace(hour=12),
-            "sunset": base.replace(hour=18),
-            "dusk": base.replace(hour=19),
+            "dawn": base.replace(hour=5).astimezone(UTC),
+            "sunrise": base.replace(hour=6).astimezone(UTC),
+            "noon": base.replace(hour=12).astimezone(UTC),
+            "sunset": base.replace(hour=18).astimezone(UTC),
+            "dusk": base.replace(hour=19).astimezone(UTC),
         }
+
+
+@lru_cache(maxsize=8192)
+def _local_sun_times(lat: float, lon: float, target_date: date) -> dict[str, datetime]:
+    """astral's events on *target_date* in the location's timezone, in UTC.
+
+    Memoised: the heatmap and the caches ask for the same evenings several
+    times over (a year is ~365 evenings, ~36 µs each). Callers get a copy.
+    """
+    observer = Observer(latitude=lat, longitude=lon)
+    times = sun(observer, date=target_date, tzinfo=get_timezone_for_coordinates(lat, lon))
+    return {k: v.astimezone(UTC) for k, v in times.items()}
