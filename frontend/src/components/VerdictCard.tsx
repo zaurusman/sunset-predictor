@@ -8,6 +8,7 @@ import {
   getCategoryBgColor,
   getScoreHexColor,
   isToday,
+  localToday,
 } from "@/lib/utils";
 import { useIsDark } from "@/lib/useIsDark";
 import {
@@ -30,7 +31,7 @@ interface VerdictCardProps {
  */
 function headlineFor(prediction: PredictResponse, targetDate: string): string {
   const go = prediction.go_outside_recommendation;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
 
   if (targetDate > today) return go ? "Looking promising" : "Nothing special yet";
   if (targetDate < today) return `A ${prediction.category.toLowerCase()} one`;

@@ -116,6 +116,20 @@ def test_another_date_never_hands_fetches_to_the_browser(wired):
     assert r.status_code == 503 and "client_fetch" not in r.json()
 
 
+def test_tonight_by_the_utc_date_hands_off_too(wired, monkeypatch):
+    """Between local midnight and 00:00 UTC (00:00-03:00 in Israel) the app's
+    date and the location's date differ by a day. Either one is tonight: a
+    7-day page asks for the UTC date, and it must not fail as "another date"."""
+    client, ws, fake = wired
+    today = datetime.now(timezone.utc).date()
+    monkeypatch.setattr("app.api.predict.local_sunset_date", lambda lat, lon: today - timedelta(days=1))
+    ws._settings.OPEN_METEO_SIMULATE_DAILY_LIMIT = True
+    body = {"latitude": LAT, "longitude": LON, "target_date": today.isoformat()}
+    r, rounds = _browser_loop(client, fake, "/predict", body)
+    assert r.status_code == 200, r.text
+    assert rounds
+
+
 @pytest.mark.asyncio
 async def test_browser_data_never_reaches_a_shared_in_flight_fetch():
     """A request using browser data neither starts a fetch others join, nor

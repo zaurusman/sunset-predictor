@@ -13,7 +13,7 @@ import {
   saveCachedPrediction,
   saveLocation,
 } from "@/lib/storage";
-import { freshnessLabel } from "@/lib/utils";
+import { freshnessLabel, localToday } from "@/lib/utils";
 
 import AppNav from "@/components/AppNav";
 import SupportFooter from "@/components/SupportFooter";
@@ -31,7 +31,7 @@ import RateSunset from "@/components/RateSunset";
 import ViewingCurve from "@/components/ViewingCurve";
 
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  return localToday();
 }
 
 /** A place passed in the URL by the other tabs, if there is a valid one. */
@@ -228,7 +228,7 @@ function HomeContent() {
 
           {/* Ratings are ground truth for the scoring engine, so they're only
               offered once the evening has actually happened. */}
-          {selectedDate <= new Date().toISOString().slice(0, 10) && (
+          {selectedDate <= localToday() && (
             <RateSunset
               location={location}
               targetDate={selectedDate}

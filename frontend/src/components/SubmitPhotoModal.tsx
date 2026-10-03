@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { Camera, CheckCircle, Upload, X } from "lucide-react";
 import { submitPhoto } from "@/lib/api";
+import { localToday } from "@/lib/utils";
 import { usePresence } from "@/lib/motion";
 
 interface Props {
@@ -191,7 +192,7 @@ function PhotoDialog({
                 type="date"
                 value={photoDate}
                 onChange={(e) => setPhotoDate(e.target.value)}
-                max={new Date().toISOString().slice(0, 10)}
+                max={localToday()}
                 className="w-full bg-gray-100/60 dark:bg-slate-800/60 border border-gray-200 dark:border-slate-700/50 rounded-lg px-3 py-2 text-gray-900 dark:text-white text-sm focus:outline-none focus:border-orange-500/50 transition-colors"
               />
             </div>
